@@ -31,12 +31,15 @@
    its own deadline, so one stalled response can never hold the
    priority set — and with it the map mount — hostage; a converted
    prefecture file is cross-checked against the manifest (feature
-   count and key prefix) before anything is cached, so an HTTP 200
-   carrying the wrong body counts as a failure, not as an empty
-   prefecture; and failures are not pinned for the page lifetime —
-   each file gets up to MAX_LOAD_ATTEMPTS attempts, retried by the
-   background pass and again when the browser reports it is back
-   online. */
+   count and key prefix) and every feature must carry a usable
+   Polygon/MultiPolygon geometry before anything is cached, so an
+   HTTP 200 carrying the wrong body counts as a failure, not as
+   an empty prefecture; and failures are not pinned for the page
+   lifetime — each file gets up to MAX_LOAD_ATTEMPTS attempts,
+   retried by the background pass and again when the browser
+   reports it is back online, but only while a retryable failure
+   actually exists, so a page that never started loading
+   boundaries fetches nothing on reconnect. */
 
 import { feature } from "topojson-client";
 import type { Topology } from "topojson-specification";
@@ -503,11 +506,28 @@ function startPrefectureLoad(prefName: string): Promise<boolean> {
             `boundary data mismatch for ${prefName}: ${features.length} features / ${keys.size} keys, manifest says ${entry.features}`,
           );
         }
+        /* Every feature must also carry a usable geometry. A
+           body whose keys and counts match but whose geometries
+           are null or of an unexpected type would otherwise be
+           cached as a holed prefecture and still marked loaded,
+           so the coverage check would call the country complete
+           with municipalities missing from it. One bad geometry
+           fails the whole prefecture (retry rounds apply), and
+           nothing from the body is cached. */
         for (const f of features) {
-          if (!f.geometry) continue;
-          if (f.geometry.type !== "Polygon" && f.geometry.type !== "MultiPolygon") {
-            continue;
+          const g = f.geometry;
+          if (
+            !g ||
+            (g.type !== "Polygon" && g.type !== "MultiPolygon") ||
+            !Array.isArray(g.coordinates) ||
+            g.coordinates.length === 0
+          ) {
+            throw new Error(
+              `boundary data mismatch for ${prefName}: feature ${String(f.properties?.key)} has no usable Polygon/MultiPolygon geometry`,
+            );
           }
+        }
+        for (const f of features) {
           geometryByKey.set(
             f.properties!.key!,
             f.geometry as unknown as GeoJsonGeometry,
@@ -621,13 +641,34 @@ export function loadRemainingBoundaryPrefectures(
   return remainingLoad;
 }
 
+/* True when at least one boundary file has failed and still has
+   attempts left — the only situation a recovery drive may act
+   on. A failure can only exist once a load was attempted, so
+   this also proves the boundary machinery is in use: a page
+   that never opened the visited map has nothing to retry. */
+export function hasRetryableBoundaryFailures(): boolean {
+  if (manifestState === "failed" && manifestAttempts < MAX_LOAD_ATTEMPTS) {
+    return true;
+  }
+  if (bordersState === "failed" && bordersAttempts < MAX_LOAD_ATTEMPTS) {
+    return true;
+  }
+  for (const name of failedPrefectures) {
+    if ((prefectureAttempts.get(name) ?? 0) < MAX_LOAD_ATTEMPTS) return true;
+  }
+  return false;
+}
+
 /* Re-drive everything that failed while it still has attempts
    left — the manifest and the prefecture borders included (their
    ensure functions report a failure forever once failed, so the
    failed state is lifted here first). Wired to the browser's
    "online" event below, so a connection that comes back also
-   brings the missing boundaries back. */
+   brings the missing boundaries back. With nothing retryable
+   this is a no-op: the nationwide data set is never fetched
+   speculatively. */
 export async function retryFailedBoundaryLoads(): Promise<void> {
+  if (!hasRetryableBoundaryFailures()) return;
   let lifted = false;
   if (manifestState === "failed" && manifestAttempts < MAX_LOAD_ATTEMPTS) {
     manifestState = "idle";
@@ -647,7 +688,12 @@ if (
   typeof window !== "undefined" &&
   typeof window.addEventListener === "function"
 ) {
+  /* Recovery on reconnect is limited to pages that actually
+     started loading boundaries and have a failed file to retry:
+     a page that never opened the visited map must not pull the
+     nationwide data set just because the connection came back. */
   window.addEventListener("online", () => {
+    if (!hasRetryableBoundaryFailures()) return;
     void retryFailedBoundaryLoads();
   });
 }

@@ -2369,15 +2369,48 @@ const DESIGNATED_WARDS_UNVISITED_LAYER = {
   },
 } as const;
 
-/* After the mount, background prefecture loads grow two of the
-   map's sources: the unvisited municipality outlines and the
-   unvisited designated cities' ward lines. This pushes the rebuilt
-   data into the live map (adding a source + layer first when the
-   mount had no data for it yet), keeping the boundary paint order
-   by inserting late layers below the first overlay layer that
-   already sits above them. Called on every boundary version bump;
-   a no-op until the map exists and for sources whose data the new
-   loads did not change in kind. */
+/* Prefecture border layer spec — same sharing rule as the two
+   specs above: the mount paints it from the overlay list, and
+   refreshNationwideBoundarySources reuses it when it has to add
+   the source late (the borders file failed at mount time and
+   only arrived on a retry). Paint values live with the mount's
+   overlay code comment. */
+const PREFECTURE_BORDERS_LAYER = {
+  id: "prefecture-borders-line",
+  type: "line",
+  source: "prefecture-borders",
+  layout: { "line-cap": "round", "line-join": "round" },
+  paint: {
+    "line-color": "#334155",
+    "line-opacity": ["interpolate", ["linear"], ["zoom"], 6, 0.65, 10, 0.85],
+    "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.2, 7, 1.5, 9, 1.9, 10, 2.2],
+  },
+} as const;
+
+/* Prefecture border features from the store's current lines —
+   shared by the mount and by refreshNationwideBoundarySources,
+   so borders that only arrive on a retry paint exactly what a
+   fresh mount would have painted. */
+function buildPrefectureBorderFeatures() {
+  return getPrefectureBorderLines().map((coordinates) => ({
+    type: "Feature",
+    properties: {},
+    geometry: { type: "LineString", coordinates },
+  }));
+}
+
+/* After the mount, background prefecture loads grow three of the
+   map's sources: the unvisited municipality outlines, the
+   unvisited designated cities' ward lines, and the prefecture
+   borders (whose file belongs to the priority set, so it is only
+   ever missing when it failed at mount time and lands on a
+   retry). This pushes the rebuilt data into the live map (adding
+   a source + layer first when the mount had no data for it yet),
+   keeping the boundary paint order by inserting late layers
+   below the first overlay layer that already sits above them.
+   Called on every boundary version bump; a no-op until the map
+   exists and for sources whose data the new loads did not change
+   in kind. */
 function refreshNationwideBoundarySources(
   map: MapLibreLike,
   municipalities: readonly VisitedMunicipality[],
@@ -2387,7 +2420,10 @@ function refreshNationwideBoundarySources(
   );
   const jobs: {
     sourceId: string;
-    layer: typeof UNVISITED_AREAS_LAYER | typeof DESIGNATED_WARDS_UNVISITED_LAYER;
+    layer:
+      | typeof UNVISITED_AREAS_LAYER
+      | typeof DESIGNATED_WARDS_UNVISITED_LAYER
+      | typeof PREFECTURE_BORDERS_LAYER;
     features: unknown[];
     aboveLayerIds: string[];
   }[] = [
@@ -2402,6 +2438,14 @@ function refreshNationwideBoundarySources(
       layer: DESIGNATED_WARDS_UNVISITED_LAYER,
       features: buildWardLineFeatures(visitedKeys).unvisited,
       aboveLayerIds: ["unvisited-areas-outline", "visited-areas-outline", "prefecture-borders-line", "visited-lines-casing"],
+    },
+    {
+      sourceId: "prefecture-borders",
+      layer: PREFECTURE_BORDERS_LAYER,
+      features: buildPrefectureBorderFeatures(),
+      /* Above the borders sit only the ridden lines and the
+         focus layers; anchor below whichever of those exists. */
+      aboveLayerIds: ["visited-lines-casing", "visited-focus-fill"],
     },
   ];
   for (const job of jobs) {
@@ -3635,45 +3679,9 @@ function VisitedMapSection({
           id: "prefecture-borders",
           data: {
             type: "FeatureCollection",
-            features: prefectureBorderLines.map((coordinates) => ({
-              type: "Feature",
-              properties: {},
-              geometry: { type: "LineString", coordinates },
-            })),
+            features: buildPrefectureBorderFeatures(),
           },
-          layers: [
-            {
-              id: "prefecture-borders-line",
-              type: "line",
-              source: "prefecture-borders",
-              layout: { "line-cap": "round", "line-join": "round" },
-              paint: {
-                "line-color": "#334155",
-                "line-opacity": [
-                  "interpolate",
-                  ["linear"],
-                  ["zoom"],
-                  6,
-                  0.65,
-                  10,
-                  0.85,
-                ],
-                "line-width": [
-                  "interpolate",
-                  ["linear"],
-                  ["zoom"],
-                  6,
-                  1.2,
-                  7,
-                  1.5,
-                  9,
-                  1.9,
-                  10,
-                  2.2,
-                ],
-              },
-            },
-          ],
+          layers: [PREFECTURE_BORDERS_LAYER],
         });
       }
       /* Paint order (boundary hierarchy, 2026-11-22), bottom to
@@ -3773,10 +3781,11 @@ function VisitedMapSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placesKey, riddenLinesKey, mapFailed, mapAttempt, boundarySettled]);
 
-  /* Background boundary arrivals grow the two nationwide sources
-     (unvisited outlines, unvisited ward lines) in place — no
-     remount, so the camera and the visited shapes stay put while
-     the rest of the country fills in behind them. */
+  /* Background boundary arrivals grow the nationwide sources
+     (unvisited outlines, unvisited ward lines, prefecture
+     borders) in place — no remount, so the camera and the
+     visited shapes stay put while the rest of the country fills
+     in behind them. */
   useEffect(() => {
     if (boundaryVersion === 0 || !boundarySettled) return;
     withLiveMapRef.current((map) => {
