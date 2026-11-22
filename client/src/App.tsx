@@ -6237,11 +6237,13 @@ export function App() {
   const [selectedSnapshot, setSelectedSnapshot] = useState<Spot | null>(null);
   /* Shared selection number for the detail pane (subtask 1216,
      review medium): every selection-changing operation — row tap,
-     map tap, closing the detail, deleting the shown spot — takes
-     the next number, and the async getSpot behind a map tap applies
-     its response only while its number is still the latest, so a
-     slow response can never overwrite a newer pick or reopen a
-     closed detail. */
+     map tap, closing the detail — takes the next number, and the
+     async getSpot behind a map tap applies its response only while
+     its number is still the latest, so a slow response can never
+     overwrite a newer pick or reopen a closed detail. Deleting a
+     spot does not take the next number (re-review medium): it only
+     invalidates an in-flight fetch for that same spot, so a delete
+     landing mid-fetch can never drop another spot's response. */
   const selectionSeqRef = useRef(createSelectionSequencer());
   /* Short notice for a map tap whose full row could not be fetched
      (request failed, or the spot is gone): without it the tap looks
@@ -6585,10 +6587,17 @@ export function App() {
       setDeleteError(null);
       invalidate();
       setConfirmDelete(null);
+      /* Two separate steps (re-review of subtask 1216, medium):
+         (1) invalidate an in-flight getSpot for the deleted spot
+         itself, so its response can never open a spot that is
+         gone; (2) if the detail is showing the deleted spot, close
+         it — a purely local step that takes no selection number.
+         A global next() here would also kill an unrelated fetch
+         already in flight for the next spot the reader tapped. */
+      selectionSeqRef.current.invalidateFor(variables);
       /* Deleting the spot whose detail is open closes the detail;
          the focus-restore effect then lands on a nearby row. */
       if (selectedId === variables) {
-        selectionSeqRef.current.next();
         setSelectedId(null);
         setSelectedSnapshot(null);
       }
@@ -6757,11 +6766,13 @@ export function App() {
       openDetail(onPage, pageSpots.indexOf(onPage));
       return;
     }
-    /* Take this tap's selection number before the fetch starts;
-       any later selection (another tap, a row pick, closing the
-       detail) supersedes it, and a superseded response is dropped
-       instead of overwriting the newer state. */
-    const seq = selectionSeqRef.current.next();
+    /* Take this tap's selection number before the fetch starts,
+       tagged with the spot id so deleting that one spot can
+       invalidate this request on its own; any later selection
+       (another tap, a row pick, closing the detail) supersedes it,
+       and a superseded response is dropped instead of overwriting
+       the newer state. */
+    const seq = selectionSeqRef.current.nextFor(point.id);
     clearSpotFetchNotice();
     void (async () => {
       try {
