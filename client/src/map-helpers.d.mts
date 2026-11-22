@@ -76,7 +76,10 @@ export type MapLibreLike = {
      the separate opacity-0 hit layers keep it tappable. */
   setFilter: (layerId: string, filter: unknown) => void;
   addSource: (id: string, source: Record<string, unknown>) => void;
-  addLayer: (layer: Record<string, unknown>) => void;
+  /* beforeId inserts the layer below an existing one instead of on
+     top — the boundary layers that arrive after the mount (background
+     prefecture loads) use it to keep the boundary paint order. */
+  addLayer: (layer: Record<string, unknown>, beforeId?: string) => void;
   getLayer: (id: string) => unknown;
 };
 

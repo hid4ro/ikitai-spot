@@ -1,0 +1,451 @@
+{
+ "version": 1,
+ "generated_at": "2026-11-22T16:50:36.575Z",
+ "source": {
+  "boundaries": "client/src/assets/visited-boundaries.ts (JapanCityGeoJson/N03, DP 0.0005deg, enclave fix 2026-11-22)",
+  "prefecture_borders": "client/src/assets/visited-prefecture-borders.ts (derived 2026-11-22), re-simplified DP 0.002deg"
+ },
+ "quantization": 1000000,
+ "boundaries": [
+  {
+   "pref_code": "01",
+   "pref_name": "北海道",
+   "features": 184,
+   "file": "boundaries-01.json",
+   "bytes": 637262,
+   "gzip_bytes": 243866,
+   "sha256": "5a31027f06bab40de5270b5a11a52b870edc1f4570e33ec3642bf34a2c75e7f8"
+  },
+  {
+   "pref_code": "02",
+   "pref_name": "青森県",
+   "features": 40,
+   "file": "boundaries-02.json",
+   "bytes": 134442,
+   "gzip_bytes": 52013,
+   "sha256": "6e7a5421d2529101ae520567d60ce880ac107310783174e242d006e0ee3db748"
+  },
+  {
+   "pref_code": "03",
+   "pref_name": "岩手県",
+   "features": 33,
+   "file": "boundaries-03.json",
+   "bytes": 156055,
+   "gzip_bytes": 59316,
+   "sha256": "078e715e3e4c4a68b6cf19189bf68caff22ae360af44b69004c564ad4debbbc5"
+  },
+  {
+   "pref_code": "04",
+   "pref_name": "宮城県",
+   "features": 35,
+   "file": "boundaries-04.json",
+   "bytes": 140134,
+   "gzip_bytes": 52238,
+   "sha256": "d57e03f9975b4ee9eff5b07d044f09be2e6d42d34fe2589bba8b0d877fa6432d"
+  },
+  {
+   "pref_code": "05",
+   "pref_name": "秋田県",
+   "features": 25,
+   "file": "boundaries-05.json",
+   "bytes": 100152,
+   "gzip_bytes": 38832,
+   "sha256": "a15c69b13242ede20af5320742ecff78de55caef245cf4c3b086e1c849f402bc"
+  },
+  {
+   "pref_code": "06",
+   "pref_name": "山形県",
+   "features": 35,
+   "file": "boundaries-06.json",
+   "bytes": 101904,
+   "gzip_bytes": 39278,
+   "sha256": "84354f15560a182837c9a981388f8dc63a310b7a305cff00cc3f0752c5713cf4"
+  },
+  {
+   "pref_code": "07",
+   "pref_name": "福島県",
+   "features": 59,
+   "file": "boundaries-07.json",
+   "bytes": 175884,
+   "gzip_bytes": 67828,
+   "sha256": "81490640de30e9ee1ba857c844e6b0218978abd00f1f371fb0788a937ccde4b8"
+  },
+  {
+   "pref_code": "08",
+   "pref_name": "茨城県",
+   "features": 44,
+   "file": "boundaries-08.json",
+   "bytes": 95457,
+   "gzip_bytes": 36756,
+   "sha256": "5cfa571f5a211ccbb3bb5981df05dc17ce8bc971ddaf5032b4ffb06abc4aaca5"
+  },
+  {
+   "pref_code": "09",
+   "pref_name": "栃木県",
+   "features": 25,
+   "file": "boundaries-09.json",
+   "bytes": 75299,
+   "gzip_bytes": 29164,
+   "sha256": "45eb3f617f02460e43be8900473b3cd5675c9c9b6ae420a049e9c3286014f040"
+  },
+  {
+   "pref_code": "10",
+   "pref_name": "群馬県",
+   "features": 35,
+   "file": "boundaries-10.json",
+   "bytes": 81182,
+   "gzip_bytes": 31318,
+   "sha256": "352ab0dd3633d70713fd612746b7bd71e226897347b7ee7f8effee2e705b6937"
+  },
+  {
+   "pref_code": "11",
+   "pref_name": "埼玉県",
+   "features": 63,
+   "file": "boundaries-11.json",
+   "bytes": 112066,
+   "gzip_bytes": 42287,
+   "sha256": "b3b8d847050db18666cfb2fa64a83f21919731387e820f9c079094ac42337a71"
+  },
+  {
+   "pref_code": "12",
+   "pref_name": "千葉県",
+   "features": 55,
+   "file": "boundaries-12.json",
+   "bytes": 122172,
+   "gzip_bytes": 45481,
+   "sha256": "660914e27370df9d2c073c12aee6e1ce559b2330d5182986f35be22c525987c5"
+  },
+  {
+   "pref_code": "13",
+   "pref_name": "東京都",
+   "features": 62,
+   "file": "boundaries-13.json",
+   "bytes": 86356,
+   "gzip_bytes": 31226,
+   "sha256": "205720d09988efeca7e53ef07c6b0540af5a5bbe64b3d2a1d3de05205f9ae7e2"
+  },
+  {
+   "pref_code": "14",
+   "pref_name": "神奈川県",
+   "features": 33,
+   "file": "boundaries-14.json",
+   "bytes": 93106,
+   "gzip_bytes": 35314,
+   "sha256": "a73988e94855ddb4c523f2693e1ba6ccab7174cb07dbab591b3b0683c5e0e184"
+  },
+  {
+   "pref_code": "15",
+   "pref_name": "新潟県",
+   "features": 30,
+   "file": "boundaries-15.json",
+   "bytes": 132805,
+   "gzip_bytes": 51429,
+   "sha256": "e491b59ab0e71223e2531a968cf3a1fe5c40b9df1904d8a1333d7e510536bda0"
+  },
+  {
+   "pref_code": "16",
+   "pref_name": "富山県",
+   "features": 15,
+   "file": "boundaries-16.json",
+   "bytes": 48075,
+   "gzip_bytes": 18765,
+   "sha256": "614cb1a650df7f1c09c0ca4889fb8a59830ef51de96e7bb5f172e810be936ff5"
+  },
+  {
+   "pref_code": "17",
+   "pref_name": "石川県",
+   "features": 19,
+   "file": "boundaries-17.json",
+   "bytes": 73441,
+   "gzip_bytes": 28171,
+   "sha256": "76b952c155b22ae1b5ebce166f452f8e0ec9f45dc5677417cdc701ee0476839f"
+  },
+  {
+   "pref_code": "18",
+   "pref_name": "福井県",
+   "features": 17,
+   "file": "boundaries-18.json",
+   "bytes": 64566,
+   "gzip_bytes": 24955,
+   "sha256": "903c1ce1b5a1b0bf98f3958fd4c9e44ce38479ecf71b1d18eadfcf97d0bab0b1"
+  },
+  {
+   "pref_code": "19",
+   "pref_name": "山梨県",
+   "features": 27,
+   "file": "boundaries-19.json",
+   "bytes": 57818,
+   "gzip_bytes": 22750,
+   "sha256": "1d925a4d60d21fc0670fa4bb7ca2ba2cc36c5397c9e96757e7d4d82a81212784"
+  },
+  {
+   "pref_code": "20",
+   "pref_name": "長野県",
+   "features": 77,
+   "file": "boundaries-20.json",
+   "bytes": 174587,
+   "gzip_bytes": 67398,
+   "sha256": "e76f2e39fed8f283a19b0eb56fd18cb7547f64ad8e1ca506d50c198feace564d"
+  },
+  {
+   "pref_code": "21",
+   "pref_name": "岐阜県",
+   "features": 42,
+   "file": "boundaries-21.json",
+   "bytes": 114071,
+   "gzip_bytes": 44110,
+   "sha256": "40f4734d327bbafd3ee58f1ed4eb2adc47da34f7f2cc2ab6499ae33ea9c8022d"
+  },
+  {
+   "pref_code": "22",
+   "pref_name": "静岡県",
+   "features": 35,
+   "file": "boundaries-22.json",
+   "bytes": 109855,
+   "gzip_bytes": 42133,
+   "sha256": "ebbc3e3507e5912044a54cf3c48ee79d8fa73995f1fba049fb3e7026b2a5b3fb"
+  },
+  {
+   "pref_code": "23",
+   "pref_name": "愛知県",
+   "features": 54,
+   "file": "boundaries-23.json",
+   "bytes": 122833,
+   "gzip_bytes": 47327,
+   "sha256": "ed58cb4966686cf17f6578522291639570bc2e400b695b28035383c2ea352d39"
+  },
+  {
+   "pref_code": "24",
+   "pref_name": "三重県",
+   "features": 29,
+   "file": "boundaries-24.json",
+   "bytes": 123500,
+   "gzip_bytes": 47095,
+   "sha256": "ba2aaf4370d106cf53bfccab1ddd38b3a299fd21ea38505ef5a8a19d56de48e1"
+  },
+  {
+   "pref_code": "25",
+   "pref_name": "滋賀県",
+   "features": 19,
+   "file": "boundaries-25.json",
+   "bytes": 48657,
+   "gzip_bytes": 18985,
+   "sha256": "a2295495c1f181c414f60effaca53b3a792ba23fcf2fbd75a48e96cd22936cc7"
+  },
+  {
+   "pref_code": "26",
+   "pref_name": "京都府",
+   "features": 26,
+   "file": "boundaries-26.json",
+   "bytes": 85820,
+   "gzip_bytes": 32986,
+   "sha256": "22ca5de2a95cb18a83cd0ff3b513181f6b32ee17050824fabb335f0b7388c0d8"
+  },
+  {
+   "pref_code": "27",
+   "pref_name": "大阪府",
+   "features": 43,
+   "file": "boundaries-27.json",
+   "bytes": 85779,
+   "gzip_bytes": 32768,
+   "sha256": "90efde8a1a8d8b3223cbdd690791e64997899d2b51af15c65b4159cacfa588d6"
+  },
+  {
+   "pref_code": "28",
+   "pref_name": "兵庫県",
+   "features": 41,
+   "file": "boundaries-28.json",
+   "bytes": 151280,
+   "gzip_bytes": 58054,
+   "sha256": "66f35328209ef888be2d4ad216c00efc8b629e0665cfcf22023fed0a0b470093"
+  },
+  {
+   "pref_code": "29",
+   "pref_name": "奈良県",
+   "features": 39,
+   "file": "boundaries-29.json",
+   "bytes": 71748,
+   "gzip_bytes": 27229,
+   "sha256": "82b883be7596f87c5a4b601e04dfce4574983726ef0345af86851540fc7fd354"
+  },
+  {
+   "pref_code": "30",
+   "pref_name": "和歌山県",
+   "features": 30,
+   "file": "boundaries-30.json",
+   "bytes": 101543,
+   "gzip_bytes": 38827,
+   "sha256": "9c6d35e72034586734858038ce98dce7634d432fd827cfe56d91a723112701b0"
+  },
+  {
+   "pref_code": "31",
+   "pref_name": "鳥取県",
+   "features": 19,
+   "file": "boundaries-31.json",
+   "bytes": 50977,
+   "gzip_bytes": 19756,
+   "sha256": "38702a2c83db0026dd6497aaef448256eba9d73d44233d7c46c9fde4400f6fb3"
+  },
+  {
+   "pref_code": "32",
+   "pref_name": "島根県",
+   "features": 19,
+   "file": "boundaries-32.json",
+   "bytes": 103287,
+   "gzip_bytes": 39351,
+   "sha256": "db9635ae4bb12514e40718dbf61bc5c6a7ec7d2c062e42b401d3cdff64af6324"
+  },
+  {
+   "pref_code": "33",
+   "pref_name": "岡山県",
+   "features": 27,
+   "file": "boundaries-33.json",
+   "bytes": 115446,
+   "gzip_bytes": 44612,
+   "sha256": "a0e82b43af973d256de9a70961b8a4baf156dc970a88f3d66ecc57af5e244bef"
+  },
+  {
+   "pref_code": "34",
+   "pref_name": "広島県",
+   "features": 23,
+   "file": "boundaries-34.json",
+   "bytes": 144272,
+   "gzip_bytes": 55156,
+   "sha256": "2deb22ad8d924bdf8f902815ff20ad85268370c4228ae2e8013442a8ad7cf405"
+  },
+  {
+   "pref_code": "35",
+   "pref_name": "山口県",
+   "features": 19,
+   "file": "boundaries-35.json",
+   "bytes": 127497,
+   "gzip_bytes": 48551,
+   "sha256": "b6c5f6a02425e5e947c9a5b7e3ca4359b716342f7ecf2b6974fe1c52312dd9a1"
+  },
+  {
+   "pref_code": "36",
+   "pref_name": "徳島県",
+   "features": 24,
+   "file": "boundaries-36.json",
+   "bytes": 64948,
+   "gzip_bytes": 25084,
+   "sha256": "6d72345fa27230d4604119d20923776fbdcf237b645f8e2b190544c6057a5e9e"
+  },
+  {
+   "pref_code": "37",
+   "pref_name": "香川県",
+   "features": 17,
+   "file": "boundaries-37.json",
+   "bytes": 67271,
+   "gzip_bytes": 25744,
+   "sha256": "5baa4c495735f8fc8c9ae98b278de715639c4b6b1843500535425ee24d1ce73a"
+  },
+  {
+   "pref_code": "38",
+   "pref_name": "愛媛県",
+   "features": 20,
+   "file": "boundaries-38.json",
+   "bytes": 123017,
+   "gzip_bytes": 46421,
+   "sha256": "12afa7fe6b1cdbd2a01ebc0c0ca6c1758e63f78c45b0cbcd97862f765ef53021"
+  },
+  {
+   "pref_code": "39",
+   "pref_name": "高知県",
+   "features": 34,
+   "file": "boundaries-39.json",
+   "bytes": 110367,
+   "gzip_bytes": 42401,
+   "sha256": "45ec96e22decb4147f936f292242bfe9867303b188016c2742e31b5c969d2e22"
+  },
+  {
+   "pref_code": "40",
+   "pref_name": "福岡県",
+   "features": 60,
+   "file": "boundaries-40.json",
+   "bytes": 136753,
+   "gzip_bytes": 50949,
+   "sha256": "0d205675ffb2a6978cf5c92190239969f3fa66f6923820d300d691539c379f4f"
+  },
+  {
+   "pref_code": "41",
+   "pref_name": "佐賀県",
+   "features": 20,
+   "file": "boundaries-41.json",
+   "bytes": 54814,
+   "gzip_bytes": 21264,
+   "sha256": "1ec396cf634a7126f9a39f3c970e66f27473302171ea713806182f7a2d105ca2"
+  },
+  {
+   "pref_code": "42",
+   "pref_name": "長崎県",
+   "features": 21,
+   "file": "boundaries-42.json",
+   "bytes": 253321,
+   "gzip_bytes": 94131,
+   "sha256": "bd9400956468cdad53531a4bffce7e3ac9321164cea4da230fb17d4667f40f2c"
+  },
+  {
+   "pref_code": "43",
+   "pref_name": "熊本県",
+   "features": 45,
+   "file": "boundaries-43.json",
+   "bytes": 155841,
+   "gzip_bytes": 57966,
+   "sha256": "a8a2137c5aa3c9b4ac928b2cf112482acc34be612eb2f18f69407f8e72d38e7c"
+  },
+  {
+   "pref_code": "44",
+   "pref_name": "大分県",
+   "features": 18,
+   "file": "boundaries-44.json",
+   "bytes": 94024,
+   "gzip_bytes": 36244,
+   "sha256": "a963b6305ea77598309951c8b6c2f5647c01170770910b12b149b7571dadf4b6"
+  },
+  {
+   "pref_code": "45",
+   "pref_name": "宮崎県",
+   "features": 26,
+   "file": "boundaries-45.json",
+   "bytes": 94836,
+   "gzip_bytes": 36924,
+   "sha256": "e088f237764cb27123d5da7c2ae1d12ea49c1d343d9a06f5ddf76d767f3e5e8a"
+  },
+  {
+   "pref_code": "46",
+   "pref_name": "鹿児島県",
+   "features": 43,
+   "file": "boundaries-46.json",
+   "bytes": 198008,
+   "gzip_bytes": 74611,
+   "sha256": "347fb23ea8bbcb6f309d44b3b88b57d20e79ad3925457aeebb71d5bac4876b90"
+  },
+  {
+   "pref_code": "47",
+   "pref_name": "沖縄県",
+   "features": 41,
+   "file": "boundaries-47.json",
+   "bytes": 99704,
+   "gzip_bytes": 37117,
+   "sha256": "851ec1b6bd494f2283bd2f4ea0db0105f263c1715b79f4817b2754b238361364"
+  }
+ ],
+ "prefecture_borders": {
+  "lines": 329,
+  "file": "prefecture-borders.json",
+  "bytes": 100558,
+  "gzip_bytes": 34516,
+  "sha256": "b44ee427616cedff8889984a414f351d2b72daf7ce45e61ac5e180e894714f03"
+ },
+ "totals": {
+  "boundary_files": 47,
+  "boundary_features": 1747,
+  "boundary_bytes": 5672232,
+  "boundary_gzip_bytes": 2164181,
+  "prefecture_borders_bytes": 100558,
+  "prefecture_borders_gzip_bytes": 34516,
+  "all_bytes": 5772790,
+  "all_gzip_bytes": 2198697
+ }
+}

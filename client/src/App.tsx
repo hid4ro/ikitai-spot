@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Area,
@@ -22,8 +28,18 @@ import { api, type ApiResponse } from "./api";
 import { mountMap, mountPlaceListMap } from "./map-helpers.mjs";
 import type { MapLibreLike, PlaceListMapHandle } from "./map-helpers.mjs";
 import type { GeoJsonGeometry } from "./geojson";
-import { VISITED_BOUNDARY_GEOMETRY } from "./assets/visited-boundaries";
-import { VISITED_PREFECTURE_BORDER_LINES } from "./assets/visited-prefecture-borders";
+import {
+  ensureBoundaryManifest,
+  ensurePrefectureBorders,
+  getBoundaryGeometryByKey,
+  getBoundaryVersion,
+  getPrefectureBorderLines,
+  getPrefectureMunicipalityTotals,
+  isBoundaryLoadFailed,
+  loadBoundaryPriorities,
+  loadRemainingBoundaryPrefectures,
+  subscribeBoundaryData,
+} from "./boundary-data";
 import {
   JAPAN_LINE_TOTAL,
   JAPAN_MUNICIPALITY_TOTAL,
@@ -723,19 +739,20 @@ type VisitedMunicipality =
   ApiResponse<typeof api, "listVisitedMunicipalities">["municipalities"][number];
 
 /* The municipality's real boundary for the fill: the geometry stored on
-   the row when one was supplied at recording time, else the bundled
-   boundary asset (simplified JapanCityGeoJson / 国土数値情報 N03 shapes
-   for all 47 prefectures). Null when neither exists — the map then falls
-   back to a circle at the representative point. */
+   the row when one was supplied at recording time, else the boundary
+   data (simplified JapanCityGeoJson / 国土数値情報 N03 shapes for all
+   47 prefectures, fetched per prefecture — see boundary-data.ts).
+   Null when neither exists (or that prefecture has not loaded yet) —
+   the map then falls back to a circle at the representative point. */
 function boundaryGeometryFor(m: VisitedMunicipality): GeoJsonGeometry | null {
-  return m.geometry ?? VISITED_BOUNDARY_GEOMETRY[`${m.prefecture}|${m.name}`] ?? null;
+  return m.geometry ?? getBoundaryGeometryByKey().get(`${m.prefecture}|${m.name}`) ?? null;
 }
 
 /* The municipality's representative point: the stored coordinates when
    the row has them, else the centroid of its known boundary's largest
    exterior ring. Rows recorded by the chat-side job before it supplied
    coordinates (the 2026-11-21 batch) have no stored point, but their
-   boundary is in the bundled asset — deriving the point here lets them
+   boundary is in the boundary data — deriving the point here lets them
    join the map and the numbered ledger instead of showing a bare "・".
    Null only when neither coordinates nor any boundary are known. */
 function representativePoint(
@@ -789,7 +806,7 @@ function representativePoint(
 /* Designated cities （政令指定都市）, by name — all twenty. In the
    collection a designated city counts as ONE municipality: its wards
    are not ledger entries and are never counted or named separately.
-   But the bundled geometry still carries the old ward polygons as
+   But the boundary geometry still carries the old ward polygons as
    separate MultiPolygon parts (the merge kept the parts; 千葉市 has
    8, さいたま市 11 — the wards plus harbor / enclave splits), and the
    map strokes those part outlines as thin light lines so the ward
@@ -822,22 +839,23 @@ const DESIGNATED_CITY_NAMES: ReadonlySet<string> = new Set([
   "熊本市",
 ]);
 
-/* Ward-line geometry for a designated city: ALWAYS the bundled
-   asset, keyed 「都道府県|市名」, never the ledger row's geometry.
+/* Ward-line geometry for a designated city: ALWAYS the boundary
+   data, keyed 「都道府県|市名」, never the ledger row's geometry.
    A ledger row may carry the whole city merged into a single
    Polygon (its parts collapsed), which has no ward divisions left
    to stroke — boundaryGeometryFor prefers that stored geometry, so
    sourcing the ward lines from it would erase the ward outlines
-   the moment the city is visited. The bundled asset keeps the old
+   the moment the city is visited. The boundary data keeps the old
    ward polygons as separate parts, so both the mount-time ward
    overlays and the focus ward lines read from it alone. Null for
-   non-designated cities and for designated cities the asset does
-   not cover — those simply draw no ward lines. The whole-city fill
+   non-designated cities and for designated cities the data does
+   not cover (or whose prefecture has not loaded yet) — those
+   simply draw no ward lines. The whole-city fill
    and the focus highlight are unaffected: they keep using
    boundaryGeometryFor / the tapped geometry as before. */
 function wardGeometryFor(prefecture: string, name: string): GeoJsonGeometry | null {
   if (!DESIGNATED_CITY_NAMES.has(name)) return null;
-  return VISITED_BOUNDARY_GEOMETRY[`${prefecture}|${name}`] ?? null;
+  return getBoundaryGeometryByKey().get(`${prefecture}|${name}`) ?? null;
 }
 
 /* ---------------- ridden railway lines ---------------- */
@@ -906,20 +924,17 @@ function riddenLineColor(ledgerName: string): string | null {
 
 /* ---------------- conquest charts （制覇グラフ) ---------------- */
 
-/* Per-prefecture municipality totals, counted from the bundled
-   boundary asset itself (the municipalities the fill map can paint:
-   all 47 prefectures). This is the denominator for the per-prefecture
-   progress bars — a prefecture the asset does not cover has no
+/* Per-prefecture municipality totals, from the boundary data's
+   manifest (the municipalities the fill map can paint: all 47
+   prefectures). This is the denominator for the per-prefecture
+   progress bars — a prefecture the data does not cover has no
    honest denominator here, so it is left out of that chart and
-   named in a note instead. */
-const PREFECTURE_MUNICIPALITY_TOTALS: ReadonlyMap<string, number> = (() => {
-  const map = new Map<string, number>();
-  for (const key of Object.keys(VISITED_BOUNDARY_GEOMETRY)) {
-    const pref = key.split("|")[0];
-    if (pref) map.set(pref, (map.get(pref) ?? 0) + 1);
-  }
-  return map;
-})();
+   named in a note instead. The map is the boundary store's own
+   (see boundary-data.ts): empty until the manifest lands, then
+   filled in place, and components re-read it on every render the
+   boundary version counter drives. */
+const PREFECTURE_MUNICIPALITY_TOTALS: ReadonlyMap<string, number> =
+  getPrefectureMunicipalityTotals();
 
 /* Per-operator line totals across all of Japan, counted from the
    bundled line asset (the same 597 lines behind JAPAN_LINE_TOTAL).
@@ -1616,13 +1631,13 @@ function geometryContainsPoint(geometry: GeoJsonGeometry, lng: number, lat: numb
 
 /* The municipality a point falls in, for the fill map's default
    framing (「今いる市区町村に自動で合わせる」): the ledger rows'
-   shapes are tested first (stored geometry wins over the bundled
-   asset inside boundaryGeometryFor), then every municipality in
-   the bundled boundary asset — visited or not, so a first visit to
-   a home-prefecture municipality still frames correctly. Null when
-   no known boundary contains the point (e.g. outside the three
-   cached prefectures); the caller then frames a small box around
-   the point itself. */
+   shapes are tested first (stored geometry wins over the boundary
+   data inside boundaryGeometryFor), then every municipality in
+   the boundary data loaded so far — visited or not, so a first
+   visit to a home-prefecture municipality still frames correctly.
+   Null when no known boundary contains the point (e.g. in a
+   prefecture that has not loaded yet); the caller then frames a
+   small box around the point itself. */
 function findMunicipalityAt(
   lat: number,
   lng: number,
@@ -1634,7 +1649,7 @@ function findMunicipalityAt(
       return { name: m.name, prefecture: m.prefecture, geometry };
     }
   }
-  for (const [key, geometry] of Object.entries(VISITED_BOUNDARY_GEOMETRY)) {
+  for (const [key, geometry] of getBoundaryGeometryByKey()) {
     if (!geometryContainsPoint(geometry, lng, lat)) continue;
     const sep = key.indexOf("|");
     if (sep < 0) continue;
@@ -1680,7 +1695,7 @@ const EMPTY_FOCUS_DATA = { type: "FeatureCollection", features: [] };
    walks as A → C and the next as A → B → C keys identically on
    both sides (user report, 2026-11-22: unsplit, the A → C side
    matched nothing and was stroked as a thick outer fragment inside
-   さいたま市）. Stage 2 exists because the bundled asset simplified
+   さいたま市）. Stage 2 exists because the boundary data simplified
    each ward ring independently (Douglas-Peucker, tolerance
    0.0005°): along a curvy border the two wards' copies of the same
    edge diverge by up to that tolerance and share neither endpoints
@@ -1771,7 +1786,7 @@ type RawBoundarySegment = {
   to: number[];
 };
 
-/* The classification is recomputed from the same bundled geometry
+/* The classification is recomputed from the same boundary geometry
    on every mount and focus change (the ward-line and the
    outer-boundary features each ask for it), so results are cached
    per geometry object; the returned segments are only ever read
@@ -2242,6 +2257,165 @@ function outerBoundaryLineFeatures(geometry: GeoJsonGeometry, name: string) {
    the circle layer's source only ever contains a Point feature, and
    the fill / outline layers' source only ever contains a Polygon /
    MultiPolygon, so no filter behaviour is involved at all. */
+
+/* ---------------- nationwide boundary overlays ---------------- */
+
+/* Designated-city geometries from the boundary data, keyed
+   「都道府県|市名」: the ward-line overlays and the outer-boundary
+   outlines (unvisited / visited / focus) all read the ward parts
+   from here, never from a ledger row. Only prefectures loaded so
+   far contribute — the set grows as background loads land. */
+function designatedBoundaryGeometries(): Map<string, GeoJsonGeometry> {
+  const map = new Map<string, GeoJsonGeometry>();
+  for (const [key, geometry] of getBoundaryGeometryByKey()) {
+    if (!geometry) continue;
+    const sep = key.indexOf("|");
+    if (sep < 0) continue;
+    if (DESIGNATED_CITY_NAMES.has(key.slice(sep + 1))) {
+      map.set(key, geometry);
+    }
+  }
+  return map;
+}
+
+type UnvisitedAreaFeature =
+  | ReturnType<typeof outerBoundaryLineFeatures>[number]
+  | { type: string; properties: { name: string }; geometry: GeoJsonGeometry };
+
+/* Unvisited boundaries, line-only: every municipality in the
+   boundary data loaded so far that is NOT in the ledger. Shared by
+   the map mount and by refreshNationwideBoundarySources below, so
+   a prefecture that arrives in the background paints exactly what
+   a fresh mount would have painted. A name ending in 「区」 is
+   drawn only when it is a Tokyo special ward; a designated city
+   contributes only its outer-boundary segments. */
+function buildUnvisitedAreaFeatures(
+  visitedKeys: ReadonlySet<string>,
+): UnvisitedAreaFeature[] {
+  const features: UnvisitedAreaFeature[] = [];
+  for (const [key, geometry] of getBoundaryGeometryByKey()) {
+    if (!geometry || visitedKeys.has(key)) continue;
+    const sep = key.indexOf("|");
+    if (sep < 0) continue;
+    const prefecture = key.slice(0, sep);
+    const name = key.slice(sep + 1);
+    if (name.endsWith("区") && prefecture !== "東京都") continue;
+    const label = `${prefecture} ${name}`;
+    if (DESIGNATED_CITY_NAMES.has(name)) {
+      features.push(...outerBoundaryLineFeatures(geometry, label));
+    } else {
+      features.push({
+        type: "Feature",
+        properties: { name: label },
+        geometry,
+      });
+    }
+  }
+  return features;
+}
+
+/* Ward-line features of every designated city in the loaded data,
+   split by whether the city is in the ledger. Same sharing rule as
+   buildUnvisitedAreaFeatures: mount and background refresh build
+   from this one function. */
+function buildWardLineFeatures(visitedKeys: ReadonlySet<string>): {
+  visited: ReturnType<typeof internalWardLineFeatures>;
+  unvisited: ReturnType<typeof internalWardLineFeatures>;
+} {
+  const visited: ReturnType<typeof internalWardLineFeatures> = [];
+  const unvisited: ReturnType<typeof internalWardLineFeatures> = [];
+  for (const [key, geometry] of designatedBoundaryGeometries()) {
+    const features = internalWardLineFeatures(geometry, key.replace("|", " "));
+    if (visitedKeys.has(key)) {
+      visited.push(...features);
+    } else {
+      unvisited.push(...features);
+    }
+  }
+  return { visited, unvisited };
+}
+
+/* Layer specs for the two overlays whose data grows after the
+   mount (unvisited municipality outlines, unvisited designated
+   cities' ward lines). The mount passes them to the map runtime;
+   refreshNationwideBoundarySources reuses them when it has to add
+   a source the mount could not create yet (its data was empty at
+   mount time). Paint comments live with the mount's overlay code. */
+const UNVISITED_AREAS_LAYER = {
+  id: "unvisited-areas-outline",
+  type: "line",
+  source: "unvisited-areas",
+  layout: { "line-cap": "round", "line-join": "round" },
+  minzoom: 7.5,
+  paint: {
+    "line-color": "#64748b",
+    "line-opacity": ["interpolate", ["linear"], ["zoom"], 7.5, 0.35, 9, 0.55, 10, 0.8],
+    "line-width": ["interpolate", ["linear"], ["zoom"], 7.5, 0.7, 9, 1, 10, 1.4],
+  },
+} as const;
+
+const DESIGNATED_WARDS_UNVISITED_LAYER = {
+  id: "designated-city-wards-unvisited-outline",
+  type: "line",
+  source: "designated-city-wards-unvisited",
+  layout: { "line-join": "round" },
+  paint: {
+    "line-dasharray": [4, 3],
+    "line-color": "#94a3b8",
+    "line-opacity": ["interpolate", ["linear"], ["zoom"], 9.5, 0, 10.5, 0.76],
+    "line-width": 1.05,
+  },
+} as const;
+
+/* After the mount, background prefecture loads grow two of the
+   map's sources: the unvisited municipality outlines and the
+   unvisited designated cities' ward lines. This pushes the rebuilt
+   data into the live map (adding a source + layer first when the
+   mount had no data for it yet), keeping the boundary paint order
+   by inserting late layers below the first overlay layer that
+   already sits above them. Called on every boundary version bump;
+   a no-op until the map exists and for sources whose data the new
+   loads did not change in kind. */
+function refreshNationwideBoundarySources(
+  map: MapLibreLike,
+  municipalities: readonly VisitedMunicipality[],
+): void {
+  const visitedKeys = new Set(
+    municipalities.map((m) => `${m.prefecture}|${m.name}`),
+  );
+  const jobs: {
+    sourceId: string;
+    layer: typeof UNVISITED_AREAS_LAYER | typeof DESIGNATED_WARDS_UNVISITED_LAYER;
+    features: unknown[];
+    aboveLayerIds: string[];
+  }[] = [
+    {
+      sourceId: "unvisited-areas",
+      layer: UNVISITED_AREAS_LAYER,
+      features: buildUnvisitedAreaFeatures(visitedKeys),
+      aboveLayerIds: ["visited-areas-outline", "prefecture-borders-line", "visited-lines-casing"],
+    },
+    {
+      sourceId: "designated-city-wards-unvisited",
+      layer: DESIGNATED_WARDS_UNVISITED_LAYER,
+      features: buildWardLineFeatures(visitedKeys).unvisited,
+      aboveLayerIds: ["unvisited-areas-outline", "visited-areas-outline", "prefecture-borders-line", "visited-lines-casing"],
+    },
+  ];
+  for (const job of jobs) {
+    const data = { type: "FeatureCollection", features: job.features };
+    const source = map.getSource(job.sourceId);
+    if (source) {
+      source.setData(data);
+      continue;
+    }
+    if (job.features.length === 0) continue;
+    map.addSource(job.sourceId, { type: "geojson", data });
+    const beforeId = job.aboveLayerIds.find((id) => map.getLayer(id));
+    map.addLayer({ ...job.layer }, beforeId);
+  }
+}
+
 function ensureFocusLayers(map: MapLibreLike) {
   if (!map.getSource(FOCUS_POLYGON_SOURCE_ID)) {
     map.addSource(FOCUS_POLYGON_SOURCE_ID, {
@@ -2469,7 +2643,7 @@ function setFocusGeometry(map: MapLibreLike, geometry: GeoJsonGeometry | null, m
   const outlineSource = map.getSource(FOCUS_OUTLINE_SOURCE_ID);
   if (geometry) {
     /* The whole-city highlight uses the passed geometry as before;
-       the ward lines come from the bundled asset only
+       the ward lines come from the boundary data only
        (wardGeometryFor) — the passed geometry may be the ledger
        row's merged single Polygon, which has no ward parts left.
        The outer-boundary lines come from the same asset geometry,
@@ -2562,6 +2736,58 @@ function VisitedMapSection({
   const municipalities = visitedQuery.data?.municipalities ?? [];
   const prefectures = visitedQuery.data?.prefectures ?? [];
   const totalVisited = visitedQuery.data?.total ?? 0;
+  /* Boundary data (boundary-data.ts): the version counter drives a
+     re-render whenever a prefecture file lands, so the derived
+     shapes below (mappable / shaped / circled) and the progress
+     denominators pick new boundaries up as they arrive. The map
+     mount waits for the priority set — the ledger's prefectures
+     plus the prefecture borders — to settle, so the first mount
+     already paints the visited shapes; the static preview covers
+     the pane meanwhile, exactly as it does while the basemap
+     loads. A failed priority load does not hold the mount: the
+     map mounts without the boundary layers and boundaryFailed
+     shows the discreet note under the map. */
+  const boundaryVersion = useSyncExternalStore(
+    subscribeBoundaryData,
+    getBoundaryVersion,
+    getBoundaryVersion,
+  );
+  const [boundarySettled, setBoundarySettled] = useState(false);
+  const boundaryFailed = isBoundaryLoadFailed();
+  /* The manifest and the prefecture borders do not depend on the
+     ledger; start them with the section itself. */
+  useEffect(() => {
+    void ensureBoundaryManifest();
+    void ensurePrefectureBorders();
+  }, []);
+  /* The priority prefectures follow the ledger: this (re)runs
+     whenever a new ledger lands, so a municipality recorded in a
+     prefecture that has not loaded yet pulls its boundaries in
+     too. boundarySettled flips once the first priority round
+     finishes, successfully or not. */
+  useEffect(() => {
+    if (!visitedQuery.data && !visitedQuery.isError) return;
+    const prefs = [
+      ...new Set(
+        (visitedQuery.data?.municipalities ?? []).map((m) => m.prefecture),
+      ),
+    ];
+    let cancelled = false;
+    void loadBoundaryPriorities(prefs).then(() => {
+      if (!cancelled) setBoundarySettled(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [visitedQuery.data, visitedQuery.isError]);
+  /* Once the priority set is in, the rest of the country streams
+     in behind it; refreshNationwideBoundarySources (below, on
+     every boundaryVersion bump) completes the nationwide layers
+     in place as those files land. */
+  useEffect(() => {
+    if (!boundarySettled) return;
+    void loadRemainingBoundaryPrefectures();
+  }, [boundarySettled]);
   /* Mappable = has a representative point (stored coordinates, or one
      derived from the known boundary — see representativePoint). The
      ledger number, by contrast, belongs to EVERY row: it is the row's
@@ -2888,7 +3114,7 @@ function VisitedMapSection({
      ledger yet: its name is shown under the map and its boundary gets
      the same orange highlight as a visited focus — but no ledger row
      is scrolled (there is none) and nothing is recorded as visited.
-     "unknown" is a tap outside every known boundary: the bundled
+     "unknown" is a tap outside every known boundary: the boundary data
      asset covers all of Japan, so a tap outside it (e.g. the sea)
      honestly says so instead of guessing. */
   type TappedMunicipality =
@@ -2931,7 +3157,9 @@ function VisitedMapSection({
     .map((m) => `${m.id}${boundaryGeometryFor(m) ? "g" : ""}`)
     .join(",");
 
-  /* Mount the interactive map once the rows exist. No numbered pins
+  /* Mount the interactive map once the rows exist and the priority
+     boundary set has settled (boundarySettled — until then the
+     static preview covers the pane). No numbered pins
      are drawn: zoomed out they piled up over the Kanto cluster and
      buried the painted fills, which are the actual collection. Places
      still register with the runtime (it frames the initial camera on
@@ -2942,7 +3170,7 @@ function VisitedMapSection({
      the stored static map of the same municipalities takes its
      place. */
   useEffect(() => {
-    if (mapFailed || mappable.length === 0) return;
+    if (mapFailed || !boundarySettled || mappable.length === 0) return;
     setBasemapReady(false);
     const container = mapContainerRef.current;
     if (!container) return;
@@ -2993,14 +3221,17 @@ function VisitedMapSection({
         .filter((el): el is HTMLElement => el !== null && el !== undefined);
       if (cancelled || rows.length !== mappable.length) return;
       /* The fill: real boundary polygons where a shape is known (stored
-         on the row or in the bundled boundary asset), and a circle at the
+         on the row or in the boundary data), and a circle at the
          representative point only for municipalities without one. */
       const overlays = [];
       /* Unvisited boundaries, line-only: every municipality in the
-         bundled nationwide asset (1747) that is NOT in the
+         nationwide boundary data (1747) that is NOT in the
          ledger gets its border drawn, so the reader can see where
          the not-yet-visited places are instead of guessing from
-         blank basemap. No fill — only a line, so it reads
+         blank basemap. At mount time only the prefectures loaded
+         so far contribute; refreshNationwideBoundarySources keeps
+         the layer complete as the background loads land. No fill —
+         only a line, so it reads
          as "not visited" next to the dark-green visited fills and
          never competes with them. (Paint order is not push order:
          the overlays are sorted into the boundary hierarchy's
@@ -3025,41 +3256,12 @@ function VisitedMapSection({
       const visitedKeys = new Set(
         municipalities.map((m) => `${m.prefecture}|${m.name}`),
       );
-      /* Designated-city geometries from the bundled asset, keyed
+      /* Designated-city geometries from the boundary data, keyed
          「都道府県|市名」: the ward-line overlays below and the
          outer-boundary outlines (unvisited / visited / focus) all
          read the ward parts from here, never from a ledger row. */
-      const designatedGeometries = new Map<string, GeoJsonGeometry>();
-      for (const [key, geometry] of Object.entries(VISITED_BOUNDARY_GEOMETRY)) {
-        if (!geometry) continue;
-        const sep = key.indexOf("|");
-        if (sep < 0) continue;
-        if (DESIGNATED_CITY_NAMES.has(key.slice(sep + 1))) {
-          designatedGeometries.set(key, geometry);
-        }
-      }
-      const unvisitedFeatures: (
-        | ReturnType<typeof outerBoundaryLineFeatures>[number]
-        | { type: string; properties: { name: string }; geometry: GeoJsonGeometry }
-      )[] = [];
-      for (const [key, geometry] of Object.entries(VISITED_BOUNDARY_GEOMETRY)) {
-        if (!geometry || visitedKeys.has(key)) continue;
-        const sep = key.indexOf("|");
-        if (sep < 0) continue;
-        const prefecture = key.slice(0, sep);
-        const name = key.slice(sep + 1);
-        if (name.endsWith("区") && prefecture !== "東京都") continue;
-        const label = `${prefecture} ${name}`;
-        if (DESIGNATED_CITY_NAMES.has(name)) {
-          unvisitedFeatures.push(...outerBoundaryLineFeatures(geometry, label));
-        } else {
-          unvisitedFeatures.push({
-            type: "Feature",
-            properties: { name: label },
-            geometry,
-          });
-        }
-      }
+      const designatedGeometries = designatedBoundaryGeometries();
+      const unvisitedFeatures = buildUnvisitedAreaFeatures(visitedKeys);
       if (unvisitedFeatures.length > 0) {
         overlays.push({
           id: "unvisited-areas",
@@ -3069,10 +3271,6 @@ function VisitedMapSection({
           },
           layers: [
             {
-              id: "unvisited-areas-outline",
-              type: "line",
-              source: "unvisited-areas",
-              layout: { "line-cap": "round", "line-join": "round" },
               /* Boundary hierarchy (2026-11-22): an unvisited
                  municipality's outer boundary is #64748b, ramping
                  in from zoom 7.5 (width 1.0 / opacity 0.55 at
@@ -3081,33 +3279,11 @@ function VisitedMapSection({
                  than the dashed #94a3b8 ward lines inside a
                  designated city, and weaker than the #334155
                  prefecture borders. Below 7.5 it is not drawn at
-                 all, so wide views read prefectures first. */
-              minzoom: 7.5,
-              paint: {
-                "line-color": "#64748b",
-                "line-opacity": [
-                  "interpolate",
-                  ["linear"],
-                  ["zoom"],
-                  7.5,
-                  0.35,
-                  9,
-                  0.55,
-                  10,
-                  0.8,
-                ],
-                "line-width": [
-                  "interpolate",
-                  ["linear"],
-                  ["zoom"],
-                  7.5,
-                  0.7,
-                  9,
-                  1,
-                  10,
-                  1.4,
-                ],
-              },
+                 all, so wide views read prefectures first. The
+                 spec itself is UNVISITED_AREAS_LAYER, shared with
+                 the background refresh that may add this layer
+                 after the mount. */
+              ...UNVISITED_AREAS_LAYER,
             },
           ],
         });
@@ -3159,7 +3335,7 @@ function VisitedMapSection({
            (user report, 2026-11-22). So this source holds the full
            polygon for every non-designated municipality, and for a
            designated city only its outer-boundary segments
-           (outerBoundaryLineFeatures, from the bundled asset like
+           (outerBoundaryLineFeatures, from the boundary data like
            the ward lines; the shaped geometry is the fallback for a
            city the asset does not cover), stroked with the same
            paint as before. The fill above keeps the whole geometry
@@ -3231,7 +3407,7 @@ function VisitedMapSection({
       }
       /* Designated-city ward outlines: a designated city counts as a
          single municipality (one fill, one ledger row), but its
-         bundled geometry still holds the old ward polygons as
+         boundary geometry still holds the old ward polygons as
          separate MultiPolygon parts. Stroke only the borders the
          parts share with each other (internalWardLineFeatures) as
          thin lines so the ward divisions read as information
@@ -3258,7 +3434,7 @@ function VisitedMapSection({
          and the mount effect re-runs whenever the ledger changes,
          so a city added to or removed from the ledger switches
          color with no extra wiring. The ward-line geometry comes
-         ONLY from the bundled asset (wardGeometryFor): a ledger
+         ONLY from the boundary data (wardGeometryFor): a ledger
          row's own geometry must never overwrite it, because a row
          can carry the whole city merged into a single Polygon,
          which would collapse the ward parts and leave only the
@@ -3272,16 +3448,8 @@ function VisitedMapSection({
          千葉市 still resolves to the whole city, and these layers
          are never in the tap hit-test set, so they cannot
          intercept a tap either. */
-      const visitedWardFeatures: ReturnType<typeof internalWardLineFeatures> = [];
-      const unvisitedWardFeatures: ReturnType<typeof internalWardLineFeatures> = [];
-      for (const [key, geometry] of designatedGeometries) {
-        const features = internalWardLineFeatures(geometry, key.replace("|", " "));
-        if (visitedKeys.has(key)) {
-          visitedWardFeatures.push(...features);
-        } else {
-          unvisitedWardFeatures.push(...features);
-        }
-      }
+      const { visited: visitedWardFeatures, unvisited: unvisitedWardFeatures } =
+        buildWardLineFeatures(visitedKeys);
       if (unvisitedWardFeatures.length > 0) {
         overlays.push({
           id: "designated-city-wards-unvisited",
@@ -3291,24 +3459,10 @@ function VisitedMapSection({
           },
           layers: [
             {
-              id: "designated-city-wards-unvisited-outline",
-              type: "line",
-              source: "designated-city-wards-unvisited",
-              layout: { "line-join": "round" },
-              paint: {
-                "line-dasharray": [4, 3],
-                "line-color": "#94a3b8",
-                "line-opacity": [
-                  "interpolate",
-                  ["linear"],
-                  ["zoom"],
-                  9.5,
-                  0,
-                  10.5,
-                  0.76,
-                ],
-                "line-width": 1.05,
-              },
+              /* The spec is DESIGNATED_WARDS_UNVISITED_LAYER,
+                 shared with the background refresh that may add
+                 this layer after the mount. */
+              ...DESIGNATED_WARDS_UNVISITED_LAYER,
             },
           ],
         });
@@ -3432,22 +3586,25 @@ function VisitedMapSection({
         });
       }
       /* Prefecture borders (boundary hierarchy, 2026-11-22): the
-         segments the bundled municipality geometries share with a
-         municipality of a DIFFERENT prefecture, extracted at
-         build time into visited-prefecture-borders.ts and chained
-         into continuous lines — coastlines and coverage edges,
-         where only one side has a municipality, are not included,
-         so the lines trace land borders between prefectures only.
+         segments the municipality geometries share with a
+         municipality of a DIFFERENT prefecture, extracted into
+         their own strongly simplified TopoJSON file (fetched with
+         the priority boundary set — see boundary-data.ts) and
+         chained into continuous lines — coastlines and coverage
+         edges, where only one side has a municipality, are not
+         included, so the lines trace land borders between
+         prefectures only.
          #334155, the darkest and widest of the border grays:
          width 1.2 / opacity 0.65 at zoom 6 and below (where they
          are the ONLY borders drawn), ramping to 2.2 / 0.85 at
          zoom 10. Never in the tap hit-test set. */
-      if (VISITED_PREFECTURE_BORDER_LINES.length > 0) {
+      const prefectureBorderLines = getPrefectureBorderLines();
+      if (prefectureBorderLines.length > 0) {
         overlays.push({
           id: "prefecture-borders",
           data: {
             type: "FeatureCollection",
-            features: VISITED_PREFECTURE_BORDER_LINES.map((coordinates) => ({
+            features: prefectureBorderLines.map((coordinates) => ({
               type: "Feature",
               properties: {},
               geometry: { type: "LineString", coordinates },
@@ -3568,10 +3725,28 @@ function VisitedMapSection({
     };
     // placesKey captures the municipality set plus each one's shape
     // availability; riddenLinesKey captures the resolved line set the
-    // overlay paints. mapAttempt is the automatic-retry nonce. Refs,
+    // overlay paints. mapAttempt is the automatic-retry nonce.
+    // boundarySettled gates the first mount on the priority boundary
+    // set; later boundary arrivals do NOT remount (the refresh effect
+    // below updates the nationwide sources in place). Refs,
     // index, shaped and circled are derived from those.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placesKey, riddenLinesKey, mapFailed, mapAttempt]);
+  }, [placesKey, riddenLinesKey, mapFailed, mapAttempt, boundarySettled]);
+
+  /* Background boundary arrivals grow the two nationwide sources
+     (unvisited outlines, unvisited ward lines) in place — no
+     remount, so the camera and the visited shapes stay put while
+     the rest of the country fills in behind them. */
+  useEffect(() => {
+    if (boundaryVersion === 0 || !boundarySettled) return;
+    withLiveMapRef.current((map) => {
+      try {
+        refreshNationwideBoundarySources(map, municipalitiesRef.current);
+      } catch {
+        /* a half-torn-down map may refuse; the next mount rebuilds */
+      }
+    });
+  }, [boundaryVersion, boundarySettled]);
 
   /* Runs `fn` with the live MapLibre map as soon as it exists. The map
      handle is stored at mount time, but the underlying map only appears
@@ -3680,7 +3855,7 @@ function VisitedMapSection({
            (setFocusPolygon empties the wards source when no
            features are passed). The whole-city highlight uses the
            tapped geometry, but the ward lines and the outer
-           boundary come from the bundled asset only
+           boundary come from the boundary data only
            (wardGeometryFor), shared with the visited-focus path —
            a geometry resolved through the ledger can be a merged
            single Polygon with no ward parts left. */
@@ -3790,7 +3965,7 @@ function VisitedMapSection({
         }
         /* No visited shape under the tap: test the tapped ground
            coordinate against the known boundaries (ledger shapes
-           first, then the bundled nationwide asset) — an
+           first, then the nationwide boundary data) — an
            unvisited municipality names itself instead of just
            clearing the highlight. */
         const lngLat = e?.lngLat;
@@ -4241,6 +4416,16 @@ function VisitedMapSection({
               </button>
             </div>
           )}
+          {/* Boundary data failure (see boundary-data.ts): the map
+              itself is live, but some boundary files never arrived,
+              so the affected prefectures show without their
+              boundary lines. Discreet, like the map-failure note
+              above; the console carries the detail. */}
+          {boundaryFailed && !mapFailed && mappable.length > 0 && (
+            <p className="px-4 pt-1 text-xs text-[var(--dim)]">
+              境界データの一部を読み込めなかったため、地図の境界線が一部欠けています。
+            </p>
+          )}
           </div>
 
           {/* Right under the map: the frame button, then the stats
@@ -4287,7 +4472,7 @@ function VisitedMapSection({
                   blank area names the place here (its boundary is
                   highlighted orange on the map, same as a visited
                   focus) — and says so when the tap falls outside
-                  the bundled boundary data. Cleared by the next
+                  the fetched boundary data. Cleared by the next
                   visited tap, row tap, or blank tap elsewhere. */}
               {tappedMunicipality && (
                 <p className="basis-full text-sm" role="status">
