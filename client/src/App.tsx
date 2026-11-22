@@ -52,6 +52,11 @@ import {
   buildLineKeyByName,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
 } from "./line-resolution";
+import { pollForMap, type PollForMapHandle } from "./map-attach";
+import {
+  createSelectionSequencer,
+  fallbackPhaseAfterReady,
+} from "./spot-selection";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 
 /* Input limits come from the server actions' request schemas, so the
@@ -2914,7 +2919,17 @@ function VisitedMapSection({
       setFallbackPhase("shown");
       return;
     }
-    setFallbackPhase((phase) => (phase === "shown" ? "fading" : phase));
+    /* Reduced motion: the overlay comes off the moment the basemap
+       is ready — no fade, no 600 ms linger (subtask 1216, review
+       low). The CSS-wide reduced-motion rule already collapses the
+       transition itself, but the phase timer would still keep the
+       overlay mounted and fading state alive; skip both here. */
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const next = fallbackPhaseAfterReady(reduceMotion);
+    setFallbackPhase((phase) => (phase === "shown" ? next : phase));
+    if (next === "gone") return;
     const t = setTimeout(() => setFallbackPhase("gone"), 600);
     return () => clearTimeout(t);
   }, [basemapReady]);
@@ -4452,7 +4467,7 @@ function VisitedMapSection({
               />
               {fallbackPhase !== "gone" && (
                 <div
-                  className={`pointer-events-none absolute inset-0 z-10 bg-[var(--surface-alt)] transition-opacity duration-500 ${
+                  className={`pointer-events-none absolute inset-0 z-10 bg-[var(--surface-alt)] motion-safe:transition-opacity motion-safe:duration-500 ${
                     fallbackPhase === "fading" ? "opacity-0" : "opacity-100"
                   }`}
                 >
@@ -5293,6 +5308,7 @@ function SpotListMap({
     let cancelled = false;
     let handle: PlaceListMapHandle | null = null;
     let stopWatch: (() => void) | null = null;
+    let attachPoll: PollForMapHandle | null = null;
     /* The one failure path for this mount, via the shared control
        (see VisitedMapSection): a pre-load failure remounts on the
        backoff ladder (this effect's cleanup destroys the stalled
@@ -5366,11 +5382,20 @@ function SpotListMap({
       if (!handle) failMap(MAP_FAIL_NO_HANDLE);
       if (handle) {
         mapHandleRef.current = handle;
-        let attempts = 0;
-        const attach = () => {
-          if (cancelled) return;
-          const map = handle?.getMap() ?? null;
-          if (map) {
+        /* Attach the tap listeners to the underlying map as soon as
+           it exists — with NO attempt cap. The previous poll stopped
+           after 20 tries at 150 ms (~3 s), so on a slow connection
+           the map could arrive after the poll gave up and the tap
+           listener was never registered (subtask 1216, review high).
+           The poll now runs until the map appears or this mount is
+           torn down, and the basemap watchdog below pokes it the
+           moment the basemap signals ready, so readiness itself is
+           an attach route to the CURRENT instance. The per-instance
+           guard inside attachSpotTap keeps registration single. */
+        attachPoll = pollForMap({
+          getMap: () => handle?.getMap() ?? null,
+          onMap: (map) => {
+            if (cancelled) return;
             liveMapRef.current = map;
             attachSpotTapRef.current(map);
             if (centerGetterRef) {
@@ -5384,12 +5409,8 @@ function SpotListMap({
               };
             }
             setMapReady((n) => n + 1);
-            return;
-          }
-          attempts += 1;
-          if (attempts <= 20) setTimeout(attach, 150);
-        };
-        attach();
+          },
+        });
         /* Stall watchdog, same as the fill map's: a basemap load that
            hangs on a flaky connection never reaches onUnavailable, so
            without this the pane stayed blank forever outdoors. On
@@ -5401,6 +5422,10 @@ function SpotListMap({
           () => handle?.getMap() ?? null,
           () => {
             failure.markLoaded();
+            /* The basemap arriving is also an attach signal: try to
+               register the tap listeners on the current instance
+               right now, not only whenever the poll next ticks. */
+            attachPoll?.poke();
           },
           () => failMap(MAP_FAIL_TIMEOUT),
         );
@@ -5409,6 +5434,7 @@ function SpotListMap({
     return () => {
       cancelled = true;
       stopWatch?.();
+      attachPoll?.cancel();
       if (handle && mapHandleRef.current === handle) mapHandleRef.current = null;
       if (handle) {
         liveMapRef.current = null;
@@ -6209,6 +6235,37 @@ export function App() {
      under the 未訪問 filter) drops the row out of the current page. */
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState<Spot | null>(null);
+  /* Shared selection number for the detail pane (subtask 1216,
+     review medium): every selection-changing operation — row tap,
+     map tap, closing the detail, deleting the shown spot — takes
+     the next number, and the async getSpot behind a map tap applies
+     its response only while its number is still the latest, so a
+     slow response can never overwrite a newer pick or reopen a
+     closed detail. */
+  const selectionSeqRef = useRef(createSelectionSequencer());
+  /* Short notice for a map tap whose full row could not be fetched
+     (request failed, or the spot is gone): without it the tap looks
+     exactly like the old "tap does nothing" bug. It dismisses
+     itself after a few seconds, like the save-success pill. */
+  const [spotFetchNotice, setSpotFetchNotice] = useState<string | null>(null);
+  const spotFetchNoticeTimerRef = useRef<number | null>(null);
+  const showSpotFetchNotice = useCallback((message: string) => {
+    setSpotFetchNotice(message);
+    if (spotFetchNoticeTimerRef.current !== null) {
+      window.clearTimeout(spotFetchNoticeTimerRef.current);
+    }
+    spotFetchNoticeTimerRef.current = window.setTimeout(
+      () => setSpotFetchNotice(null),
+      4000,
+    );
+  }, []);
+  const clearSpotFetchNotice = useCallback(() => {
+    if (spotFetchNoticeTimerRef.current !== null) {
+      window.clearTimeout(spotFetchNoticeTimerRef.current);
+      spotFetchNoticeTimerRef.current = null;
+    }
+    setSpotFetchNotice(null);
+  }, []);
   const sheetRef = useRef<HTMLElement | null>(null);
   const rowRefs = useRef(new Map<number, HTMLButtonElement>());
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -6531,6 +6588,7 @@ export function App() {
       /* Deleting the spot whose detail is open closes the detail;
          the focus-restore effect then lands on a nearby row. */
       if (selectedId === variables) {
+        selectionSeqRef.current.next();
         setSelectedId(null);
         setSelectedSnapshot(null);
       }
@@ -6677,6 +6735,8 @@ export function App() {
   /* ----- spot detail (phase 3) ----- */
 
   const openDetail = (spot: Spot, index: number) => {
+    selectionSeqRef.current.next();
+    clearSpotFetchNotice();
     lastRowIndexRef.current = index;
     setSelectedId(spot.id);
     setSelectedSnapshot(spot);
@@ -6697,21 +6757,36 @@ export function App() {
       openDetail(onPage, pageSpots.indexOf(onPage));
       return;
     }
+    /* Take this tap's selection number before the fetch starts;
+       any later selection (another tap, a row pick, closing the
+       detail) supersedes it, and a superseded response is dropped
+       instead of overwriting the newer state. */
+    const seq = selectionSeqRef.current.next();
+    clearSpotFetchNotice();
     void (async () => {
       try {
         const res = await api.getSpot({ id: point.id });
-        if (!res.spot) return;
+        if (!selectionSeqRef.current.isCurrent(seq)) return;
+        if (!res.spot) {
+          showSpotFetchNotice(
+            "そのスポットは見つかりませんでした（削除された可能性があります）",
+          );
+          return;
+        }
         setSelectedId(res.spot.id);
         setSelectedSnapshot(res.spot);
         if (editing && editing.id !== res.spot.id) setEditing(null);
       } catch {
-        /* a failed fetch leaves the tap unanswered; the list below
-           still opens the same spot */
+        if (!selectionSeqRef.current.isCurrent(seq)) return;
+        showSpotFetchNotice(
+          "スポットの詳細を取得できませんでした。通信状態を確認してもう一度タップしてください",
+        );
       }
     })();
   };
 
   const closeDetail = () => {
+    selectionSeqRef.current.next();
     setSelectedId(null);
     setEditing(null);
   };
@@ -7058,6 +7133,11 @@ export function App() {
               onSpotTap={openDetailFromMap}
             />
           </div>
+          {spotFetchNotice !== null && (
+            <p className="mt-2 text-sm text-[var(--signal)]" role="alert">
+              {spotFetchNotice}
+            </p>
+          )}
 
           {/* Management controls under the map, tidied into one
               compact stack (DOM order stays search → visit state →
