@@ -35,9 +35,11 @@ import {
   getBoundaryVersion,
   getPrefectureBorderLines,
   getPrefectureMunicipalityTotals,
+  isBoundaryCoverageComplete,
   isBoundaryLoadFailed,
   loadBoundaryPriorities,
   loadRemainingBoundaryPrefectures,
+  nearestBoundaryPrefectureName,
   subscribeBoundaryData,
 } from "./boundary-data";
 import {
@@ -2783,11 +2785,19 @@ function VisitedMapSection({
   /* Once the priority set is in, the rest of the country streams
      in behind it; refreshNationwideBoundarySources (below, on
      every boundaryVersion bump) completes the nationwide layers
-     in place as those files land. */
+     in place as those files land. The prefecture the reader is
+     currently in heads the background queue (it is NOT part of
+     the priority set — the mount never waits for it), so the
+     boundaries around the reader arrive first. The effect re-runs
+     when the shared Pixel position lands; the loader is shared
+     and idempotent, so a re-run costs nothing once under way. */
   useEffect(() => {
     if (!boundarySettled) return;
-    void loadRemainingBoundaryPrefectures();
-  }, [boundarySettled]);
+    const hint = deviceLoc
+      ? nearestBoundaryPrefectureName(deviceLoc.lat, deviceLoc.lng)
+      : null;
+    void loadRemainingBoundaryPrefectures(hint);
+  }, [boundarySettled, deviceLoc]);
   /* Mappable = has a representative point (stored coordinates, or one
      derived from the known boundary — see representativePoint). The
      ledger number, by contrast, belongs to EVERY row: it is the row's
@@ -2854,6 +2864,18 @@ function VisitedMapSection({
      scrolls against the pane instead of the window. */
   const ledgerPaneRef = useRef<HTMLDivElement>(null);
   const mapHandleRef = useRef<PlaceListMapHandle | null>(null);
+  /* Callbacks waiting for a live map (see withLiveMap below): a
+     waiter whose poll ran out stays registered here until a map
+     signals readiness (flushMapWaiters) or the mount is torn down
+     (cancelMapWaiters), so a call that raced a slow map is applied
+     to it late instead of being dropped. */
+  type MapWaiter = {
+    fn: (map: MapLibreLike) => void;
+    cancelled: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    retry: () => void;
+  };
+  const mapWaitersRef = useRef(new Set<MapWaiter>());
   /* The map instance the blank-tap clear listeners are attached to, and
      the camera center when the current press started (so a drag, which
      also produces a click, does not clear the highlight). */
@@ -3114,12 +3136,18 @@ function VisitedMapSection({
      ledger yet: its name is shown under the map and its boundary gets
      the same orange highlight as a visited focus — but no ledger row
      is scrolled (there is none) and nothing is recorded as visited.
-     "unknown" is a tap outside every known boundary: the boundary data
-     asset covers all of Japan, so a tap outside it (e.g. the sea)
-     honestly says so instead of guessing. */
+     A tap that hits no known boundary is one of three states, told
+     apart honestly instead of always claiming "outside the data":
+     "loading" while some prefecture files are still on their way,
+     "unavailable" when some failed to load, and "unknown" only once
+     every prefecture has arrived — the boundary data covers all of
+     Japan, so a tap outside it then (e.g. the sea) really is
+     outside. */
   type TappedMunicipality =
     | { kind: "unvisited"; name: string; prefecture: string }
-    | { kind: "unknown" };
+    | { kind: "unknown" }
+    | { kind: "loading" }
+    | { kind: "unavailable" };
   const [tappedMunicipality, setTappedMunicipality] = useState<TappedMunicipality | null>(null);
   /* Mirror of the latest ledger rows for the map tap listeners, which
      are registered once per map instance and must never read a stale
@@ -3191,6 +3219,9 @@ function VisitedMapSection({
       retryCountRef: mapRetryCountRef,
       isCancelled: () => cancelled,
       destroyMount: () => {
+        /* Pending withLiveMap waiters belonged to this mount; the
+           remount's own calls re-register what it still needs. */
+        cancelMapWaitersRef.current();
         try {
           mapHandleRef.current?.destroy();
         } catch {
@@ -3703,6 +3734,10 @@ function VisitedMapSection({
           /* The map is live: the default framing (fit to the
              municipality the reader is in) may run now. */
           setMapReady((n) => n + 1);
+          /* Anything that asked for a map before this one was
+             ready (a boundary refresh that raced the mount, most
+             often) is applied to it now, with the latest data. */
+          flushMapWaitersRef.current();
         });
         /* Stall watchdog: if the basemap never arrives (a hung style
            request on a flaky connection fires neither load nor error,
@@ -3714,6 +3749,10 @@ function VisitedMapSection({
           () => {
             failure.markLoaded();
             setBasemapReady(true);
+            /* The basemap arriving is the other "a map is ready"
+               signal: wake any waiters whose poll already ran
+               out, so late boundary data still reaches this map. */
+            flushMapWaitersRef.current();
           },
           () => failMap(MAP_FAIL_TIMEOUT),
         );
@@ -3722,6 +3761,7 @@ function VisitedMapSection({
     return () => {
       cancelled = true;
       stopWatch?.();
+      cancelMapWaitersRef.current();
     };
     // placesKey captures the municipality set plus each one's shape
     // availability; riddenLinesKey captures the resolved line set the
@@ -3750,18 +3790,36 @@ function VisitedMapSection({
 
   /* Runs `fn` with the live MapLibre map as soon as it exists. The map
      handle is stored at mount time, but the underlying map only appears
-     once the runtime is ready, so poll briefly instead of giving up. */
+     once the runtime is ready, so poll briefly first. If the poll runs
+     out with no map yet, the call is NOT dropped (the pre-2026-11-23
+     behavior, which stranded boundary refreshes that raced a slow
+     map): the waiter stays registered until flushMapWaiters retries
+     it when a map signals readiness, or the mount teardown cancels
+     it. A waiter's `fn` always reads the latest state when it finally
+     runs, so a late run applies current data, not a stale snapshot. */
   const withLiveMap = (fn: (map: MapLibreLike) => void) => {
+    const waiter: MapWaiter = {
+      fn,
+      cancelled: false,
+      timer: null,
+      retry: () => {},
+    };
+    mapWaitersRef.current.add(waiter);
     let attempts = 0;
     const tryOnce = () => {
+      if (waiter.cancelled) {
+        mapWaitersRef.current.delete(waiter);
+        return;
+      }
       const map = mapHandleRef.current?.getMap() ?? null;
       if (map) {
+        mapWaitersRef.current.delete(waiter);
         if (map.isStyleLoaded()) {
           fn(map);
         } else {
           let done = false;
           const run = () => {
-            if (done) return;
+            if (done || waiter.cancelled) return;
             done = true;
             fn(map);
           };
@@ -3771,7 +3829,16 @@ function VisitedMapSection({
         return;
       }
       attempts += 1;
-      if (attempts <= 20) setTimeout(tryOnce, 150);
+      if (attempts <= 20) {
+        waiter.timer = setTimeout(tryOnce, 150);
+      }
+      /* Poll exhausted: stay registered (see the header comment). */
+    };
+    waiter.retry = () => {
+      if (waiter.cancelled) return;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      attempts = 0;
+      tryOnce();
     };
     tryOnce();
   };
@@ -3781,6 +3848,29 @@ function VisitedMapSection({
      render. Same pattern as clearFocusRef below. */
   const withLiveMapRef = useRef(withLiveMap);
   withLiveMapRef.current = withLiveMap;
+
+  /* Wake every registered waiter: called when a map signals it is
+     ready (the mount's first live callback, the basemap watchdog),
+     so calls that arrived before the map existed are applied to it
+     now. Waiters whose map still is not there go back to polling. */
+  const flushMapWaiters = () => {
+    for (const waiter of [...mapWaitersRef.current]) waiter.retry();
+  };
+  const flushMapWaitersRef = useRef(flushMapWaiters);
+  flushMapWaitersRef.current = flushMapWaiters;
+
+  /* Drop every waiter without running it: the mount they were
+     waiting for is being torn down, and the remount re-issues
+     whatever it still needs against the fresh map. */
+  const cancelMapWaiters = () => {
+    for (const waiter of mapWaitersRef.current) {
+      waiter.cancelled = true;
+      if (waiter.timer) clearTimeout(waiter.timer);
+    }
+    mapWaitersRef.current.clear();
+  };
+  const cancelMapWaitersRef = useRef(cancelMapWaiters);
+  cancelMapWaitersRef.current = cancelMapWaiters;
 
   /* Clears the focus highlight everywhere: the ledger row emphasis and
      the orange geometry on the map. Used by the map blank-tap listener
@@ -3880,10 +3970,20 @@ function VisitedMapSection({
   showUnvisitedRef.current = showUnvisitedMunicipality;
 
   /* Map tap outside every known boundary: clear the highlight and
-     say so under the map instead of leaving the reader guessing. */
+     say so under the map instead of leaving the reader guessing.
+     Which of the three messages shows depends on the boundary
+     store's state at tap time (see the TappedMunicipality comment):
+     a prefecture that simply has not loaded yet must not read as
+     "outside the data". */
   const showUnknownTap = () => {
     clearFocusRef.current();
-    setTappedMunicipality({ kind: "unknown" });
+    if (isBoundaryCoverageComplete()) {
+      setTappedMunicipality({ kind: "unknown" });
+    } else if (isBoundaryLoadFailed()) {
+      setTappedMunicipality({ kind: "unavailable" });
+    } else {
+      setTappedMunicipality({ kind: "loading" });
+    }
   };
   const showUnknownTapRef = useRef(showUnknownTap);
   showUnknownTapRef.current = showUnknownTap;
@@ -4426,6 +4526,17 @@ function VisitedMapSection({
               境界データの一部を読み込めなかったため、地図の境界線が一部欠けています。
             </p>
           )}
+          {/* The same failure while only the static fallback can be
+              shown (or nothing is mappable yet): the reason still
+              gets its line — it must not fall out of the display
+              conditions just because the live map is not up. The
+              store retries on its own, and again when the browser
+              reports the connection is back. */}
+          {boundaryFailed && (mapFailed || mappable.length === 0) && (
+            <p className="px-4 pt-1 text-xs text-[var(--dim)]">
+              境界データの一部を読み込めませんでした。通信が戻れば自動で再取得します。
+            </p>
+          )}
           </div>
 
           {/* Right under the map: the frame button, then the stats
@@ -4484,6 +4595,10 @@ function VisitedMapSection({
                       </strong>{" "}
                       です（まだ訪問していません）
                     </>
+                  ) : tappedMunicipality.kind === "loading" ? (
+                    "この場所の市区町村はまだ分かりません（境界データを読み込み中です）"
+                  ) : tappedMunicipality.kind === "unavailable" ? (
+                    "この場所の市区町村は分かりませんでした（境界データの一部を読み込めなかったため、まだ読み込めていない地域があります）"
                   ) : (
                     "この場所の市区町村は分かりませんでした（境界データの範囲外です）"
                   )}

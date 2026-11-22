@@ -25,7 +25,18 @@
    MapLibre sources are never handed a URL: data is fetched and
    converted here, then passed to the map as objects (the CVM
    runtime's relative-URL handling inside MapLibre is unverified —
-   see the 2026-11-22 feasibility note). */
+   see the 2026-11-22 feasibility note).
+
+   Hardening (Codex review of 1148, 2026-11-23): every fetch has
+   its own deadline, so one stalled response can never hold the
+   priority set — and with it the map mount — hostage; a converted
+   prefecture file is cross-checked against the manifest (feature
+   count and key prefix) before anything is cached, so an HTTP 200
+   carrying the wrong body counts as a failure, not as an empty
+   prefecture; and failures are not pinned for the page lifetime —
+   each file gets up to MAX_LOAD_ATTEMPTS attempts, retried by the
+   background pass and again when the browser reports it is back
+   online. */
 
 import { feature } from "topojson-client";
 import type { Topology } from "topojson-specification";
@@ -155,6 +166,86 @@ type BoundaryManifest = {
   prefecture_borders: { file: string; bytes: number; sha256: string };
 };
 
+/* One anchor point per prefecture — the median boundary vertex
+   ([lng, lat]), computed from the shipped data itself. Only used
+   to guess which prefecture the reader is currently in, so the
+   background pass can fetch that file first; a wrong guess costs
+   nothing but a slightly later boundary around the reader. */
+const PREFECTURE_ANCHORS: Readonly<Record<string, readonly [number, number]>> = {
+  "01": [142.324, 43.34],
+  "02": [140.852, 40.748],
+  "03": [141.497, 39.534],
+  "04": [141.039, 38.399],
+  "05": [140.341, 39.866],
+  "06": [140.151, 38.47],
+  "07": [140.4, 37.375],
+  "08": [140.324, 36.24],
+  "09": [139.878, 36.595],
+  "10": [139.017, 36.445],
+  "11": [139.462, 35.984],
+  "12": [140.202, 35.551],
+  "13": [139.577, 35.64],
+  "14": [139.518, 35.405],
+  "15": [138.898, 37.601],
+  "16": [137.124, 36.687],
+  "17": [136.817, 37.05],
+  "18": [136.064, 35.813],
+  "19": [138.61, 35.608],
+  "20": [138.014, 36.107],
+  "21": [137.006, 35.535],
+  "22": [138.433, 34.915],
+  "23": [137.029, 35.045],
+  "24": [136.51, 34.373],
+  "25": [136.149, 35.109],
+  "26": [135.559, 35.176],
+  "27": [135.508, 34.567],
+  "28": [134.846, 34.876],
+  "29": [135.828, 34.471],
+  "30": [135.48, 33.874],
+  "31": [133.798, 35.386],
+  "32": [132.701, 35.171],
+  "33": [133.87, 34.777],
+  "34": [132.764, 34.407],
+  "35": [131.62, 34.087],
+  "36": [134.441, 33.941],
+  "37": [133.977, 34.304],
+  "38": [132.694, 33.608],
+  "39": [133.266, 33.422],
+  "40": [130.636, 33.6],
+  "41": [130.049, 33.34],
+  "42": [129.485, 33.136],
+  "43": [130.639, 32.548],
+  "44": [131.585, 33.176],
+  "45": [131.357, 32.178],
+  "46": [130.312, 31.279],
+  "47": [127.728, 26.251],
+};
+
+/* The prefecture whose anchor sits closest to a position — the
+   best available guess for "the prefecture the reader is in"
+   before any boundary data has loaded. Null until the manifest
+   (which maps codes to names) has landed. */
+export function nearestBoundaryPrefectureName(
+  lat: number,
+  lng: number,
+): string | null {
+  if (!manifest) return null;
+  let best: string | null = null;
+  let bestDistance = Infinity;
+  for (const entry of manifest.boundaries) {
+    const anchor = PREFECTURE_ANCHORS[entry.pref_code];
+    if (!anchor) continue;
+    const d =
+      (anchor[0] - lng) * (anchor[0] - lng) +
+      (anchor[1] - lat) * (anchor[1] - lat);
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = entry.pref_name;
+    }
+  }
+  return best;
+}
+
 /* ---------------- store state ---------------- */
 
 /* 「都道府県|市区町村」 → boundary geometry, filled prefecture by
@@ -180,6 +271,14 @@ let bordersState: "idle" | "loading" | "ready" | "failed" = "idle";
 const loadedPrefectures = new Set<string>();
 const failedPrefectures = new Set<string>();
 const prefectureLoads = new Map<string, Promise<boolean>>();
+
+/* Attempt budgets: a failure is retried while attempts remain
+   (see the header's failure model), then stays failed until the
+   next page load. The counters only ever grow within a page. */
+const MAX_LOAD_ATTEMPTS = 3;
+let manifestAttempts = 0;
+let bordersAttempts = 0;
+const prefectureAttempts = new Map<string, number>();
 
 let version = 0;
 const listeners = new Set<() => void>();
@@ -229,14 +328,37 @@ export function isBoundaryLoadFailed(): boolean {
   );
 }
 
+/* True once every prefecture file in the manifest has loaded, so
+   a point lookup against the geometry map is authoritative: a
+   miss then really is outside the boundary data, not just a
+   prefecture that has not arrived yet. */
+export function isBoundaryCoverageComplete(): boolean {
+  if (!manifest) return false;
+  return manifest.boundaries.every((e) => loadedPrefectures.has(e.pref_name));
+}
+
 /* ---------------- loading ---------------- */
 
+/* Every boundary fetch carries its own deadline, covering both
+   the response and the JSON body read: one stalled file must
+   never hold the priority set — and with it the map mount — or a
+   background batch hostage. 15 s is generous for the largest
+   prefecture file (~640 KB) even on a slow link, and the retry
+   rounds give a stalled file further chances. */
+const FETCH_TIMEOUT_MS = 15_000;
+
 async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`boundary data fetch failed: ${res.status} ${url}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`boundary data fetch failed: ${res.status} ${url}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 type ConvertedFeature = {
@@ -266,6 +388,7 @@ export async function ensureBoundaryManifest(): Promise<boolean> {
     return ensureBoundaryManifest();
   }
   manifestState = "loading";
+  manifestAttempts += 1;
   try {
     const data = (await fetchJson(asUrl(boundaryManifestUrl))) as BoundaryManifest;
     if (!data || !Array.isArray(data.boundaries)) {
@@ -295,6 +418,7 @@ export async function ensurePrefectureBorders(): Promise<boolean> {
     return ensurePrefectureBorders();
   }
   bordersState = "loading";
+  bordersAttempts += 1;
   try {
     const topo = (await fetchJson(asUrl(prefectureBordersUrl))) as Topology;
     const lines: number[][][] = [];
@@ -307,6 +431,11 @@ export async function ensurePrefectureBorders(): Promise<boolean> {
           lines.push(part);
         }
       }
+    }
+    /* An empty conversion is a wrong body, not a borderless
+       country: count it as a failure so the retry rounds apply. */
+    if (lines.length === 0) {
+      throw new Error("prefecture borders converted to no lines");
     }
     prefectureBorderLines = lines;
     bordersState = "ready";
@@ -325,31 +454,74 @@ export function ensurePrefectureBoundaries(prefName: string): Promise<boolean> {
   if (failedPrefectures.has(prefName)) return Promise.resolve(false);
   const existing = prefectureLoads.get(prefName);
   if (existing) return existing;
+  return startPrefectureLoad(prefName);
+}
+
+function startPrefectureLoad(prefName: string): Promise<boolean> {
   const load = (async (): Promise<boolean> => {
     try {
+      /* A manifest outage is not this prefecture's failure: it
+         neither marks the prefecture failed nor consumes one of
+         its attempts, so the prefecture still gets its full
+         budget once the manifest is back (the online-event retry
+         in retryFailedBoundaryLoads relies on this). */
       const ok = await ensureBoundaryManifest();
       if (!ok || !manifest) return false;
-      const entry = manifest.boundaries.find((e) => e.pref_name === prefName);
-      if (!entry) return false;
-      const url = PREFECTURE_FILE_URLS[entry.pref_code];
-      if (!url) return false;
-      const topo = (await fetchJson(url)) as Topology;
-      for (const f of topologyFeatures(topo)) {
-        const key = f.properties?.key;
-        if (!key || !f.geometry) continue;
-        if (f.geometry.type !== "Polygon" && f.geometry.type !== "MultiPolygon") {
-          continue;
+      prefectureAttempts.set(
+        prefName,
+        (prefectureAttempts.get(prefName) ?? 0) + 1,
+      );
+      try {
+        const entry = manifest.boundaries.find((e) => e.pref_name === prefName);
+        if (!entry) {
+          throw new Error(`prefecture not in boundary manifest: ${prefName}`);
         }
-        geometryByKey.set(key, f.geometry as unknown as GeoJsonGeometry);
+        const url = PREFECTURE_FILE_URLS[entry.pref_code];
+        if (!url) {
+          throw new Error(`no boundary file for prefecture: ${prefName}`);
+        }
+        const topo = (await fetchJson(url)) as Topology;
+        const features = topologyFeatures(topo);
+        /* Cross-check against the manifest before anything is
+           cached: a truncated or wrong body (an HTTP 200 with the
+           wrong payload happens on flaky tunnels) must count as a
+           failed load, not as an empty-but-successful prefecture.
+           Every feature must carry a key of THIS prefecture, and
+           the counts must match the manifest exactly. */
+        const keys = new Set<string>();
+        for (const f of features) {
+          const key = f.properties?.key;
+          if (!key || !key.startsWith(`${prefName}|`)) {
+            throw new Error(
+              `boundary data mismatch for ${prefName}: unexpected feature key ${String(key)}`,
+            );
+          }
+          keys.add(key);
+        }
+        if (features.length !== entry.features || keys.size !== entry.features) {
+          throw new Error(
+            `boundary data mismatch for ${prefName}: ${features.length} features / ${keys.size} keys, manifest says ${entry.features}`,
+          );
+        }
+        for (const f of features) {
+          if (!f.geometry) continue;
+          if (f.geometry.type !== "Polygon" && f.geometry.type !== "MultiPolygon") {
+            continue;
+          }
+          geometryByKey.set(
+            f.properties!.key!,
+            f.geometry as unknown as GeoJsonGeometry,
+          );
+        }
+        loadedPrefectures.add(prefName);
+        touch();
+        return true;
+      } catch (err) {
+        failedPrefectures.add(prefName);
+        console.warn(`[boundary-data] boundaries load failed: ${prefName}`, err);
+        touch();
+        return false;
       }
-      loadedPrefectures.add(prefName);
-      touch();
-      return true;
-    } catch (err) {
-      failedPrefectures.add(prefName);
-      console.warn(`[boundary-data] boundaries load failed: ${prefName}`, err);
-      touch();
-      return false;
     } finally {
       prefectureLoads.delete(prefName);
     }
@@ -376,22 +548,106 @@ export async function loadBoundaryPriorities(
   await Promise.allSettled(jobs);
 }
 
-/* Background completion: every prefecture the priority set did not
-   cover, a few at a time so the priority traffic and the basemap
-   keep the connection first. Idempotent — loaded and failed
-   prefectures are skipped, in-flight ones shared. */
-export async function loadRemainingBoundaryPrefectures(): Promise<void> {
-  const ok = await ensureBoundaryManifest();
-  if (!ok || !manifest) return;
-  const pending = manifest.boundaries
-    .map((e) => e.pref_name)
-    .filter(
-      (name) => !loadedPrefectures.has(name) && !failedPrefectures.has(name),
-    );
-  const BATCH = 4;
-  for (let i = 0; i < pending.length; i += BATCH) {
-    await Promise.allSettled(
-      pending.slice(i, i + BATCH).map((name) => ensurePrefectureBoundaries(name)),
-    );
+/* Background completion: every prefecture the priority set did
+   not cover, a few at a time so the priority traffic and the
+   basemap keep the connection first. Concurrent calls share one
+   run. `priorityPrefName` (the prefecture the reader is currently
+   in, when known) goes to the head of the queue without joining
+   the priority set — the map mount never waits for it.
+
+   A prefecture that fails is not pinned for the page lifetime:
+   after the first pass, the run retries the failed ones while
+   they still have attempts left (MAX_LOAD_ATTEMPTS in total), so
+   a transient stall recovers on its own; the online-event retry
+   below covers a longer outage. */
+let remainingLoad: Promise<void> | null = null;
+
+export function loadRemainingBoundaryPrefectures(
+  priorityPrefName?: string | null,
+): Promise<void> {
+  if (remainingLoad) return remainingLoad;
+  remainingLoad = (async (): Promise<void> => {
+    try {
+      const ok = await ensureBoundaryManifest();
+      if (!ok || !manifest) return;
+      const all = manifest.boundaries.map((e) => e.pref_name);
+      const ordered = (names: string[]): string[] => {
+        if (!priorityPrefName) return names;
+        const i = names.indexOf(priorityPrefName);
+        if (i <= 0) return names;
+        return [
+          priorityPrefName,
+          ...names.slice(0, i),
+          ...names.slice(i + 1),
+        ];
+      };
+      const BATCH = 4;
+      const runBatches = async (names: string[]): Promise<void> => {
+        for (let i = 0; i < names.length; i += BATCH) {
+          await Promise.allSettled(
+            names
+              .slice(i, i + BATCH)
+              .map((name) => ensurePrefectureBoundaries(name)),
+          );
+        }
+      };
+      await runBatches(
+        ordered(
+          all.filter(
+            (name) =>
+              !loadedPrefectures.has(name) && !failedPrefectures.has(name),
+          ),
+        ),
+      );
+      for (let round = 1; round < MAX_LOAD_ATTEMPTS; round++) {
+        const retryable = all.filter(
+          (name) =>
+            !loadedPrefectures.has(name) &&
+            failedPrefectures.has(name) &&
+            (prefectureAttempts.get(name) ?? 0) < MAX_LOAD_ATTEMPTS,
+        );
+        if (retryable.length === 0) break;
+        /* Lifting the failed mark is what lets
+           ensurePrefectureBoundaries start a fresh attempt; the
+           mark returns if the attempt fails again. */
+        for (const name of retryable) failedPrefectures.delete(name);
+        touch();
+        await runBatches(ordered(retryable));
+      }
+    } finally {
+      remainingLoad = null;
+    }
+  })();
+  return remainingLoad;
+}
+
+/* Re-drive everything that failed while it still has attempts
+   left — the manifest and the prefecture borders included (their
+   ensure functions report a failure forever once failed, so the
+   failed state is lifted here first). Wired to the browser's
+   "online" event below, so a connection that comes back also
+   brings the missing boundaries back. */
+export async function retryFailedBoundaryLoads(): Promise<void> {
+  let lifted = false;
+  if (manifestState === "failed" && manifestAttempts < MAX_LOAD_ATTEMPTS) {
+    manifestState = "idle";
+    lifted = true;
   }
+  if (bordersState === "failed" && bordersAttempts < MAX_LOAD_ATTEMPTS) {
+    bordersState = "idle";
+    lifted = true;
+  }
+  if (lifted) touch();
+  await ensureBoundaryManifest();
+  await ensurePrefectureBorders();
+  await loadRemainingBoundaryPrefectures();
+}
+
+if (
+  typeof window !== "undefined" &&
+  typeof window.addEventListener === "function"
+) {
+  window.addEventListener("online", () => {
+    void retryFailedBoundaryLoads();
+  });
 }
