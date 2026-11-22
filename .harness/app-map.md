@@ -1,0 +1,43 @@
+# Source map
+
+Source files under `~/workspace/ts-spaces/xing-kitaisupotutotong-zhi/` when this edit started, with line counts. Files marked `*` are in your context in full.
+
+- AGENTS.md (23 lines) *
+- DATA-PLAN.md (339 lines)
+- bunfig.toml (13 lines)
+- client/build.mjs (10 lines)
+- client/dist-cvm/assets/visited-map-fallback-gzd1fe9k.png (751 KB)
+- client/dist-cvm/index.html (16969 KB)
+- client/index.html (19 lines)
+- client/src/App.tsx (7423 lines)
+- client/src/api.ts (20 lines) *
+- client/src/assets/hatch-maps.css (1 lines)
+- client/src/assets/hatch-maps.d.ts (3 lines)
+- client/src/assets/hatch-maps.js (1272 KB)
+- client/src/assets/visited-boundaries.ts (10305 KB)
+- client/src/assets/visited-lines.ts (1424 KB)
+- client/src/assets/visited-map-fallback.png (751 KB)
+- client/src/assets/visited-prefecture-borders.ts (638 KB)
+- client/src/geojson.ts (13 lines)
+- client/src/globals.d.ts (9 lines)
+- client/src/main.tsx (28 lines)
+- client/src/map-helpers.d.mts (117 lines)
+- client/src/map-helpers.mjs (216 lines)
+- client/src/theme.css (210 lines) *
+- client/tsconfig.json (15 lines)
+- drizzle/0001_initial.sql (5 lines)
+- drizzle/0002_spots_and_settings_tables.sql (22 lines)
+- drizzle/0003_backfill_spot_list_name.sql (1 lines)
+- drizzle/0004_memo_tease_settings.sql (3 lines)
+- drizzle/0005_add_spot_tags.sql (1 lines)
+- drizzle/0006_add_visited_municipalities_table.sql (12 lines)
+- drizzle/0007_add_visited_municipality_geometry.sql (1 lines)
+- drizzle/0008_add_ridden_lines_table.sql (7 lines)
+- drizzle/0009_add_device_location_to_settings.sql (5 lines)
+- drizzle/0010_add_trip_context_to_ledgers.sql (3 lines)
+- package.json (29 lines)
+- server/src/actions.ts (1502 lines)
+- server/src/schema.ts (104 lines) *
+- server/tsconfig.json (14 lines)
+- space.json (8 lines) *
+- tsconfig.base.json (24 lines)

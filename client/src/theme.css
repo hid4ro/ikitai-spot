@@ -1,0 +1,210 @@
+@import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&display=swap');
+@import "./assets/hatch-maps.css";
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+  --font-display: "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f1;
+  --surface: #fdfefb;
+  --surface-alt: #e9efe4;
+  --text: #1c2420;
+  --dim: #68766b;
+  --border: #d7ded2;
+  --accent: #14532d;
+  --accent-ink: #ffffff;
+  --signal: #ea580c;
+  --signal-bg: #fff1e7;
+  --radius: 10px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101511;
+    --surface: #1a211b;
+    --surface-alt: #242e25;
+    --text: #eef3ec;
+    --dim: #9aa79c;
+    --border: #333d34;
+    --accent: #4ade80;
+    --accent-ink: #0c1a10;
+    --signal: #fb923c;
+    --signal-bg: #33200f;
+  }
+}
+
+/* Manual theme override (phase 5): the 設定 tab's 表示テーマ control
+   sets data-theme on <html>. The attribute selector outranks the
+   media-query :root above, so an explicit ライト / ダーク wins over
+   the OS setting in both directions; with no attribute (システム連動)
+   the media query decides, exactly as before. Only custom properties
+   change — no element remounts, so in-progress input, the selected
+   spot, and the list filters all survive a switch. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f1;
+  --surface: #fdfefb;
+  --surface-alt: #e9efe4;
+  --text: #1c2420;
+  --dim: #68766b;
+  --border: #d7ded2;
+  --accent: #14532d;
+  --accent-ink: #ffffff;
+  --signal: #ea580c;
+  --signal-bg: #fff1e7;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101511;
+  --surface: #1a211b;
+  --surface-alt: #242e25;
+  --text: #eef3ec;
+  --dim: #9aa79c;
+  --border: #333d34;
+  --accent: #4ade80;
+  --accent-ink: #0c1a10;
+  --signal: #fb923c;
+  --signal-bg: #33200f;
+}
+
+/* Phone tap targets: at least 32px tall. */
+@layer base {
+  button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) {
+    min-height: 2rem;
+  }
+
+  /* Keyboard focus (phase 5): a clearly visible ring on every
+     focusable element, shown only for keyboard-style focus so mouse
+     and touch users see no change. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Faint survey-contour texture for the radar panel. */
+.contour-bg {
+  background-image:
+    repeating-radial-gradient(circle at 85% 20%, transparent 0, transparent 34px, color-mix(in srgb, currentColor 9%, transparent) 34px, color-mix(in srgb, currentColor 9%, transparent) 35px),
+    repeating-radial-gradient(circle at 85% 20%, transparent 0, transparent 68px, color-mix(in srgb, currentColor 6%, transparent) 68px, color-mix(in srgb, currentColor 6%, transparent) 69px);
+}
+
+@keyframes radar-ping {
+  0% { transform: scale(0.6); opacity: 0.7; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+.radar-ping {
+  animation: radar-ping 1.8s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .radar-ping { animation: none; }
+}
+
+/* Reduced motion, widened (phase 5): on top of the targeted rules
+   (radar ping above, the sheet entrance and the skeleton shimmer
+   below / via motion-safe utilities, the map's own instant camera),
+   every remaining transition and animation — the memo-tease switch's
+   transition-colors / transition-all included — collapses to an
+   instant state change. End states are untouched: selection,
+   highlight, camera destination, and focus land exactly the same,
+   only the travel between states is removed. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Numbered pins on the visited-municipalities map (rendered by the map
+   runtime's marker callback) and the selected-row highlight. */
+.pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  border: 2px solid #ffffff;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+  cursor: pointer;
+}
+.pin--on {
+  background: var(--signal);
+  color: #ffffff;
+}
+.map-selected {
+  background: var(--surface-alt);
+}
+
+/* Spot detail bottom sheet entrance (phase 3): a spring landing with
+   a restrained overshoot. Only below xl — at xl the same element is a
+   static side pane and must not travel. Reduced motion removes the
+   travel entirely; selection, highlight, final position, and focus
+   land exactly the same. */
+@keyframes sheet-in {
+  from { transform: translateY(56px); opacity: 0.35; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@media (max-width: 1279.98px) {
+  .sheet-slide {
+    animation: sheet-in 0.45s cubic-bezier(0.3, 1.3, 0.45, 1) both;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-slide { animation: none; }
+}
+
+/* Conquest charts (Recharts): axis tick labels and legend text follow
+   the page theme. Recharts renders ticks as SVG <text> with a default
+   dark fill, which would vanish on the dark surface, so the fill is
+   set from the theme tokens here; series colors themselves are fixed
+   hues chosen to read on both surfaces. */
+.recharts-cartesian-axis-tick text {
+  fill: var(--dim);
+}
+.recharts-legend-item-text {
+  color: var(--text) !important;
+}
+
+/* Ledger row for the municipality the map flew to: a stronger emphasis
+   than the pin-selection highlight. Persistent — it stays until another
+   row is tapped, the map's empty area is tapped, or the row is
+   deleted. */
+.map-focused {
+  background: var(--signal-bg);
+  box-shadow: inset 3px 0 0 var(--signal);
+}

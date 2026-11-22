@@ -1,0 +1,8 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [],
+  "name": "行きたいスポット通知",
+  "platformVersion": 29,
+  "runtime": "typescript",
+  "slug": "xing-kitaisupotutotong-zhi"
+}
