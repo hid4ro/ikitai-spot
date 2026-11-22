@@ -2634,6 +2634,7 @@ function VisitedMapSection({
   const focusListenerMapRef = useRef<MapLibreLike | null>(null);
   const pressCenterRef = useRef<{ lng: number; lat: number } | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
+  const [basemapReady, setBasemapReady] = useState(false);
   /* Automatic recovery from a failed basemap load: a transient
      failure — a style fetch reset on a weak connection, a resource
      error the runtime classifies as fatal — no longer drops
@@ -2942,6 +2943,7 @@ function VisitedMapSection({
      place. */
   useEffect(() => {
     if (mapFailed || mappable.length === 0) return;
+    setBasemapReady(false);
     const container = mapContainerRef.current;
     if (!container) return;
     let cancelled = false;
@@ -3554,6 +3556,7 @@ function VisitedMapSection({
           () => mapHandleRef.current?.getMap() ?? null,
           () => {
             failure.markLoaded();
+            setBasemapReady(true);
           },
           () => failMap(MAP_FAIL_TIMEOUT),
         );
@@ -4164,12 +4167,35 @@ function VisitedMapSection({
               the map container inside keeps its own ref. */}
           <div className="sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1">
           {mappable.length > 0 && !mapFailed && (
-            <div
-              ref={mapContainerRef}
-              className={`${MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
-              role="img"
-              aria-label={`通った市区町村${mappable.length}件の地図`}
-            />
+            <div className="relative">
+              <div
+                ref={mapContainerRef}
+                className={`${MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
+                role="img"
+                aria-label={`通った市区町村${mappable.length}件の地図`}
+                aria-hidden={!basemapReady}
+              />
+              {!basemapReady && (
+                <div className="pointer-events-none absolute inset-0 z-10 bg-[var(--surface-alt)]">
+                  <img
+                    src={visitedMapFallbackUrl}
+                    alt=""
+                    className="h-full w-full object-contain"
+                  />
+                  <p role="status" className="absolute left-2 top-2 rounded bg-[var(--bg)] px-2 py-1 text-xs">
+                    ライブ地図を読み込み中
+                  </p>
+                  <a
+                    href="https://www.facebook.com/maps/attribution_terms"
+                    target="_blank"
+                    rel="noopener"
+                    className="pointer-events-auto absolute bottom-0 right-0 bg-[var(--bg)] px-1 text-[10px]"
+                  >
+                    © OpenStreetMap contributors, Map Data Legal Notices
+                  </a>
+                </div>
+              )}
+            </div>
           )}
           {(mapFailed || mappable.length === 0) && (
             <figure
