@@ -32,7 +32,10 @@
    priority set — and with it the map mount — hostage; a converted
    prefecture file is cross-checked against the manifest (feature
    count and key prefix) and every feature must carry a usable
-   Polygon/MultiPolygon geometry before anything is cached, so an
+   Polygon/MultiPolygon geometry — usable down to each ring
+   closing on itself with finite coordinates, so a body whose
+   polygons are hollow inside fails too — before anything is
+   cached, so an
    HTTP 200 carrying the wrong body counts as a failure, not as
    an empty prefecture; and failures are not pinned for the page
    lifetime — each file gets up to MAX_LOAD_ATTEMPTS attempts,
@@ -381,6 +384,60 @@ function topologyFeatures(topo: Topology): ConvertedFeature[] {
   return collection.features as unknown as ConvertedFeature[];
 }
 
+/* A ring is drawable only when it closes on itself with at
+   least four positions and every position is a finite
+   [lng, lat] pair. topojson-client pads a ring stitched from
+   no arc points to [null, null, null, null] — the right
+   length, but no coordinates at all — so a non-empty
+   coordinates array alone proves nothing about the inside. */
+function isDrawableRing(ring: unknown): boolean {
+  if (!Array.isArray(ring) || ring.length < 4) return false;
+  for (const pos of ring) {
+    if (
+      !Array.isArray(pos) ||
+      pos.length < 2 ||
+      typeof pos[0] !== "number" ||
+      typeof pos[1] !== "number" ||
+      !Number.isFinite(pos[0]) ||
+      !Number.isFinite(pos[1])
+    ) {
+      return false;
+    }
+  }
+  const first = ring[0] as number[];
+  const last = ring[ring.length - 1] as number[];
+  return first[0] === last[0] && first[1] === last[1];
+}
+
+/* A polygon is drawable when it has at least its exterior
+   ring and every ring it carries (exterior and holes alike)
+   is drawable. */
+function isDrawablePolygon(rings: unknown): boolean {
+  return (
+    Array.isArray(rings) && rings.length > 0 && rings.every(isDrawableRing)
+  );
+}
+
+/* A converted geometry is usable only as a Polygon or
+   MultiPolygon whose every polygon is drawable. An empty
+   polygon inside a MultiPolygon (coordinates [[]]) or a
+   padded null ring makes the whole geometry unusable, the
+   same as a null or wrong-typed geometry. */
+function hasDrawableGeometry(
+  g: { type: string; coordinates: unknown } | null,
+): boolean {
+  if (!g) return false;
+  if (g.type === "Polygon") return isDrawablePolygon(g.coordinates);
+  if (g.type === "MultiPolygon") {
+    return (
+      Array.isArray(g.coordinates) &&
+      g.coordinates.length > 0 &&
+      g.coordinates.every(isDrawablePolygon)
+    );
+  }
+  return false;
+}
+
 export async function ensureBoundaryManifest(): Promise<boolean> {
   if (manifestState === "ready") return true;
   if (manifestState === "failed") return false;
@@ -511,17 +568,18 @@ function startPrefectureLoad(prefName: string): Promise<boolean> {
            are null or of an unexpected type would otherwise be
            cached as a holed prefecture and still marked loaded,
            so the coverage check would call the country complete
-           with municipalities missing from it. One bad geometry
-           fails the whole prefecture (retry rounds apply), and
-           nothing from the body is cached. */
+           with municipalities missing from it. The check goes
+           all the way down: a geometry whose outer coordinates
+           array is non-empty can still hold no drawable polygon
+           at all — an empty ring converts to
+           [null, null, null, null] and an empty polygon inside
+           a MultiPolygon to [[]] — so every polygon must have
+           an exterior ring and every ring must close on itself
+           with finite coordinates. One bad geometry fails the
+           whole prefecture (retry rounds apply), and nothing
+           from the body is cached. */
         for (const f of features) {
-          const g = f.geometry;
-          if (
-            !g ||
-            (g.type !== "Polygon" && g.type !== "MultiPolygon") ||
-            !Array.isArray(g.coordinates) ||
-            g.coordinates.length === 0
-          ) {
+          if (!hasDrawableGeometry(f.geometry)) {
             throw new Error(
               `boundary data mismatch for ${prefName}: feature ${String(f.properties?.key)} has no usable Polygon/MultiPolygon geometry`,
             );
