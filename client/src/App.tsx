@@ -2367,8 +2367,9 @@ function ensureFocusLayers(map: MapLibreLike) {
       id: "designated-city-focus-wards-outline",
       type: "line",
       source: FOCUS_WARDS_SOURCE_ID,
-      layout: { "line-dasharray": [3, 2], "line-join": "round" },
+      layout: { "line-join": "round" },
       paint: {
+        "line-dasharray": [3, 2],
         "line-color": "#c2410c",
         "line-opacity": [
           "interpolate",
@@ -3291,8 +3292,9 @@ function VisitedMapSection({
               id: "designated-city-wards-unvisited-outline",
               type: "line",
               source: "designated-city-wards-unvisited",
-              layout: { "line-dasharray": [3, 2], "line-join": "round" },
+              layout: { "line-join": "round" },
               paint: {
+                "line-dasharray": [3, 2],
                 "line-color": "#94a3b8",
                 "line-opacity": [
                   "interpolate",
@@ -3321,8 +3323,9 @@ function VisitedMapSection({
               id: "designated-city-wards-visited-outline",
               type: "line",
               source: "designated-city-wards-visited",
-              layout: { "line-dasharray": [3, 2], "line-join": "round" },
+              layout: { "line-join": "round" },
               paint: {
+                "line-dasharray": [3, 2],
                 "line-color": "#1e7a46",
                 "line-opacity": [
                   "interpolate",
