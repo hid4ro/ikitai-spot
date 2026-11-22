@@ -1,0 +1,1 @@
+# ikitai-spot
