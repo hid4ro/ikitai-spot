@@ -8,7 +8,9 @@
 // (1) the mount handle's getMap / fitBounds / flyTo passthroughs (see
 // PlaceListMapHandle below), and (2) the worker-probe timeout Q7 raised
 // from 3 s to 10 s, so a busy main thread on a phone cannot fail the
-// probe — and with it every mount — on a slow first load.
+// probe — and with it every mount — on a slow first load. The runtime
+// also aborts the initial style request on teardown and forwards
+// runtime error details, including nonfatal resource errors.
 
 export type MapPlace = {
   label: string;
@@ -104,6 +106,7 @@ export function mountMap(
     zoom?: number;
     baseStyle?: "light" | "dark" | "grayscale";
     overlays?: MapOverlay[];
+    onResourceError?: (reason: string) => void;
   },
   /* Receives the failure reason when the helper can name one:
      `unsupported:worker` / `unsupported:webgl` from the capability
@@ -119,6 +122,7 @@ export function mountPlaceListMap(
     baseStyle?: "light" | "dark" | "grayscale";
     selectedClass?: string;
     overlays?: MapOverlay[];
+    onResourceError?: (reason: string) => void;
     /* Replaces the default numbered-pin renderer; return "" to draw
        no marker at all (the visited map does this so wide-zoom fills
        stay visible, and selects via taps on the painted shapes). */

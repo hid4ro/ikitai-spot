@@ -1307,8 +1307,10 @@ const MAP_FAIL_NO_HANDLE = "no-handle";
    exists to surface, and translating it would lose information. */
 function describeMapFailure(reason: string | null | undefined): string | null {
   if (!reason) return null;
-  if (reason === MAP_FAIL_TIMEOUT) {
-    return "時間内に地図データが届きませんでした（通信が混み合っている可能性があります）";
+  if (reason === MAP_FAIL_TIMEOUT || reason.startsWith(`${MAP_FAIL_TIMEOUT}: `)) {
+    const detail = reason.slice(MAP_FAIL_TIMEOUT.length + 2);
+    const message = "時間内に地図データが届きませんでした";
+    return detail ? `${message}（直前のリソースエラー：${detail}）` : message;
   }
   if (reason === MAP_FAIL_NO_RUNTIME) {
     return "地図エンジン本体を読み込めませんでした";
@@ -2945,6 +2947,10 @@ function VisitedMapSection({
     if (!container) return;
     let cancelled = false;
     let stopWatch: (() => void) | null = null;
+    let lastResourceError: string | undefined;
+    const onResourceError = (reason: string) => {
+      lastResourceError = reason;
+    };
     /* The one failure path for this mount — the runtime's
        fatal-error callback and the stall watchdog both land here,
        via the shared control: a pre-load failure destroys the
@@ -3524,6 +3530,7 @@ function VisitedMapSection({
           /* No pins on the map (see the mount comment above). */
           marker: () => "",
           baseStyle: "grayscale",
+          onResourceError,
           ...(overlays.length > 0 ? { overlays } : {}),
         },
         failMap,
@@ -3552,7 +3559,9 @@ function VisitedMapSection({
           () => {
             failure.markLoaded();
           },
-          () => failMap(MAP_FAIL_TIMEOUT),
+          () => failMap(lastResourceError
+            ? `${MAP_FAIL_TIMEOUT}: ${lastResourceError}`
+            : MAP_FAIL_TIMEOUT),
         );
       }
     })();
@@ -4857,6 +4866,10 @@ function SpotListMap({
     let cancelled = false;
     let handle: PlaceListMapHandle | null = null;
     let stopWatch: (() => void) | null = null;
+    let lastResourceError: string | undefined;
+    const onResourceError = (reason: string) => {
+      lastResourceError = reason;
+    };
     /* The one failure path for this mount, via the shared control
        (see VisitedMapSection): a pre-load failure remounts on the
        backoff ladder (this effect's cleanup destroys the stalled
@@ -4898,6 +4911,7 @@ function SpotListMap({
           center: { lat: 37.6, lng: 138.4 },
           zoom,
           baseStyle: "grayscale",
+          onResourceError,
           overlays: [
             {
               id: "list-spot-points",
@@ -4965,7 +4979,9 @@ function SpotListMap({
           () => {
             failure.markLoaded();
           },
-          () => failMap(MAP_FAIL_TIMEOUT),
+          () => failMap(lastResourceError
+            ? `${MAP_FAIL_TIMEOUT}: ${lastResourceError}`
+            : MAP_FAIL_TIMEOUT),
         );
       }
     })();
