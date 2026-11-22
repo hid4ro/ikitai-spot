@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
@@ -8,12 +8,24 @@
          lives outside the space's routes and fails auth. -->
     <link rel="icon" href="data:," />
     <title>行きたいスポット通知</title>
+    <style>
+      .app-startup {
+        margin: 2rem 1rem;
+        color: #1c2420;
+        font: 1rem system-ui, sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        .app-startup { color: #f4f6f1; }
+      }
+    </style>
     <script src="./src/main.tsx" type="module"></script>
   </head>
   <body>
     <div
       data-generated-space-root=""
       data-generated-space-slug="xing-kitaisupotutotong-zhi"
-    ></div>
+    >
+      <p class="app-startup" role="status">アプリを読み込んでいます…</p>
+    </div>
   </body>
 </html>

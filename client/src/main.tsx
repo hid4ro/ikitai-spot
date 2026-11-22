@@ -5,9 +5,18 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./theme.css";
 
+performance.mark("ikitai:entry-evaluated");
+
 const rootEl = document.querySelector<HTMLElement>("[data-generated-space-root]");
 if (!rootEl) {
   throw new Error("missing generated space root element");
+}
+
+let initialCommitMarked = false;
+function markInitialCommit(node: HTMLDivElement | null) {
+  if (!node || initialCommitMarked) return;
+  initialCommitMarked = true;
+  performance.mark("ikitai:react-committed");
 }
 
 // If you edit this file: keep `<QueryClientProvider client={spaceQueryClient}>`
@@ -20,7 +29,7 @@ if (!rootEl) {
 createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={spaceQueryClient}>
-      <div className="hatch-space-root" data-hatch-space-root>
+      <div ref={markInitialCommit} className="hatch-space-root" data-hatch-space-root>
         <App />
       </div>
     </QueryClientProvider>
