@@ -188,6 +188,22 @@
   .sheet-slide { animation: none; }
 }
 
+/* Map fallback fade-in (subtask 1204): when the live map gives up
+   and the stored static image takes its place, the image fades in
+   instead of cutting. The reverse trip — the loading overlay over
+   the live map fading out — is an opacity transition in App.tsx.
+   Reduced motion removes the fade, as with the sheet entrance. */
+@keyframes map-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.map-fade-in {
+  animation: map-fade-in 0.35s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-fade-in { animation: none; }
+}
+
 /* Conquest charts (Recharts): axis tick labels and legend text follow
    the page theme. Recharts renders ticks as SVG <text> with a default
    dark fill, which would vanish on the dark surface, so the fill is

@@ -48,6 +48,10 @@ import {
   LEDGER_LINE_NAME_MAP,
   RIDDEN_LINE_GEOMETRIES,
 } from "./assets/visited-lines";
+import {
+  buildLineKeyByName,
+  resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
+} from "./line-resolution";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 
 /* Input limits come from the server actions' request schemas, so the
@@ -862,59 +866,25 @@ function wardGeometryFor(prefecture: string, name: string): GeoJsonGeometry | nu
 
 /* ---------------- ridden railway lines ---------------- */
 
-/* Line name → asset key, for the normalization fallback below. A name
-   shared by two operators (「本線」) is ambiguous and left out: guessing
-   would paint the wrong operator's track. */
-const LINE_KEY_BY_NAME: ReadonlyMap<string, string> = (() => {
-  const counts = new Map<string, number>();
-  for (const entry of Object.values(RIDDEN_LINE_GEOMETRIES)) {
-    counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
-  }
-  const map = new Map<string, string>();
-  for (const [key, entry] of Object.entries(RIDDEN_LINE_GEOMETRIES)) {
-    if (counts.get(entry.name) === 1) map.set(entry.name, key);
-  }
-  return map;
-})();
-
-/* Operator brand prefixes a ledger name may carry in front of the
-   asset's line name （西武池袋線 → 池袋線）. */
-const LINE_OPERATOR_PREFIXES = [
-  "西武",
-  "東武",
-  "京成",
-  "京急",
-  "京王",
-  "小田急",
-  "東急",
-  "相鉄",
-  "北総",
-  "都営",
-  "東葉",
-  "埼玉高速",
-  "つくばエクスプレス",
-];
+/* Line name → asset key, for the normalization fallback below
+   (built by line-resolution.ts; a name shared by two operators is
+   ambiguous and left out). */
+const LINE_KEY_BY_NAME: ReadonlyMap<string, string> =
+  buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
 
 /* Resolves a ledger line name (e.g. 「JR総武快速線」) to its key in
-   RIDDEN_LINE_GEOMETRIES (「総武線|東日本旅客鉄道」). The bundled
-   ledger-name map answers first; names it does not cover (or maps to
-   null) fall back to normalization: strip a leading 「JR」, strip a
-   trailing 「（…）」, strip a leading operator brand, then require an
-   exact name match. Returns null when nothing resolves — the line
-   then simply has no track drawn and no color chip. */
+   RIDDEN_LINE_GEOMETRIES (「総武線|東日本旅客鉄道」). The rules live
+   in line-resolution.ts (regression-tested against the real asset);
+   this binds them to the bundled asset. Returns null when nothing
+   resolves — the line then simply has no track drawn and no color
+   chip. */
 function resolveRiddenLineKey(ledgerName: string): string | null {
-  const mapped = LEDGER_LINE_NAME_MAP[ledgerName];
-  if (mapped && RIDDEN_LINE_GEOMETRIES[mapped]) return mapped;
-  let name = ledgerName.trim();
-  if (name.startsWith("JR")) name = name.slice(2);
-  name = name.replace(/（[^）]*）$/, "");
-  for (const prefix of LINE_OPERATOR_PREFIXES) {
-    if (name.startsWith(prefix)) {
-      name = name.slice(prefix.length);
-      break;
-    }
-  }
-  return LINE_KEY_BY_NAME.get(name) ?? null;
+  return resolveRiddenLineKeyInAsset(
+    ledgerName,
+    RIDDEN_LINE_GEOMETRIES,
+    LINE_KEY_BY_NAME,
+    LEDGER_LINE_NAME_MAP,
+  );
 }
 
 /* The official color of a ledger line, via the same resolution the map
@@ -2927,6 +2897,27 @@ function VisitedMapSection({
   const pressCenterRef = useRef<{ lng: number; lat: number } | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
   const [basemapReady, setBasemapReady] = useState(false);
+  /* The loading overlay's fade-out (the reader asked for a fade
+     instead of the hard cut): while the basemap loads, the overlay
+     — the stored static image — covers the live map; when the
+     basemap lands it used to vanish in a single frame. It now stays
+     mounted for one beat at opacity 0, crossfading into the live
+     map already painted underneath, and only then unmounts. A
+     remount (retry ladder / background recovery) flips basemapReady
+     back to false and the overlay returns at full opacity, ready to
+     fade again when the new basemap lands. */
+  const [fallbackPhase, setFallbackPhase] = useState<"shown" | "fading" | "gone">(
+    "shown",
+  );
+  useEffect(() => {
+    if (!basemapReady) {
+      setFallbackPhase("shown");
+      return;
+    }
+    setFallbackPhase((phase) => (phase === "shown" ? "fading" : phase));
+    const t = setTimeout(() => setFallbackPhase("gone"), 600);
+    return () => clearTimeout(t);
+  }, [basemapReady]);
   /* Automatic recovery from a failed basemap load: a transient
      failure — a style fetch reset on a weak connection, a resource
      error the runtime classifies as fatal — no longer drops
@@ -4459,8 +4450,12 @@ function VisitedMapSection({
                 aria-label={`通った市区町村${mappable.length}件の地図`}
                 aria-hidden={!basemapReady}
               />
-              {!basemapReady && (
-                <div className="pointer-events-none absolute inset-0 z-10 bg-[var(--surface-alt)]">
+              {fallbackPhase !== "gone" && (
+                <div
+                  className={`pointer-events-none absolute inset-0 z-10 bg-[var(--surface-alt)] transition-opacity duration-500 ${
+                    fallbackPhase === "fading" ? "opacity-0" : "opacity-100"
+                  }`}
+                >
                   <img
                     src={visitedMapFallbackUrl}
                     alt=""
@@ -4483,6 +4478,7 @@ function VisitedMapSection({
           )}
           {(mapFailed || mappable.length === 0) && (
             <figure
+              className="map-fade-in"
               ref={(el) => {
                 fallbackMapRef.current = el;
               }}
@@ -5007,8 +5003,12 @@ function VisitedMapSection({
    re-frame. The location itself stays live after mount: the maps'
    shared Pixel position is adopted the moment it changes
    (deviceLoc prop), and a 60 s re-read follows the
-   Pixel while the reader stays on the tab. Display only — no tap
-   selection here. It does publish
+   Pixel while the reader stays on the tab. A tap on a plotted spot
+   selects it: the tap is hit-tested against the spot points layer
+   and reported through onSpotTap, and the caller opens the same
+   detail a list-row tap opens (resolving the full row first — the
+   point payload's memo is truncated, so it never seeds the detail
+   itself). It publishes
    its live center through centerGetterRef: the list's
    「地図の中心から近い順」 sort snapshots the center of the map
    the reader is actually looking at (this map took over that role
@@ -5021,6 +5021,7 @@ function SpotListMap({
   deviceLoc,
   cameraRequest,
   centerGetterRef,
+  onSpotTap,
 }: {
   visitFilter: "all" | "unvisited" | "visited";
   listFilter: string | null;
@@ -5050,6 +5051,10 @@ function SpotListMap({
   centerGetterRef?: {
     current: (() => { lat: number; lng: number } | null) | null;
   };
+  /* A tap on a plotted spot, resolved against the CURRENT filtered
+     set (the same set the points layer paints). Optional: without a
+     handler the map stays display-only. */
+  onSpotTap?: (point: SpotMapPoint) => void;
 }) {
   const pointsQuery = useQuery({
     queryKey: ["spotPoints"],
@@ -5072,6 +5077,99 @@ function SpotListMap({
   const filteredKey = filtered.map((p) => `${p.id}:${p.lng},${p.lat}`).join(";");
   const filteredRef = useRef(filtered);
   filteredRef.current = filtered;
+
+  /* Spot tap selection: the callback lives in a ref so the map
+     listener (attached once per map instance) always calls the
+     latest one, and the press-start center is remembered so a press
+     that turned into a drag does not count as a tap — the same
+     contract as the fill map's focus listeners. */
+  const onSpotTapRef = useRef(onSpotTap);
+  onSpotTapRef.current = onSpotTap;
+  const tapListenerMapRef = useRef<MapLibreLike | null>(null);
+  const tapPressCenterRef = useRef<{ lng: number; lat: number } | null>(null);
+  const attachSpotTap = (map: MapLibreLike) => {
+    if (tapListenerMapRef.current === map) return;
+    tapListenerMapRef.current = map;
+    const rememberPress = () => {
+      try {
+        tapPressCenterRef.current = map.getCenter();
+      } catch {
+        tapPressCenterRef.current = null;
+      }
+    };
+    map.on("mousedown", rememberPress);
+    map.on("touchstart", rememberPress);
+    map.on("click", (e) => {
+      const start = tapPressCenterRef.current;
+      tapPressCenterRef.current = null;
+      if (start) {
+        try {
+          const now = map.getCenter();
+          if (
+            Math.abs(now.lng - start.lng) > 0.000001 ||
+            Math.abs(now.lat - start.lat) > 0.000001
+          ) {
+            return;
+          }
+        } catch {
+          /* fall through and treat it as a tap */
+        }
+      }
+      const handler = onSpotTapRef.current;
+      if (!handler) return;
+      const pt = e?.point as { x: number; y: number } | undefined;
+      if (!pt || typeof pt.x !== "number" || typeof pt.y !== "number") return;
+      try {
+        if (!map.getLayer("list-spot-points-circle")) return;
+        /* The painted dots are only a few pixels wide — too small a
+           target for a finger — so the hit test uses a small box
+           around the tap point, and the closest feature inside it
+           wins. */
+        const R = 14;
+        const features = map.queryRenderedFeatures(
+          [
+            [pt.x - R, pt.y - R],
+            [pt.x + R, pt.y + R],
+          ],
+          { layers: ["list-spot-points-circle"] },
+        );
+        let best: { point: SpotMapPoint; d2: number } | null = null;
+        for (const f of features) {
+          const id = f.properties?.id;
+          if (typeof id !== "number") continue;
+          const point = filteredRef.current.find((p) => p.id === id);
+          if (!point) continue;
+          /* Rank by the tap's ground distance to the spot, so a box
+             holding several dots picks the one the reader aimed at. */
+          const lngLat = e?.lngLat;
+          const d2 = lngLat
+            ? (point.lng - lngLat.lng) ** 2 + (point.lat - lngLat.lat) ** 2
+            : 0;
+          if (!best || d2 < best.d2) best = { point, d2 };
+        }
+        if (best) handler(best.point);
+      } catch {
+        /* a failed hit test simply selects nothing */
+      }
+    });
+    /* Desktop nicety, same as the old distribution map: the cursor
+       flips to a pointer while hovering a dot. */
+    map.on("mousemove", (e) => {
+      const pt = e?.point as { x: number; y: number } | undefined;
+      if (!pt || typeof pt.x !== "number" || typeof pt.y !== "number") return;
+      try {
+        if (!map.getLayer("list-spot-points-circle")) return;
+        const features = map.queryRenderedFeatures(pt, {
+          layers: ["list-spot-points-circle"],
+        });
+        map.getCanvas().style.cursor = features.length > 0 ? "pointer" : "";
+      } catch {
+        /* the cursor is a cue only */
+      }
+    });
+  };
+  const attachSpotTapRef = useRef(attachSpotTap);
+  attachSpotTapRef.current = attachSpotTap;
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapHandleRef = useRef<PlaceListMapHandle | null>(null);
@@ -5274,6 +5372,7 @@ function SpotListMap({
           const map = handle?.getMap() ?? null;
           if (map) {
             liveMapRef.current = map;
+            attachSpotTapRef.current(map);
             if (centerGetterRef) {
               centerGetterRef.current = () => {
                 try {
@@ -6586,6 +6685,32 @@ export function App() {
     if (editing && editing.id !== spot.id) setEditing(null);
   };
 
+  /* A tap on a spot plotted on the pinned map opens the same detail
+     as a row tap. When the spot is on the current page its row is
+     the source, exactly as openDetail. Otherwise the full row is
+     fetched by id first: the map's point payload truncates the memo
+     at 200 chars and carries no visited_at, so it must never seed
+     the detail (or, worse, an edit) itself. */
+  const openDetailFromMap = (point: SpotMapPoint) => {
+    const onPage = pageSpots.find((s) => s.id === point.id);
+    if (onPage) {
+      openDetail(onPage, pageSpots.indexOf(onPage));
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await api.getSpot({ id: point.id });
+        if (!res.spot) return;
+        setSelectedId(res.spot.id);
+        setSelectedSnapshot(res.spot);
+        if (editing && editing.id !== res.spot.id) setEditing(null);
+      } catch {
+        /* a failed fetch leaves the tap unanswered; the list below
+           still opens the same spot */
+      }
+    })();
+  };
+
   const closeDetail = () => {
     setSelectedId(null);
     setEditing(null);
@@ -6930,6 +7055,7 @@ export function App() {
               deviceLoc={deviceLocation}
               cameraRequest={mapCameraRequest}
               centerGetterRef={spotMapCenterGetterRef}
+              onSpotTap={openDetailFromMap}
             />
           </div>
 

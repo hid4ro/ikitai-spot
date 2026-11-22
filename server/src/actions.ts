@@ -458,6 +458,22 @@ export const Actions = {
     },
   }),
 
+  getSpot: defineAction({
+    description:
+      "Returns one spot by id (null when it does not exist). The spot list's pinned map plots only the lean point payload, so a tap on a plotted spot resolves its full row through here before the detail opens — the detail's edit form must never be seeded from the point payload, whose memo is truncated.",
+    request: z.object({ id: z.number().int() }),
+    response: z.object({ spot: spotSchema.nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.spots)
+        .where(eq(schema.spots.id, args.id));
+      const row = rows[0];
+      return { spot: row ? toSpot(row) : null };
+    },
+  }),
+
   listWatchSpots: defineAction({
     description:
       "Returns every unvisited spot that has coordinates, for the client's live proximity watch.",
