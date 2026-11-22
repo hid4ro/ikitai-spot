@@ -2351,9 +2351,9 @@ function ensureFocusLayers(map: MapLibreLike) {
      version of the focus orange (#ea580c → #c2410c): added last so
      they paint above the focus fill and outline. Boundary
      hierarchy (2026-11-22): like every ward line they are now
-     DASHED [3, 2] over the chained polylines
-     internalWardLineFeatures emits — width 0.9, and the opacity
-     ramps in with zoom (0 at zoom 9, the full 0.65 at zoom 10),
+     DASHED [4, 3] over the chained polylines
+     internalWardLineFeatures emits — width 1.15, and the opacity
+     ramps in with zoom (0 at zoom 9, the full 0.85 at zoom 10),
      so a selected city at wide zoom shows its outer boundary
      alone. (They began as a pale solid tint, #fdba74 at 0.85 /
      width 1.1, then a solid 1.25 / 0.95 that read as strongly as
@@ -2369,7 +2369,7 @@ function ensureFocusLayers(map: MapLibreLike) {
       source: FOCUS_WARDS_SOURCE_ID,
       layout: { "line-join": "round" },
       paint: {
-        "line-dasharray": [3, 2],
+        "line-dasharray": [4, 3],
         "line-color": "#c2410c",
         "line-opacity": [
           "interpolate",
@@ -2378,9 +2378,9 @@ function ensureFocusLayers(map: MapLibreLike) {
           9,
           0,
           10,
-          0.65,
+          0.85,
         ],
-        "line-width": 0.9,
+        "line-width": 1.15,
       },
     });
   }
@@ -3243,10 +3243,10 @@ function VisitedMapSection({
          visited fill's #14532d); the focused state has its own
          deep-orange lines in the focus layers (see
          ensureFocusLayers). Boundary hierarchy (2026-11-22): both
-         are now DASHED [3, 2] at width 0.8 over the chained
+         are DASHED [4, 3] at width 1.05 over the chained
          polylines internalWardLineFeatures emits, with the
          opacity ramping in only at city zoom (0 at zoom 9.5, the
-         full 0.55 unvisited / 0.60 visited at zoom 10.5) — the
+         full 0.76 unvisited / 0.80 visited at zoom 10.5) — the
          dash and the late arrival are what separate a ward border
          from the city's solid outer boundary, after two rounds of
          solid-line strength adjustments (pale tints that vanished
@@ -3294,7 +3294,7 @@ function VisitedMapSection({
               source: "designated-city-wards-unvisited",
               layout: { "line-join": "round" },
               paint: {
-                "line-dasharray": [3, 2],
+                "line-dasharray": [4, 3],
                 "line-color": "#94a3b8",
                 "line-opacity": [
                   "interpolate",
@@ -3303,9 +3303,9 @@ function VisitedMapSection({
                   9.5,
                   0,
                   10.5,
-                  0.55,
+                  0.76,
                 ],
-                "line-width": 0.8,
+                "line-width": 1.05,
               },
             },
           ],
@@ -3325,7 +3325,7 @@ function VisitedMapSection({
               source: "designated-city-wards-visited",
               layout: { "line-join": "round" },
               paint: {
-                "line-dasharray": [3, 2],
+                "line-dasharray": [4, 3],
                 "line-color": "#1e7a46",
                 "line-opacity": [
                   "interpolate",
@@ -3334,9 +3334,9 @@ function VisitedMapSection({
                   9.5,
                   0,
                   10.5,
-                  0.6,
+                  0.8,
                 ],
-                "line-width": 0.8,
+                "line-width": 1.05,
               },
             },
           ],
