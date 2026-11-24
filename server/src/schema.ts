@@ -92,6 +92,10 @@ export const riddenLines = sqliteTable("ridden_lines", {
   note: text("note"),
   context: text("context"),
   serviceId: text("service_id"),
+  // Old rows have no source. Automatic matching records its own rule version,
+  // separate from the master version of the recorded ride.
+  serviceLinkSource: text("service_link_source", { enum: ["auto", "explicit"] }),
+  serviceMatchVersion: text("service_match_version"),
   rideState: text("ride_state").notNull().default("unknown"),
   fromStationId: text("from_station_id"),
   fromStationName: text("from_station_name"),

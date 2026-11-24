@@ -44,7 +44,10 @@ import {
   serviceBoundaryStations,
   serviceById,
   serviceIsLoop,
+  stationRefById,
+  usableRiddenService,
   type FullPathSnapshot,
+  type RiddenServiceLink,
   type ServiceMasterEntry,
   type StationRef,
 } from "../../shared/service-master";
@@ -901,6 +904,79 @@ export type LineCoverage = {
      comparable as the master grows. */
   unpreparedLines: number;
 };
+
+type RecordedSection = {
+  fromStationId: string;
+  toStationId: string;
+  direction: "inner" | "outer" | null;
+};
+
+type RecordedRiddenLine = RiddenServiceLink & {
+  rideState: "unknown" | "partial" | "full";
+  fromStationId: string | null;
+  toStationId: string | null;
+  pathSnapshot: string | null;
+  sections?: readonly RecordedSection[];
+};
+
+export function riddenLineIntervals(
+  row: RecordedRiddenLine,
+  serviceId: string,
+): RideInterval[] {
+  const intervals: RideInterval[] = [];
+  const addInterval = (
+    fromStationId: string,
+    toStationId: string,
+    direction: RecordedSection["direction"],
+  ) => {
+    const from = stationRefById(fromStationId);
+    const to = stationRefById(toStationId);
+    if (from && to) intervals.push({ serviceId, from, to, direction });
+  };
+  if (row.rideState === "partial" && row.fromStationId && row.toStationId) {
+    addInterval(row.fromStationId, row.toStationId, null);
+  }
+  for (const section of row.sections ?? []) {
+    addInterval(section.fromStationId, section.toStationId, section.direction);
+  }
+  return intervals;
+}
+
+/* Translate saved rides into the paths and intervals used by both
+   the map and distance totals. Unknown rides have a path but no
+   interval, so they are painted dashed and count zero kilometres. */
+export function computeRiddenLineCoverage(
+  rows: readonly RecordedRiddenLine[],
+  geometries: LineGeometryMap,
+  totalLines: number,
+): LineCoverage {
+  const intervals = new Map<string, RideInterval[]>();
+  const fullServiceIds = new Set<string>();
+  const servicePaths = new Map<string, ServicePath>();
+  for (const row of rows) {
+    const service = usableRiddenService(row);
+    if (!service) continue;
+    const serviceId = service.id;
+    if (!servicePaths.has(serviceId)) {
+      const snapshot = parseFullPathSnapshot(row.pathSnapshot);
+      servicePaths.set(serviceId, buildServicePath(service, geometries, snapshot));
+    }
+    if (row.rideState === "full") {
+      fullServiceIds.add(serviceId);
+    } else if (row.rideState === "partial") {
+      const list = intervals.get(serviceId) ?? [];
+      list.push(...riddenLineIntervals(row, serviceId));
+      intervals.set(serviceId, list);
+    }
+  }
+  return computeLineCoverage(
+    intervals,
+    fullServiceIds,
+    servicePaths,
+    geometries,
+    totalLines,
+  );
+}
 
 /* Coverage from ledger rows' ride intervals. `intervals` groups
    intervals by service id; `fullServiceIds` are services with an

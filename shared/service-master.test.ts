@@ -18,8 +18,8 @@ import {
   formalLineNames,
   isKnownMasterVersion,
   isN02StationId,
-  isStaleAutoLink,
   legacyServiceByLedgerName,
+  resolveRiddenService,
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
@@ -319,7 +319,7 @@ describe("review round 5: spaces inside the parentheses are the same qualifier s
   });
 });
 
-describe("review round 5: a saved link the old auto-link produced is stale (medium)", () => {
+describe("legacy matching and saved link review", () => {
   test("legacyServiceByLedgerName reproduces the pre-round-4 blanket strip", () => {
     // The old canonical form dropped any trailing （…） and the
     // leading JR, so 「中央線（各駅停車）」 attached to the rapid
@@ -340,31 +340,42 @@ describe("review round 5: a saved link the old auto-link produced is stale (medi
     );
   });
 
-  test("isStaleAutoLink spots exactly the links the old code could have made", () => {
-    // Stale: the old code linked the name to the saved id, but the
-    // current rules do not — the link can only have come from the
-    // old auto-link, so it is safe to clear on re-registration.
-    expect(isStaleAutoLink("中央線（各駅停車）", "jr-chuo-rapid")).toBe(true);
-    expect(isStaleAutoLink("総武本線（総武快速線）", "jr-sobu-local")).toBe(
-      true,
-    );
-    expect(isStaleAutoLink("武蔵野線（京王電鉄）", "jr-musashino")).toBe(true);
-    // Not stale: the current rules still agree with the saved id.
-    expect(isStaleAutoLink("JR中央線（快速）", "jr-chuo-rapid")).toBe(false);
-    expect(isStaleAutoLink("京王線", "keio")).toBe(false);
-    expect(isStaleAutoLink("武蔵野線 (JR東日本)", "jr-musashino")).toBe(
-      false,
-    );
-    // Not stale: the old code could not have produced this link
-    // (a different service, or an id the master never knew) — such
-    // rows are left for individual confirmation, never auto-cleared.
-    expect(isStaleAutoLink("中央線（各駅停車）", "jr-sobu-local")).toBe(
-      false,
-    );
-    expect(isStaleAutoLink("中央線（各駅停車）", "does-not-exist")).toBe(
-      false,
-    );
-    expect(isStaleAutoLink("京王線", null)).toBe(false);
+  test("conflicting links retain evidence from both historical lookup generations", () => {
+    for (const [name, serviceId, historicalAutoMatchVersions] of [
+      ["中央線（各駅停車）", "jr-chuo-rapid", ["1"]],
+      ["武蔵野線 (京王電鉄)", "jr-musashino", ["2"]],
+      ["総武本線（総武快速線）", "jr-sobu-local", ["1", "2"]],
+      ["中央線（各駅停車）", "jr-sobu-local", []],
+      ["中央線（各駅停車）", "does-not-exist", []],
+    ] as const) {
+      expect(resolveRiddenService({ name, serviceId })).toEqual({
+        service: undefined,
+        needsReview: true,
+        historicalAutoMatchVersions,
+      });
+    }
+    for (const [name, serviceId] of [
+      ["JR中央線（快速）", "jr-chuo-rapid"],
+      ["京王線", "keio"],
+      ["武蔵野線 (JR東日本)", "jr-musashino"],
+    ] as const) {
+      const link = resolveRiddenService({ name, serviceId });
+      expect(link.needsReview).toBe(false);
+      expect(link.service?.id).toBe(serviceId);
+    }
+  });
+
+  test("documented explicit links are distinguished from inferred historical links", () => {
+    const row = { name: "武蔵野線 (京王電鉄)", serviceId: "jr-musashino" };
+    expect(resolveRiddenService(row).needsReview).toBe(true);
+    expect(resolveRiddenService({
+      ...row,
+      serviceLinkSource: "auto",
+      serviceMatchVersion: "2",
+    })).toMatchObject({ needsReview: true, historicalAutoMatchVersions: ["2"] });
+    const confirmed = resolveRiddenService({ ...row, serviceLinkSource: "explicit" });
+    expect(confirmed.needsReview).toBe(false);
+    expect(confirmed.service?.id).toBe(row.serviceId);
   });
 });
 

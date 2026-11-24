@@ -320,6 +320,20 @@ describe("row display name agrees with the aggregation identity (review round 4)
   });
 });
 
+test("both generations of conflicting saved links are excluded from key resolution and counts", () => {
+  const rows = [
+    { name: "中央線（各駅停車）", serviceId: "jr-chuo-rapid" },
+    { name: "武蔵野線 (京王電鉄)", serviceId: "jr-musashino" },
+    { name: "西武池袋線", serviceId: "keio" },
+  ];
+  for (const row of rows) {
+    expect(serviceForRow(row.name, row.serviceId)).toBeUndefined();
+    expect(resolveRiddenLineKey(row.name, RIDDEN_LINE_GEOMETRIES, keyByName, row.serviceId)).toBeNull();
+    expect(resolveRiddenLineKeys(row.name, RIDDEN_LINE_GEOMETRIES, keyByName, row.serviceId)).toEqual([]);
+  }
+  expect(countRiddenServices(rows, RIDDEN_LINE_GEOMETRIES, keyByName)).toBe(0);
+});
+
 describe("normalization fallback", () => {
   test("a brand-plus-線 name resolves by exact name, not by stripping the brand down to 「線」", () => {
     // The master answers the real 京王線 first, so the fallback's
@@ -383,6 +397,37 @@ describe("normalization fallback", () => {
     // A note that is not an operator name at all is still stripped
     // as before — only a contradicting operator blocks the link.
     expect(resolve("西武池袋線（快速）")).toBe("池袋線|西武鉄道");
+  });
+
+  test.each([
+    "西武池袋線（新宿線）",
+    "東武池袋線（西武鉄道）",
+    "西武池袋線（東武新宿線）",
+    "西武池袋線（本線）",
+    "西武池袋線（りんかい線）",
+    "京急久里浜線（都営）",
+    "JR池袋線（西武鉄道）",
+  ])(
+    "%s leaves conflicting route or operator claims unresolved",
+    (name) => {
+      expect(resolve(name)).toBeNull();
+      expect(resolveKeys(name)).toEqual([]);
+      expect(
+        countRiddenServices([{ name }], RIDDEN_LINE_GEOMETRIES, keyByName),
+      ).toBe(0);
+    },
+  );
+
+  test("a consistent route note and a matching abbreviated operator still resolve", () => {
+    expect(resolve("西武池袋線 ( 池袋線 )")).toBe("池袋線|西武鉄道");
+    expect(resolve("西武池袋線（西武池袋線）")).toBe("池袋線|西武鉄道");
+    expect(resolve("京急久里浜線（京急）")).toBe("久里浜線|京浜急行電鉄");
+  });
+
+  test("an exact formal name can include parentheses as part of the name", () => {
+    const osakaChuo = "4号線(中央線)|大阪市高速電気軌道";
+    expect(resolve("4号線(中央線)")).toBe(osakaChuo);
+    expect(resolve("4号線（中央線）")).toBe(osakaChuo);
   });
 
   test("「中央線 ( 快速 )」 counts once in the national donut (review round 5)", () => {

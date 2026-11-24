@@ -50,24 +50,20 @@ import {
 } from "./assets/visited-lines";
 import {
   buildLineKeyByName,
-  resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
-  serviceForRow,
+  resolveRiddenLineKey,
 } from "./line-resolution";
 import {
   blocksForService,
-  serviceById,
-  stationRefById,
+  resolveRiddenService,
+  usableRiddenService,
 } from "../../shared/service-master";
 import {
-  buildServicePath,
-  computeLineCoverage,
+  computeRiddenLineCoverage,
   coveredBlockIds,
-  parseFullPathSnapshot,
+  riddenLineIntervals,
   sectionBounds,
   type LineCoverage,
   type LineGeometryMap,
-  type RideInterval,
-  type ServicePath,
 } from "./line-geometry";
 import {
   JAPAN_LINE_TOTAL_KM,
@@ -906,52 +902,6 @@ function wardGeometryFor(prefecture: string, name: string): GeoJsonGeometry | nu
 const LINE_KEY_BY_NAME: ReadonlyMap<string, string> =
   buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
 
-/* Resolves a ledger line name (e.g. 「JR総武快速線」) to its key in
-   RIDDEN_LINE_GEOMETRIES (「総武線|東日本旅客鉄道」). The rules live
-   in line-resolution.ts (regression-tested against the real asset),
-   backed by the service master (shared/service-master.ts); this
-   binds them to the bundled asset. The row's saved service_id
-   answers first when given (review finding 5) — the recorded name
-   may be an alias, and the saved id is the record of which service
-   was actually ridden. Returns null when nothing resolves — the
-   line then simply has no track drawn and no color chip. Multi-line
-   services (JR埼京線, and 山手線 since the loop split) also return
-   null here: no single key stands for them — their track comes from
-   the line coverage instead (stage 2 paints the ridden section). */
-function resolveRiddenLineKey(
-  ledgerName: string,
-  serviceId?: string | null,
-): string | null {
-  return resolveRiddenLineKeyInAsset(
-    ledgerName,
-    RIDDEN_LINE_GEOMETRIES,
-    LINE_KEY_BY_NAME,
-    serviceId ?? null,
-  );
-}
-
-/* The name a ledger row shows: the service's display name when
-   the row resolves to a service — by its saved service_id, or by
-   its name when no id was saved — otherwise the recorded name.
-   An alias spelling （「JR中央線」) therefore shows as the
-   service's canonical name (「JR中央線（快速）」), and an
-   unlinked-but-resolvable spelling （「武蔵野線」) as
-   「JR武蔵野線」 — the display rule is service names everywhere,
-   and the row now agrees with the service the aggregates count
-   (review round 4, low). A name that resolves to no service keeps
-   its recorded name （「中央線（各駅停車）」 stays as recorded,
-   never renamed 「中央線快速」). */
-function riddenLineDisplayName(line: RiddenLine): string {
-  return serviceForRow(line.name, line.serviceId)?.displayName ?? line.name;
-}
-
-/* The official color of a ledger line, via the same resolution the map
-   overlay uses; null when the line cannot be resolved. */
-function riddenLineColor(line: RiddenLine): string | null {
-  const key = resolveRiddenLineKey(line.name, line.serviceId);
-  return key ? (RIDDEN_LINE_GEOMETRIES[key]?.color ?? null) : null;
-}
-
 /* The ride's recorded section, as one short line under the ledger
    name: the restored section for partial rides （区間：新宿→大崎）,
    全線乗車 for full rides, 区間不明 where the record pins down no
@@ -1222,7 +1172,7 @@ function ConquestCharts({
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
   totalVisited: number;
-  riddenLines: { name: string; firstRiddenOn: string; serviceId: string | null }[];
+  riddenLines: readonly RiddenLine[];
   /* The 路線 donut's numerator (stage 2): the deduped ridden
      distance in km, against every formal line in Japan
      (26,735.5 km). The same number the map paints, so the donut
@@ -1269,7 +1219,9 @@ function ConquestCharts({
 
   const timeline = buildCumulativeSeries(
     municipalities.map((m) => m.visitedOn),
-    riddenLines.map((l) => l.firstRiddenOn),
+    riddenLines
+      .filter((line) => !resolveRiddenService(line).needsReview)
+      .map((line) => line.firstRiddenOn),
   );
 
   return (
@@ -3117,89 +3069,14 @@ function VisitedMapSection({
     queryKey: ["riddenLines"],
     queryFn: () => api.listRiddenLines({}),
   });
-  /* Ridden lines: paint only what was actually ridden (stage 2).
-     The coverage is computed from the ledger rows: each row's
-     service contributes its primary section (from the stage-1
-     migration) plus its added sections, a full ride contributes
-     its whole path (from the stored snapshot when there is one),
-     and a row with no section contributes nothing but its whole
-     path painted dashed. A service spans several formal lines
-     （埼京線 = 山手線・赤羽線・東北線・川越線), so the overlay
-     carries one feature per painted leg, keyed by its formal
-     line — and the same leg can belong to several services, which
-     is why the coverage dedups by edge, not by service. */
-  const lineCoverage: LineCoverage = useMemo(() => {
-    const rows = riddenQuery.data?.lines ?? [];
-    const intervals = new Map<string, RideInterval[]>();
-    const fullServiceIds = new Set<string>();
-    const servicePaths = new Map<string, ServicePath>();
-    const geometries =
-      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
-    const addInterval = (
-      serviceId: string,
-      fromStationId: string,
-      toStationId: string,
-      direction: "inner" | "outer" | null,
-    ) => {
-      const from = stationRefById(fromStationId);
-      const to = stationRefById(toStationId);
-      /* An endpoint the master cannot resolve (a station added
-         after the master, or a bad id) has no coordinates to
-         project: the section is skipped, and the row falls back
-         to painting its whole path dashed — it still counts
-         nothing, so the distance stays honest. */
-      if (!from || !to) return;
-      const list = intervals.get(serviceId) ?? [];
-      list.push({ serviceId, from, to, direction });
-      intervals.set(serviceId, list);
-    };
-    for (const row of rows) {
-      const serviceId = row.serviceId;
-      if (!serviceId) continue;
-      const service = serviceById(serviceId);
-      if (!service) continue;
-      /* The path is built once per service (the graph cache
-         makes repeat builds cheap) and only for services with a
-         row — a service with no ride paints nothing. */
-      if (!servicePaths.has(serviceId)) {
-        servicePaths.set(
-          serviceId,
-          buildServicePath(
-            service,
-            geometries,
-            parseFullPathSnapshot(row.pathSnapshot),
-          ),
-        );
-      }
-      if (row.rideState === "full") {
-        fullServiceIds.add(serviceId);
-      } else if (row.rideState === "partial") {
-        if (row.fromStationId && row.toStationId) {
-          addInterval(
-            serviceId,
-            row.fromStationId,
-            row.toStationId,
-            null,
-          );
-        }
-        for (const section of row.sections ?? []) {
-          addInterval(
-            serviceId,
-            section.fromStationId,
-            section.toStationId,
-            section.direction,
-          );
-        }
-      }
-    }
-    return computeLineCoverage(
-      intervals,
-      fullServiceIds,
-      servicePaths,
-      geometries,
+  const lineCoverage = useMemo(
+    () => computeRiddenLineCoverage(
+      riddenQuery.data?.lines ?? [],
+      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
       JAPAN_LINE_TOTAL,
-    );
-  }, [riddenQuery.data]);
+    ),
+    [riddenQuery.data],
+  );
 
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
@@ -3217,9 +3094,7 @@ function VisitedMapSection({
         coordinates: readonly [number, number][];
       };
     }[] = [];
-    for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
-      const service = serviceById(serviceId);
-      if (!service) continue;
+    for (const painted of lineCoverage.perServiceLegs.values()) {
       for (const leg of painted.legs) {
         const entry = RIDDEN_LINE_GEOMETRIES[leg.key];
         if (!entry) continue;
@@ -3237,9 +3112,16 @@ function VisitedMapSection({
     return features;
   }, [lineCoverage]);
 
-  const riddenLinesKey = [...lineCoverage.perServiceLegs.keys()]
-    .sort()
-    .join(",");
+  const riddenLinesKey = useMemo(
+    () => JSON.stringify(
+      [...lineCoverage.perServiceLegs].map(([serviceId, { legs, unknown }]) => [
+        serviceId,
+        unknown,
+        legs.map(({ key, edge, fromT, toT }) => [key, edge, fromT, toT]),
+      ]),
+    ),
+    [lineCoverage],
+  );
 
   /* Progress: the main metric is the deduped ridden distance
      against every formal line in Japan (26,735.5 km). The
@@ -3574,13 +3456,9 @@ function VisitedMapSection({
      exclusive — picking a line clears the municipality focus and
      vice versa — and a line focus is cleared the same ways a
      municipality one is (another pick, a blank map tap, deleting
-     the row). focusedLineKeyRef holds the row's service id (null
-     for a row with no service link: the row still highlights,
-     there is just no track to paint). Written only — the map
-     re-applies the focus from the row id, never from this ref. */
+     the row). */
   const [focusedLineId, setFocusedLineId] = useState<number | null>(null);
   const focusedLineIdRef = useRef<number | null>(null);
-  const focusedLineKeyRef = useRef<string | null>(null);
   /* The 乗った路線 list's expansion, lifted out of RiddenLinesBlock:
      a 事業者別 bar tap must open the list before its target row can
      be scrolled to. */
@@ -4217,8 +4095,8 @@ function VisitedMapSection({
       cancelMapWaitersRef.current();
     };
     // placesKey captures the municipality set plus each one's shape
-    // availability; riddenLinesKey captures the resolved line set the
-    // overlay paints. mapAttempt is the automatic-retry nonce.
+    // availability; riddenLinesKey captures the path ranges and styles
+    // the overlay paints. mapAttempt is the automatic-retry nonce.
     // boundarySettled gates the first mount on the priority boundary
     // set; later boundary arrivals do NOT remount (the refresh effect
     // below updates the nationwide sources in place). Refs,
@@ -4331,7 +4209,6 @@ function VisitedMapSection({
      takes over, and when the focused line's row is deleted. */
   const clearLineFocus = () => {
     focusedLineIdRef.current = null;
-    focusedLineKeyRef.current = null;
     setFocusedLineId(null);
     pendingLineScrollRef.current = null;
     const map = mapHandleRef.current?.getMap() ?? null;
@@ -4786,6 +4663,7 @@ function VisitedMapSection({
      carry data-map-no-fly and never reach here (they are separate
      buttons, checked in RiddenLinesBlock). */
   const focusRiddenLine = (line: RiddenLine) => {
+    if (resolveRiddenService(line).needsReview) return;
     /* The two focuses are mutually exclusive: clear the
        municipality focus (state + geometry) without going through
        clearFocus, which would clear this line focus too. */
@@ -4803,10 +4681,10 @@ function VisitedMapSection({
     focusedLineIdRef.current = line.id;
     setFocusedLineId(line.id);
     pendingLineScrollRef.current = null;
-    const painted = line.serviceId
-      ? lineCoverage.perServiceLegs.get(line.serviceId)
+    const service = usableRiddenService(line);
+    const painted = service
+      ? lineCoverage.perServiceLegs.get(service.id)
       : undefined;
-    focusedLineKeyRef.current = line.serviceId ?? null;
     /* A line tap supersedes any row scroll still running. */
     rowScrollSeqRef.current += 1;
     if (!painted || painted.legs.length === 0) {
@@ -4890,10 +4768,10 @@ function VisitedMapSection({
     }
     focusedLineIdRef.current = row.id;
     setFocusedLineId(row.id);
-    const painted = row.serviceId
-      ? lineCoverage.perServiceLegs.get(row.serviceId)
+    const service = usableRiddenService(row);
+    const painted = service
+      ? lineCoverage.perServiceLegs.get(service.id)
       : undefined;
-    focusedLineKeyRef.current = row.serviceId ?? null;
     setLinesExpanded(true);
     pendingLineScrollRef.current = row.id;
     /* If the list was already open and the row is already laid
@@ -6472,49 +6350,27 @@ function RiddenLinesBlock({
           {lines.map((line) => {
             const editingLineContext = lineContextEditId === line.id;
             const rideLabel = riddenLineRideLabel(line);
-            const coverage = line.serviceId
-              ? lineCoverage.perService.get(line.serviceId)
+            const { service, needsReview } = resolveRiddenService(line);
+            const displayName = service?.displayName ?? line.name;
+            const key = resolveRiddenLineKey(
+              line,
+              RIDDEN_LINE_GEOMETRIES,
+              LINE_KEY_BY_NAME,
+            );
+            const color = key ? RIDDEN_LINE_GEOMETRIES[key]?.color : undefined;
+            const usableService = usableRiddenService(line);
+            const coverage = usableService
+              ? lineCoverage.perService.get(usableService.id)
               : undefined;
-            /* The row's intervals (primary section + added
-               sections) for the block picker: which master blocks
-               this row covers whole. Endpoints the master cannot
-               resolve are skipped — the picker then simply shows
-               fewer blocks covered. */
-            const rowIntervals: RideInterval[] = [];
-            if (line.serviceId) {
-              const pushInterval = (
-                fromId: string,
-                toId: string,
-                direction: "inner" | "outer" | null,
-              ) => {
-                const from = stationRefById(fromId);
-                const to = stationRefById(toId);
-                if (from && to) {
-                  rowIntervals.push({
-                    serviceId: line.serviceId!,
-                    from,
-                    to,
-                    direction,
-                  });
-                }
-              };
-              if (
-                line.rideState === "partial" &&
-                line.fromStationId &&
-                line.toStationId
-              ) {
-                pushInterval(line.fromStationId, line.toStationId, null);
-              }
-              for (const s of line.sections ?? []) {
-                pushInterval(s.fromStationId, s.toStationId, s.direction);
-              }
-            }
-            const blocks = line.serviceId
-              ? blocksForService(line.serviceId)
+            const blocks = usableService && line.rideState !== "full"
+              ? blocksForService(usableService.id)
               : [];
-            const coveredBlocks = line.serviceId
-              ? coveredBlockIds(line.serviceId, rowIntervals)
-              : new Set<string>();
+            const coveredBlocks = usableService && blocks.length > 0
+              ? coveredBlockIds(
+                  usableService.id,
+                  riddenLineIntervals(line, usableService.id),
+                )
+              : null;
             const pickerOpen = blockPickerLineId === line.id;
             return (
             <li
@@ -6527,11 +6383,11 @@ function RiddenLinesBlock({
               }`}
             >
               <div className="flex items-center gap-3">
-                {riddenLineColor(line) && (
+                {color && (
                   <span
                     aria-hidden="true"
                     className="h-3 w-3 shrink-0 rounded-full"
-                    style={{ backgroundColor: riddenLineColor(line) ?? undefined }}
+                    style={{ backgroundColor: color }}
                   />
                 )}
                 {/* Row tap: fly the map to this line and highlight
@@ -6542,10 +6398,16 @@ function RiddenLinesBlock({
                 <button
                   type="button"
                   onClick={() => onLineTap(line)}
-                  aria-label={`${riddenLineDisplayName(line)}を地図で見る`}
-                  className="min-w-0 flex-1 cursor-pointer text-left"
+                  disabled={needsReview}
+                  aria-label={needsReview ? undefined : `${displayName}を地図で見る`}
+                  className="min-w-0 flex-1 text-left enabled:cursor-pointer"
                 >
-                  <span className="block truncate text-sm font-medium">{riddenLineDisplayName(line)}</span>
+                  <span className="block truncate text-sm font-medium">{displayName}</span>
+                  {needsReview && (
+                    <span className="block text-xs font-medium text-[var(--signal)]">
+                      系統の連携を要確認
+                    </span>
+                  )}
                   {rideLabel && (
                     <span className="block text-xs text-[var(--dim)]">{rideLabel}</span>
                   )}
@@ -6667,11 +6529,7 @@ function RiddenLinesBlock({
                   )}
                 </div>
               )}
-              {/* Block picker (stage 2): the master blocks of this
-                  service, one toggle each. Full rides have nothing
-                  to pick; a row with no service link has no blocks
-                  to offer. */}
-              {line.serviceId && line.rideState !== "full" && blocks.length > 0 && (
+              {coveredBlocks && (
                 <div data-map-no-fly="" className="mt-1.5">
                   <button
                     type="button"

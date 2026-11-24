@@ -11,39 +11,35 @@
    can be regression-tested directly against the real asset — see
    line-resolution.test.ts.
 
-   Rows that carry a saved service_id resolve from that id, not
-   from their name (review finding 5): the recorded name may be an
-   alias （「JR中央線」 for the rapid service) or a spelling the
-   master maps differently, and the saved id is the record of which
-   service was actually ridden. The id is only trusted when the
-   master knows it; an unknown id falls back to name resolution. */
+   Rows with a link that needs confirmation stay outside both
+   the service master and the asset fallback. */
 
-/* Operator brand prefixes a ledger name may carry in front of the
-   asset's line name （西武池袋線 → 池袋線）. */
 import {
   assetKeysForService,
-  isStaleAutoLink,
   normalizeParentheses,
-  serviceById,
+  resolveRiddenService,
   serviceByLedgerName,
+  type RiddenServiceLink,
   type ServiceMasterEntry,
 } from "../../shared/service-master";
 
-export const LINE_OPERATOR_PREFIXES = [
-  "西武",
-  "東武",
-  "京成",
-  "京急",
-  "京王",
-  "小田急",
-  "東急",
-  "相鉄",
-  "北総",
-  "都営",
-  "東葉",
-  "埼玉高速",
-  "つくばエクスプレス",
-];
+/* Brand spellings that can precede a formal line name. */
+const OPERATOR_BY_PREFIX = new Map([
+  ["西武", "西武鉄道"],
+  ["東武", "東武鉄道"],
+  ["京成", "京成電鉄"],
+  ["京急", "京浜急行電鉄"],
+  ["京王", "京王電鉄"],
+  ["小田急", "小田急電鉄"],
+  ["東急", "東急電鉄"],
+  ["相鉄", "相模鉄道"],
+  ["北総", "北総鉄道"],
+  ["都営", "東京都"],
+  ["東葉", "東葉高速鉄道"],
+  ["埼玉高速", "埼玉高速鉄道"],
+  ["つくばエクスプレス", "首都圏新都市鉄道"],
+]);
+const LINE_OPERATOR_PREFIXES = ["JR", "ＪＲ", ...OPERATOR_BY_PREFIX.keys()];
 
 /* Line name → asset key, for the normalization fallback below. A name
    shared by two operators (「本線」) is ambiguous and left out:
@@ -52,132 +48,134 @@ export function buildLineKeyByName(
   geometries: Readonly<Record<string, { name: string }>>,
 ): ReadonlyMap<string, string> {
   const counts = new Map<string, number>();
-  for (const entry of Object.values(geometries)) {
-    counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
-  }
   const map = new Map<string, string>();
   for (const [key, entry] of Object.entries(geometries)) {
-    if (counts.get(entry.name) === 1) map.set(entry.name, key);
+    const name = normalizeParentheses(entry.name);
+    const count = (counts.get(name) ?? 0) + 1;
+    counts.set(name, count);
+    if (count === 1) map.set(name, key);
+    else map.delete(name);
   }
   return map;
 }
 
-/* The service a ledger row belongs to: its saved service_id when
-   the master knows it, otherwise the service its name spells.
-   Exported so the ledger list shows the same service the
-   aggregates count (review round 4, low): a row that resolves to a
-   service shows that service's display name, whether or not a
-   service_id was saved with it.
-   A saved id is trusted only while the recorded name still
-   resolves to it (review round 5, medium): a link the old
-   auto-link produced but the current rules disagree with is stale
-   — the row falls back to its name, which resolves to no service,
-   so it keeps its recorded name and counts for nothing until the
-   stored id is cleared on re-registration / re-import. A link the
-   old code could not have produced is still trusted: it may be an
-   explicit link a caller chose. */
+export type RiddenLineRow = RiddenServiceLink;
+
+function asRiddenLineRow(
+  nameOrRow: string | RiddenLineRow,
+  serviceId?: string | null,
+): RiddenLineRow {
+  return typeof nameOrRow === "string" ? { name: nameOrRow, serviceId } : nameOrRow;
+}
+
+/* The ledger displays the same service the aggregates count. */
 export function serviceForRow(
-  ledgerName: string,
+  nameOrRow: string | RiddenLineRow,
   serviceId?: string | null,
 ): ServiceMasterEntry | undefined {
-  if (serviceId) {
-    const saved = serviceById(serviceId);
-    if (saved && !isStaleAutoLink(ledgerName, serviceId)) return saved;
-  }
-  return serviceByLedgerName(ledgerName);
+  return resolveRiddenService(asRiddenLineRow(nameOrRow, serviceId)).service;
 }
 
-/* The operator a geometry entry belongs to, for the fallback's
-   note check below — null when the entry carries none. */
-function operatorOfGeometry(
+function geometryText(
   entry: unknown,
-): string | null {
-  if (typeof entry !== "object" || entry === null) return null;
-  const operator = (entry as Record<string, unknown>).operator;
-  return typeof operator === "string" ? operator : null;
+  field: "name" | "operator",
+): string | undefined {
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const value = (entry as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : undefined;
 }
 
-/* The operator a parenthetical note names, if it names one: the
-   note (JR prefix stripped) must start an operator's name or be
-   started by it — the same abbreviation rule the master uses.
-   Null when the note names no operator in the data (a service
-   name, 「快速」, …), in which case the note is not an operator
-   claim at all and the fallback strips it as before. */
-function operatorNamedByNote(
-  note: string,
-  operators: ReadonlySet<string>,
-): string | null {
-  const q = note.trim().replace(/^(?:JR|ＪＲ)/, "");
-  if (!q) return null;
-  for (const operator of operators) {
-    if (operator.startsWith(q) || q.startsWith(operator)) return operator;
+function splitOperatorPrefix(name: string) {
+  const prefix = LINE_OPERATOR_PREFIXES.find((value) => name.startsWith(value));
+  return { prefix, lineName: prefix ? name.slice(prefix.length) : name };
+}
+
+function matchesOperatorPrefix(prefix: string, operator: string | undefined) {
+  if (!operator) return false;
+  if (prefix === "JR" || prefix === "ＪＲ") {
+    return /^(?:北海道|東日本|東海|西日本|四国|九州)旅客鉄道$/.test(operator);
   }
-  return null;
+  return OPERATOR_BY_PREFIX.get(prefix) === operator;
 }
 
-/* Resolves a ledger line name to its single asset key. The saved
-   service_id answers first when given; names the master does not
-   cover fall back to normalization: unify the paren width and the
-   spaces around and inside the parentheses (review round 5, low —
-   「西武池袋線 (西武鉄道)」 is the same spelling as
-   「西武池袋線（西武鉄道）」), strip a leading 「JR」, strip a
-   trailing 「（…）」, then —
-   (a) try the name exactly as it stands: a line whose name IS the
-       brand plus 「線」 (京王線) must resolve here, before any brand
-       is stripped off it;
-   (b) strip a leading operator brand ONLY when the remainder is
-       itself a real line name in the asset — stripping 京王 off
-       京王線 would leave just 「線」, which names nothing.
-   A trailing note that names an operator must name the candidate
-   line's own operator: 「西武池袋線（東武鉄道）」 contradicts its
-   candidate and resolves to nothing, while a note that names no
-   operator （「快速」) is stripped as before.
-   Returns null when nothing resolves — the line then simply has no
-   track drawn and no color chip. Multi-line services also return
-   null here (no single key exists); their expansion is
-   resolveRiddenLineKeys. */
-export function resolveRiddenLineKey(
+/* An outer brand and any identities in the parenthetical note must
+   describe the same geometry. Unrecognized notes such as 「快速」
+   remain descriptive. */
+function resolveGeometryByLedgerName(
   ledgerName: string,
+  geometries: Readonly<Record<string, unknown>>,
+  keyByName: ReadonlyMap<string, string>,
+): string | null {
+  const normalized = normalizeParentheses(ledgerName);
+  const noteMatch = normalized.match(/（([^（）]*)）$/);
+  const note = noteMatch?.[1];
+  const name = noteMatch ? normalized.slice(0, noteMatch.index) : normalized;
+  const { prefix, lineName } = splitOperatorPrefix(name);
+  // A complete formal name can include its own brand or parentheses.
+  const exactFullName = keyByName.get(normalized);
+  const exact = exactFullName ?? keyByName.get(name);
+  const key = exact ?? keyByName.get(lineName);
+  if (!key) return null;
+
+  const operator = geometryText(geometries[key], "operator");
+  if (prefix && (!exact || operator) && !matchesOperatorPrefix(prefix, operator)) {
+    return null;
+  }
+  if (exactFullName || !note) return key;
+
+  const entries = Object.values(geometries);
+  if (LINE_OPERATOR_PREFIXES.includes(note)) {
+    if (!matchesOperatorPrefix(note, operator)) return null;
+  } else {
+    const operatorNote = note.replace(/^(?:JR|ＪＲ)/, "");
+    const operators = entries.map((entry) => geometryText(entry, "operator"));
+    const matchesOperatorNote = (value: string | undefined) =>
+      !!value && (value.startsWith(operatorNote) || operatorNote.startsWith(value));
+    if (operators.includes(operatorNote)) {
+      if (operator !== operatorNote) return null;
+    } else if (!matchesOperatorNote(operator) && operators.some(matchesOperatorNote)) {
+      return null;
+    }
+  }
+
+  const candidateName = geometryText(geometries[key], "name");
+  const isKnownLine = (value: string) =>
+    entries.some((entry) => geometryText(entry, "name") === value);
+  if (isKnownLine(note)) return note === candidateName ? key : null;
+
+  const noteParts = splitOperatorPrefix(note);
+  if (noteParts.prefix && isKnownLine(noteParts.lineName)) {
+    return noteParts.lineName === candidateName && matchesOperatorPrefix(noteParts.prefix, operator)
+      ? key
+      : null;
+  }
+
+  const notedService = serviceByLedgerName(note);
+  if (notedService) {
+    const keys = assetKeysForService(notedService.id);
+    return keys.length === 1 && keys[0] === key ? key : null;
+  }
+  return key;
+}
+
+/* Resolve a master service or an asset fallback to one key. Use
+   resolveRiddenLineKeys to expand a multi-line service. */
+export function resolveRiddenLineKey(
+  nameOrRow: string | RiddenLineRow,
   geometries: Readonly<Record<string, unknown>>,
   keyByName: ReadonlyMap<string, string>,
   serviceId?: string | null,
 ): string | null {
-  const service = serviceForRow(ledgerName, serviceId);
+  const row = asRiddenLineRow(nameOrRow, serviceId);
+  const { service, needsReview } = resolveRiddenService(row);
+  if (needsReview) return null;
   if (service) {
     const keys = assetKeysForService(service.id);
     // Exactly one formal line: the service IS that line.
     if (keys.length === 1 && geometries[keys[0]!]) return keys[0]!;
     return null;
   }
-  let name = normalizeParentheses(ledgerName);
-  if (name.startsWith("JR")) name = name.slice(2);
-  const noteMatch = name.match(/（([^）]*)）$/);
-  const note = noteMatch?.[1] ?? null;
-  if (noteMatch) name = name.slice(0, noteMatch.index);
-  const exact = keyByName.get(name);
-  let key: string | null = exact ?? null;
-  if (!key) {
-    for (const prefix of LINE_OPERATOR_PREFIXES) {
-      if (name.startsWith(prefix)) {
-        const stripped = keyByName.get(name.slice(prefix.length));
-        if (stripped) {
-          key = stripped;
-          break;
-        }
-      }
-    }
-  }
-  if (!key || !note) return key;
-  const operators = new Set<string>();
-  for (const entry of Object.values(geometries)) {
-    const operator = operatorOfGeometry(entry);
-    if (operator) operators.add(operator);
-  }
-  const namedOperator = operatorNamedByNote(note, operators);
-  if (namedOperator && operatorOfGeometry(geometries[key]) !== namedOperator) {
-    return null;
-  }
-  return key;
+  return resolveGeometryByLedgerName(row.name, geometries, keyByName);
 }
 
 /* All asset keys a ledger line expands to, in running order — the
@@ -188,16 +186,18 @@ export function resolveRiddenLineKey(
    keeps painting whole single-key lines, so this is used for the
    expansion itself and for tests until then. */
 export function resolveRiddenLineKeys(
-  ledgerName: string,
+  nameOrRow: string | RiddenLineRow,
   geometries: Readonly<Record<string, unknown>>,
   keyByName: ReadonlyMap<string, string>,
   serviceId?: string | null,
 ): string[] {
-  const service = serviceForRow(ledgerName, serviceId);
+  const row = asRiddenLineRow(nameOrRow, serviceId);
+  const { service, needsReview } = resolveRiddenService(row);
+  if (needsReview) return [];
   if (service) {
     return assetKeysForService(service.id).filter((key) => geometries[key]);
   }
-  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName);
+  const key = resolveGeometryByLedgerName(row.name, geometries, keyByName);
   return key ? [key] : [];
 }
 
@@ -210,20 +210,13 @@ export function resolveRiddenLineKeys(
    let one operator's bar exceed its line total (the 2/1 the
    review reproduced). Two different services that share one asset
    line (JR総武快速線 and JR総武本線 are both 「総武線」) still
-   count as two — they are two rides on two services. A row's
-   service comes from its saved service_id when the master knows
-   it, otherwise from its name; rows with no known service fall
-   back to their resolved asset line and count once per key. Rows
-   that resolve to nothing count for no operator. The denominator
+   count as two — they are two rides on two services. Unlinked
+   rows can count once per resolved asset key. Rows that need
+   link confirmation are excluded from both counts. The denominator
    (LINE_OPERATOR_TOTALS, N02 lines per operator) counts lines,
    not services — the two coincide for single-service lines, and
    the bar can no longer overflow it by double-counting one
    service under two names. */
-export type RiddenLineRow = {
-  name: string;
-  serviceId?: string | null;
-};
-
 export function countRiddenByOperator(
   rows: readonly RiddenLineRow[],
   geometries: Readonly<Record<string, { operator: string }>>,
@@ -231,14 +224,15 @@ export function countRiddenByOperator(
 ): ReadonlyMap<string, number> {
   const tokensByOperator = new Map<string, Set<string>>();
   for (const row of rows) {
-    const service = serviceForRow(row.name, row.serviceId ?? null);
+    const { service, needsReview } = resolveRiddenService(row);
+    if (needsReview) continue;
     let operator: string | null = null;
     let token: string | null = null;
     if (service) {
       operator = service.operator;
       token = `service:${service.id}`;
     } else {
-      const key = resolveRiddenLineKey(row.name, geometries, keyByName);
+      const key = resolveGeometryByLedgerName(row.name, geometries, keyByName);
       if (key) {
         operator = geometries[key]?.operator ?? null;
         token = `key:${key}`;

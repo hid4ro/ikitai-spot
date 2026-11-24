@@ -5,6 +5,7 @@
    the service master (shared/service-master.ts).
    Run with: bun test client/src/line-focus.test.ts */
 import { describe, expect, test } from "bun:test";
+import type { RiddenServiceLink } from "../../shared/service-master";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import { buildLineKeyByName, resolveRiddenLineKey } from "./line-resolution";
 import {
@@ -14,8 +15,8 @@ import {
 } from "./line-focus";
 
 const keyByName = buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
-const operatorOf = (name: string, serviceId?: string | null) =>
-  operatorOfLine(name, RIDDEN_LINE_GEOMETRIES, keyByName, serviceId);
+const operatorOf = (line: string | RiddenServiceLink) =>
+  operatorOfLine(line, RIDDEN_LINE_GEOMETRIES, keyByName);
 
 /* The nine rows of the live ridden-lines ledger (listRiddenLines,
    ids 1, 3–10), in ledger order. */
@@ -48,12 +49,10 @@ describe("operatorOfLine", () => {
     expect(operatorOf("JR埼京線")).toBe("東日本旅客鉄道");
   });
 
-  test("a saved service_id answers even when the name would not", () => {
-    // A row saved as rinkai but recorded under a spelling the
-    // master does not know still belongs to its saved service.
-    expect(operatorOf("りんかい線（仮）", "rinkai")).toBe(
-      "東京臨海高速鉄道",
-    );
+  test("an explicit saved link can still identify the operator after a name mismatch", () => {
+    const row = { name: "りんかい線（仮）", serviceId: "rinkai" };
+    expect(operatorOf(row)).toBeNull();
+    expect(operatorOf({ ...row, serviceLinkSource: "explicit" })).toBe("東京臨海高速鉄道");
   });
 
   test("an unknown name belongs to no operator", () => {
@@ -103,6 +102,15 @@ describe("firstLineByOperator (the bar-tap jump target)", () => {
       keyByName,
     );
     expect(m.get("東日本旅客鉄道")?.id).toBe(6);
+  });
+
+  test("a saved link pending review cannot be the operator's target", () => {
+    const rows = [
+      { id: 11, name: "中央線（各駅停車）", serviceId: "jr-chuo-rapid" },
+      { id: 12, name: "JR中央線（快速）", serviceId: "jr-chuo-rapid" },
+    ];
+    const targets = firstLineByOperator(rows, RIDDEN_LINE_GEOMETRIES, keyByName);
+    expect(targets.get("東日本旅客鉄道")?.id).toBe(12);
   });
 
   test("an empty ledger maps no operator", () => {

@@ -13,6 +13,7 @@ import {
   clearLineGraphCache,
   clipServicePath,
   computeLineCoverage,
+  computeRiddenLineCoverage,
   coveredBlockIds,
   EdgeCoverage,
   graphSectionLegs,
@@ -382,6 +383,53 @@ describe("coverage: dedup and per-service isolation", () => {
     expect(painted.legs.length).toBeGreaterThan(0);
     expect(coverage.perService.get("keio")!.riddenKm).toBe(0);
     expect(coverage.networkRiddenKm).toBe(0);
+  });
+});
+
+describe("coverage from saved ledger rows", () => {
+  const oldLink = {
+    name: "中央線（各駅停車）",
+    serviceId: "jr-chuo-rapid",
+    fromStationId: null,
+    toStationId: null,
+    pathSnapshot: null,
+    sections: [],
+  };
+
+  test.each(["unknown", "partial", "full"] as const)(
+    "leaves a pending-review ride in state %s off the map and out of the distances",
+    (rideState) => {
+      const row = {
+        ...oldLink,
+        rideState,
+        fromStationId: rideState === "partial" ? S.東京.id : null,
+        toStationId: rideState === "partial" ? S.国分寺.id : null,
+      };
+      const coverage = computeRiddenLineCoverage([row], GEOMETRIES, 597);
+      expect(coverage.networkRiddenKm).toBe(0);
+      expect(coverage.perServiceLegs.size).toBe(0);
+      expect(coverage.perOperatorKm.size).toBe(0);
+      expect(coverage.perService.size).toBe(0);
+      expect(coverage.completeServiceIds).toEqual([]);
+    },
+  );
+
+  test("a pending full ride does not extend a verified ride on the same service", () => {
+    const verified = {
+      ...oldLink,
+      name: "JR中央線（快速）",
+      rideState: "partial" as const,
+      fromStationId: S.東京.id,
+      toStationId: S.国分寺.id,
+    };
+    const coverage = computeRiddenLineCoverage(
+      [{ ...oldLink, rideState: "full" }, verified],
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.networkRiddenKm).toBeCloseTo(30.2, 0);
+    expect(coverage.perServiceLegs.get("jr-chuo-rapid")?.unknown).toBe(false);
+    expect(coverage.completeServiceIds).toEqual([]);
   });
 });
 

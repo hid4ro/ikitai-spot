@@ -11,14 +11,16 @@ import {
   blockById,
   isKnownMasterVersion,
   isN02StationId,
-  isStaleAutoLink,
+  resolveRiddenService,
   serviceById,
-  serviceByLedgerName,
   serviceFullPathSnapshot,
   SERVICE_MASTER_VERSION,
+  SERVICE_MATCH_VERSION,
   stationRefById,
+  usableRiddenService,
   validateSectionEndpoints,
   type RideState,
+  type ServiceLinkSource,
 } from "../../shared/service-master";
 import * as schema from "./schema";
 
@@ -60,6 +62,8 @@ const rideFieldsSchema = z.object({
 
 type RideFields = {
   serviceId: string | null;
+  serviceLinkSource: ServiceLinkSource;
+  serviceMatchVersion: string | null;
   rideState: RideState;
   fromStationId: string | null;
   fromStationName: string | null;
@@ -91,26 +95,36 @@ type RideFields = {
      stored as the version it validated as, never with its spaces
      (review round 3, low) — and a whitespace-only version still
      rejects, because trimming it leaves an empty string.
-   A known serviceId / version is resolved server-side when the
-   caller omits it; an unknown serviceId is rejected outright (a
-   caller typo must never silently attach a ride to the wrong
-   service). When the caller passes no ride state, both endpoints
-   present means partial, otherwise unknown.
+   The current name match supplies the serviceId when omitted and
+   validates an explicit ID. Automatic matches store their rule
+   version separately from the ride's master version. When the
+   caller passes no ride state, both endpoints present means
+   partial, otherwise unknown.
    Exported for the regression tests (server/src/actions.test.ts):
    the save-time validation is exercised directly, without a DB. */
 export function resolveRideFields(
   name: string,
   supplied: z.infer<typeof rideFieldsSchema>,
 ): RideFields {
-  const service = supplied.serviceId
-    ? serviceById(supplied.serviceId)
-    : serviceByLedgerName(name);
-  if (supplied.serviceId && !service) {
+  const { service } = resolveRiddenService({
+    name,
+    serviceId: supplied.serviceId,
+  });
+  if (supplied.serviceId != null && !service) {
+    if (!serviceById(supplied.serviceId)) {
+      throw new Error(
+        `resolveRideFields: unknown serviceId "${supplied.serviceId}" for "${name}"`,
+      );
+    }
     throw new Error(
-      `resolveRideFields: unknown serviceId "${supplied.serviceId}" for "${name}"`,
+      `resolveRideFields: serviceId "${supplied.serviceId}" does not match "${name}"`,
     );
   }
-  const serviceId = service?.id ?? null;
+  const link = {
+    serviceId: service?.id ?? null,
+    serviceLinkSource: supplied.serviceId != null ? "explicit" : "auto",
+    serviceMatchVersion: supplied.serviceId != null ? null : SERVICE_MATCH_VERSION,
+  } as const;
   const rideState =
     supplied.rideState ??
     (supplied.fromStationId?.trim() && supplied.toStationId?.trim()
@@ -124,7 +138,7 @@ export function resolveRideFields(
         : null;
   if (rideState === "unknown") {
     return {
-      serviceId,
+      ...link,
       rideState: "unknown",
       fromStationId: null,
       fromStationName: null,
@@ -158,7 +172,7 @@ export function resolveRideFields(
       );
     }
     return {
-      serviceId,
+      ...link,
       rideState: "partial",
       fromStationId,
       fromStationName: supplied.fromStationName?.trim() || null,
@@ -191,7 +205,7 @@ export function resolveRideFields(
       ? serviceFullPathSnapshot(service.id)
       : null;
   return {
-    serviceId,
+    ...link,
     rideState: "full",
     fromStationId: null,
     fromStationName: null,
@@ -199,6 +213,17 @@ export function resolveRideFields(
     toStationName: null,
     masterVersion,
     pathSnapshot: snapshot ? JSON.stringify(snapshot) : null,
+  };
+}
+
+function riddenServiceBackfill(name: string) {
+  const link = resolveRideFields(name, {});
+  if (!link.serviceId) return undefined;
+  return {
+    serviceId: link.serviceId,
+    serviceLinkSource: link.serviceLinkSource,
+    serviceMatchVersion: link.serviceMatchVersion,
+    masterVersion: sql`coalesce(${schema.riddenLines.masterVersion}, ${link.masterVersion})`,
   };
 }
 
@@ -1544,6 +1569,8 @@ export const Actions = {
           note: z.string().nullable(),
           context: z.string().nullable(),
           serviceId: z.string().nullable(),
+          serviceLinkSource: z.enum(["auto", "explicit"]).nullable(),
+          serviceMatchVersion: z.string().nullable(),
           rideState: rideStateSchema,
           fromStationId: z.string().nullable(),
           fromStationName: z.string().nullable(),
@@ -1595,6 +1622,8 @@ export const Actions = {
           note: r.note,
           context: r.context,
           serviceId: r.serviceId,
+          serviceLinkSource: r.serviceLinkSource,
+          serviceMatchVersion: r.serviceMatchVersion,
           rideState: normalizeRideState(r.rideState),
           fromStationId: r.fromStationId,
           fromStationName: r.fromStationName,
@@ -1619,7 +1648,7 @@ export const Actions = {
 
   addRiddenLine: defineAction({
     description:
-      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite). The ride fields (serviceId, rideState, ridden section) may be passed explicitly and are validated per state (unknown carries no section, partial needs both endpoint station IDs and a known service, full needs a known service and a master version); otherwise the row links to its service and starts unknown — a fresh registration never inherits a restored section.",
+      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet. An explicit serviceId on a new row must match the service named by the entry. The ride fields are validated per state (unknown carries no section, partial needs both endpoint station IDs and a known service, full needs a known service and a master version); by default the row links by name and starts unknown.",
     request: z
       .object({
         name: z.string().min(1).max(100),
@@ -1639,10 +1668,6 @@ export const Actions = {
           id: schema.riddenLines.id,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
-          masterVersion: schema.riddenLines.masterVersion,
-          rideState: schema.riddenLines.rideState,
-          fromStationId: schema.riddenLines.fromStationId,
-          toStationId: schema.riddenLines.toStationId,
         })
         .from(schema.riddenLines)
         .where(eq(schema.riddenLines.name, name));
@@ -1655,65 +1680,19 @@ export const Actions = {
             .where(eq(schema.riddenLines.id, existing[0].id));
           ctx.invalidateQueries();
         }
-        // Link an unlinked row to its service only — never touch
-        // the ride state or the section a caller already recorded
-        // (review finding 3): the section restoration belongs to
-        // the SQL migration, not to a re-registration. The UPDATE
-        // itself re-checks that the row is still unlinked, so a
-        // concurrent link can never be overwritten. The recorded
-        // master version is likewise kept when one is already there
-        // (review round 2): only a missing version is backfilled
-        // with the current one.
-        if (!existing[0].serviceId) {
-          const link = resolveRideFields(name, {});
-          if (link.serviceId) {
-            await db
-              .update(schema.riddenLines)
-              .set({
-                serviceId: link.serviceId,
-                ...(existing[0].masterVersion
-                  ? {}
-                  : { masterVersion: link.masterVersion }),
-              })
-              .where(
-                and(
-                  eq(schema.riddenLines.id, existing[0].id),
-                  isNull(schema.riddenLines.serviceId),
-                ),
-              );
-            ctx.invalidateQueries();
-          }
-        } else if (
-          // Repair a link the old auto-link saved wrongly (review
-          // round 5): the recorded name linked to the saved service
-          // under the pre-round-4 rules but does not under the
-          // current ones, so the link can only have come from the
-          // old auto-link — re-resolve the row and store the
-          // current answer (null for every such name in this
-          // master: the distinguishing qualifier keeps it
-          // unlinked). Only unknown rows with no recorded section
-          // are repaired: a partial/full row's section and state
-          // are the recorded ride itself, and clearing the id
-          // would leave a section without a service — those rows
-          // need individual confirmation, and the display and the
-          // aggregates already distrust the stale id
-          // (serviceForRow). The UPDATE re-checks the saved id so
-          // a concurrent repair can never clear a fresh link. The
-          // recorded master version is kept: it is history, not
-          // part of the wrong link.
-          normalizeRideState(existing[0].rideState) === "unknown" &&
-          !existing[0].fromStationId &&
-          !existing[0].toStationId &&
-          isStaleAutoLink(name, existing[0].serviceId)
-        ) {
-          const fresh = resolveRideFields(name, {});
+        // Backfill only an unlinked row. A conflicting saved ID may
+        // have been explicit and remains available for individual review.
+        const link = existing[0].serviceId
+          ? undefined
+          : riddenServiceBackfill(name);
+        if (link) {
           await db
             .update(schema.riddenLines)
-            .set({ serviceId: fresh.serviceId })
+            .set(link)
             .where(
               and(
                 eq(schema.riddenLines.id, existing[0].id),
-                eq(schema.riddenLines.serviceId, existing[0].serviceId),
+                isNull(schema.riddenLines.serviceId),
               ),
             );
           ctx.invalidateQueries();
@@ -1781,10 +1760,6 @@ export const Actions = {
           name: schema.riddenLines.name,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
-          masterVersion: schema.riddenLines.masterVersion,
-          rideState: schema.riddenLines.rideState,
-          fromStationId: schema.riddenLines.fromStationId,
-          toStationId: schema.riddenLines.toStationId,
         })
         .from(schema.riddenLines);
       const seen = new Map(
@@ -1794,10 +1769,6 @@ export const Actions = {
             id: r.id,
             hasContext: !!r.context,
             serviceId: r.serviceId,
-            masterVersion: r.masterVersion,
-            rideState: r.rideState,
-            fromStationId: r.fromStationId,
-            toStationId: r.toStationId,
           },
         ]),
       );
@@ -1825,25 +1796,13 @@ export const Actions = {
           } else {
             skipped++;
           }
-          // Link an unlinked row to its service only — never touch
-          // its ride state or section (review finding 3): a
-          // re-import must not erase a section a caller recorded
-          // explicitly. The UPDATE itself re-checks that the row is
-          // still unlinked. The recorded master version is likewise
-          // kept when one is already there (review round 2): only
-          // a missing version is backfilled with the current one.
           if (!known.serviceId && known.id > 0) {
-            const link = resolveRideFields(name, {});
-            if (link.serviceId) {
+            const link = riddenServiceBackfill(name);
+            if (link) {
               rideUpdates.push(
                 db
                   .update(schema.riddenLines)
-                  .set({
-                    serviceId: link.serviceId,
-                    ...(known.masterVersion
-                      ? {}
-                      : { masterVersion: link.masterVersion }),
-                  })
+                  .set(link)
                   .where(
                     and(
                       eq(schema.riddenLines.id, known.id),
@@ -1852,41 +1811,7 @@ export const Actions = {
                   ),
               );
               known.serviceId = link.serviceId;
-              if (!known.masterVersion) {
-                known.masterVersion = link.masterVersion;
-              }
             }
-          } else if (
-            // Repair a link the old auto-link saved wrongly (review
-            // round 5) — the same rule as addRiddenLine's
-            // re-registration repair above: only unknown rows with
-            // no recorded section, so a recorded section and ride
-            // state are never touched; partial/full rows with a
-            // stale link need individual confirmation. The UPDATE
-            // re-checks the saved id, and the in-memory `seen`
-            // entry is updated so a later entry in the same import
-            // sees the repaired state.
-            known.serviceId &&
-            known.id > 0 &&
-            normalizeRideState(known.rideState) === "unknown" &&
-            !known.fromStationId &&
-            !known.toStationId &&
-            isStaleAutoLink(name, known.serviceId)
-          ) {
-            const staleId = known.serviceId;
-            const fresh = resolveRideFields(name, {});
-            rideUpdates.push(
-              db
-                .update(schema.riddenLines)
-                .set({ serviceId: fresh.serviceId })
-                .where(
-                  and(
-                    eq(schema.riddenLines.id, known.id),
-                    eq(schema.riddenLines.serviceId, staleId),
-                  ),
-                ),
-            );
-            known.serviceId = fresh.serviceId;
           }
           continue;
         }
@@ -1895,10 +1820,6 @@ export const Actions = {
           id: -1,
           hasContext: !!(entry.context?.trim()),
           serviceId: ride.serviceId,
-          masterVersion: ride.masterVersion,
-          rideState: ride.rideState,
-          fromStationId: ride.fromStationId,
-          toStationId: ride.toStationId,
         });
         fresh.push({
           name,
@@ -1952,6 +1873,12 @@ export const Actions = {
           `addRiddenSection: "${line.name}" is not linked to a service yet`,
         );
       }
+      const service = usableRiddenService(line);
+      if (!service) {
+        throw new Error(
+          `addRiddenSection: service link for "${line.name}" needs confirmation`,
+        );
+      }
       if (normalizeRideState(line.rideState) === "full") {
         throw new Error(
           `addRiddenSection: "${line.name}" is a full ride — it already covers the whole service`,
@@ -1961,7 +1888,7 @@ export const Actions = {
       const toStationId = args.toStationId.trim();
       const direction = args.direction ?? null;
       const problem = validateSectionEndpoints(
-        line.serviceId,
+        service.id,
         fromStationId,
         toStationId,
         direction,
@@ -1971,7 +1898,7 @@ export const Actions = {
       }
       const blockId = args.blockId?.trim() || null;
       if (blockId) {
-        const block = blockById(line.serviceId, blockId);
+        const block = blockById(service.id, blockId);
         if (!block) {
           throw new Error(
             `addRiddenSection: unknown block "${blockId}" for "${line.name}"`,

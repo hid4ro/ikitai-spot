@@ -568,13 +568,17 @@ export function stationRefById(stationId: string): StationRef | undefined {
    Exported so the map fallback (client/src/line-resolution.ts)
    unifies the same shapes before it strips a note (review round
    5, low). */
-export function normalizeParentheses(name: string): string {
+function normalizeParenthesisWidth(name: string): string {
   return name
     .trim()
     .replace(/\(/g, "（")
     .replace(/\)/g, "）")
     .replace(/[ 　]+（/g, "（")
-    .replace(/）[ 　]+/g, "）")
+    .replace(/）[ 　]+/g, "）");
+}
+
+export function normalizeParentheses(name: string): string {
+  return normalizeParenthesisWidth(name)
     .replace(/（[ 　]+/g, "（")
     .replace(/[ 　]+）/g, "）");
 }
@@ -664,15 +668,26 @@ export function canonicalLedgerName(name: string): string {
   return unified;
 }
 
-/* The pre-round-4 lookup (commits 141eacb–6ab413a), kept to
-   recognize the links it produced: the trailing （…） was dropped
-   unconditionally and the leading JR stripped, so
-   「中央線（各駅停車）」 attached to jr-chuo-rapid and
-   「総武本線（総武快速線）」 to jr-sobu-local. Half-width
-   parentheses were not unified then, so a half-width spelling
-   resolved to nothing. The structure mirrors the old
-   serviceByLedgerName exactly (exact match, stripped match,
-   canonical match) so the reproduction is faithful, not a guess. */
+type HistoricalServiceAlias = Pick<
+  ServiceMasterEntry,
+  "id" | "ledgerNames" | "operator"
+>;
+
+// Both old matchers used this ordered alias catalog. Keep it independent
+// of service-master edits so an added alias cannot change historical evidence.
+const HISTORICAL_JR_OPERATOR = "東日本旅客鉄道";
+const HISTORICAL_SERVICE_ALIASES: readonly HistoricalServiceAlias[] = [
+  { id: "jr-musashino", ledgerNames: ["JR武蔵野線"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "hokuso", ledgerNames: ["北総線"], operator: "北総鉄道" },
+  { id: "jr-chuo-rapid", ledgerNames: ["JR中央線（快速）", "JR中央線"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "jr-sobu-rapid", ledgerNames: ["JR総武快速線"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "jr-sobu-local", ledgerNames: ["JR総武本線"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "keio", ledgerNames: ["京王線"], operator: "京王電鉄" },
+  { id: "jr-saikyo", ledgerNames: ["JR埼京線"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "rinkai", ledgerNames: ["りんかい線", "臨海副都心線"], operator: "東京臨海高速鉄道" },
+  { id: "yamanote", ledgerNames: ["山手線"], operator: HISTORICAL_JR_OPERATOR },
+];
+
 function legacyCanonicalLedgerName(name: string): string {
   return name
     .trim()
@@ -680,49 +695,65 @@ function legacyCanonicalLedgerName(name: string): string {
     .replace(/^(?:JR|ＪＲ)/, "");
 }
 
-export function legacyServiceByLedgerName(
-  ledgerName: string,
-): ServiceMasterEntry | undefined {
+// 6ab413a compared exact names, then discarded any trailing full-width
+// qualifier, then discarded a leading JR prefix for the canonical comparison.
+function legacyServiceIdByLedgerName(ledgerName: string): string | undefined {
   const name = ledgerName.trim();
-  const exact = SERVICE_MASTER.find((entry) =>
+  const exact = HISTORICAL_SERVICE_ALIASES.find((entry) =>
     entry.ledgerNames.includes(name),
   );
-  if (exact) return exact;
+  if (exact) return exact.id;
   const stripped = name.replace(/（[^）]*）$/, "");
   if (stripped !== name) {
-    const byStripped = SERVICE_MASTER.find((entry) =>
+    const byStripped = HISTORICAL_SERVICE_ALIASES.find((entry) =>
       entry.ledgerNames.includes(stripped),
     );
-    if (byStripped) return byStripped;
+    if (byStripped) return byStripped.id;
   }
   const canonical = legacyCanonicalLedgerName(name);
-  return SERVICE_MASTER.find((entry) =>
+  return HISTORICAL_SERVICE_ALIASES.find((entry) =>
     entry.ledgerNames.some(
       (ledgerName) => legacyCanonicalLedgerName(ledgerName) === canonical,
     ),
-  );
+  )?.id;
 }
 
-/* Whether a saved service_id is a stale link the old auto-link
-   produced (review round 5, medium): the pre-round-4 lookup linked
-   the recorded name to the saved id, but the current rules do not
-   — so the link can only have come from the old auto-link, and it
-   is safe to clear on re-registration / re-import. A link the
-   current rules still agree with is not stale, and a link the old
-   code could not have produced either (a different service, or an
-   id the master never knew) is left for individual confirmation —
-   never auto-cleared, because the row may carry an explicit link
-   a caller chose. A null / missing id is never stale. */
-export function isStaleAutoLink(
+export function legacyServiceByLedgerName(
   ledgerName: string,
-  savedServiceId: string | null | undefined,
-): boolean {
-  if (!savedServiceId) return false;
-  if (!serviceById(savedServiceId)) return false;
-  return (
-    legacyServiceByLedgerName(ledgerName)?.id === savedServiceId &&
-    serviceByLedgerName(ledgerName)?.id !== savedServiceId
+): ServiceMasterEntry | undefined {
+  const id = legacyServiceIdByLedgerName(ledgerName);
+  return id ? serviceById(id) : undefined;
+}
+
+// 9ee18307 normalized half-width parentheses and accepted a qualifier
+// recognized anywhere in the catalog. Its display names were all aliases.
+function round4CanonicalLedgerName(name: string): string {
+  const unified = bareLedgerName(normalizeParenthesisWidth(name));
+  const match = unified.match(/（([^）]*)）$/);
+  if (!match) return unified;
+  const qualifier = match[1]!.trim();
+  const company = bareLedgerName(qualifier);
+  const knownQualifier = HISTORICAL_SERVICE_ALIASES.some(
+    (entry) =>
+      entry.ledgerNames.some((alias) => bareLedgerName(alias) === company) ||
+      (company &&
+        (entry.operator.startsWith(company) || company.startsWith(entry.operator))),
   );
+  return knownQualifier ? unified.slice(0, match.index) : unified;
+}
+
+function round4ServiceIdByLedgerName(ledgerName: string): string | undefined {
+  const name = normalizeParenthesisWidth(ledgerName);
+  const exact = HISTORICAL_SERVICE_ALIASES.find((entry) =>
+    entry.ledgerNames.includes(name),
+  );
+  if (exact) return exact.id;
+  const canonical = round4CanonicalLedgerName(name);
+  return HISTORICAL_SERVICE_ALIASES.find((entry) =>
+    entry.ledgerNames.some(
+      (alias) => round4CanonicalLedgerName(alias) === canonical,
+    ),
+  )?.id;
 }
 
 export function serviceByLedgerName(
@@ -748,6 +779,70 @@ export function serviceByLedgerName(
       (ledgerName) => canonicalLedgerName(ledgerName) === canonical,
     ),
   );
+}
+
+// The matching rule version is separate from the version of the recorded ride.
+// 1 was the blanket qualifier strip; 2 checked the entire alias catalog.
+export const SERVICE_MATCH_VERSION = "3";
+
+export type ServiceLinkSource = "auto" | "explicit";
+
+export type RiddenServiceLink = {
+  name: string;
+  serviceId?: string | null;
+  serviceLinkSource?: ServiceLinkSource | null;
+  serviceMatchVersion?: string | null;
+};
+
+type RiddenServiceResolution =
+  | { service: ServiceMasterEntry | undefined; needsReview: false }
+  | {
+      service: undefined;
+      needsReview: true;
+      historicalAutoMatchVersions: readonly string[];
+    };
+
+// A saved link without provenance may have been automatic or explicit even
+// when an old matcher reproduces it. Flag disagreements and keep that evidence
+// for individual review. A validated explicit link records the caller's choice.
+export function resolveRiddenService(
+  row: RiddenServiceLink,
+): RiddenServiceResolution {
+  if (row.serviceId == null) {
+    return { service: serviceByLedgerName(row.name), needsReview: false };
+  }
+  const saved = serviceById(row.serviceId);
+  if (
+    saved &&
+    (row.serviceLinkSource === "explicit" ||
+      serviceByLedgerName(row.name)?.id === saved.id)
+  ) {
+    return { service: saved, needsReview: false };
+  }
+  const historicalAutoMatchVersions: string[] = [];
+  if (row.serviceLinkSource !== "explicit") {
+    if (
+      (!row.serviceMatchVersion || row.serviceMatchVersion === "1") &&
+      legacyServiceIdByLedgerName(row.name) === row.serviceId
+    ) {
+      historicalAutoMatchVersions.push("1");
+    }
+    if (
+      (!row.serviceMatchVersion || row.serviceMatchVersion === "2") &&
+      round4ServiceIdByLedgerName(row.name) === row.serviceId
+    ) {
+      historicalAutoMatchVersions.push("2");
+    }
+  }
+  return { service: undefined, needsReview: true, historicalAutoMatchVersions };
+}
+
+// Distance, map highlights and section editing require a usable saved ID.
+// An unlinked row can still have a name-based display or whole-line asset.
+export function usableRiddenService(
+  row: RiddenServiceLink,
+): ServiceMasterEntry | undefined {
+  return row.serviceId ? resolveRiddenService(row).service : undefined;
 }
 
 /* Expands a service into its formal lines, in running order —

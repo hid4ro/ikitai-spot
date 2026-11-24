@@ -16,36 +16,28 @@
 import type { GeoJsonLineGeometry } from "./geojson";
 import { resolveRiddenLineKey } from "./line-resolution";
 import {
-  serviceById,
-  serviceByLedgerName,
+  resolveRiddenService,
+  type RiddenServiceLink,
 } from "../../shared/service-master";
 
 type LineGeometryMap = Readonly<
   Record<string, { operator: string; geometry: GeoJsonLineGeometry }>
 >;
 
-/* The operator a ledger line name belongs to, via the service
-   master (multi-line services included) or, for names the master
-   does not know, via its resolved asset line; null when the name
-   resolves to nothing. The row's saved service_id answers first
-   when given (review finding 5) — a recorded alias must not
-   re-resolve to a different service than the row was saved with. */
+/* The operator of the row's resolved asset line or service. A
+   multi-line service still has an operator in the master. Rows
+   with disputed links are held for review and have no jump target. */
 export function operatorOfLine(
-  ledgerName: string,
+  line: string | RiddenServiceLink,
   geometries: LineGeometryMap,
   keyByName: ReadonlyMap<string, string>,
   serviceId?: string | null,
 ): string | null {
-  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName, serviceId);
-  if (!key) {
-    // No single asset line: a multi-line service still has an
-    // operator in the master (JR埼京線 → 東日本旅客鉄道).
-    const service = serviceId
-      ? serviceById(serviceId) ?? serviceByLedgerName(ledgerName)
-      : serviceByLedgerName(ledgerName);
-    return service?.operator ?? null;
-  }
-  return geometries[key]?.operator ?? null;
+  const row = typeof line === "string" ? { name: line, serviceId } : line;
+  const { service, needsReview } = resolveRiddenService(row);
+  if (needsReview) return null;
+  const key = resolveRiddenLineKey(row, geometries, keyByName);
+  return key ? (geometries[key]?.operator ?? null) : (service?.operator ?? null);
 }
 
 /* The FIRST ledger row of each operator, in ledger order — the
@@ -55,7 +47,7 @@ export function operatorOfLine(
    asset line (JR総武快速線 and JR総武本線 are both 「総武線」);
    the earlier row in the ledger wins, later ones never replace it. */
 export function firstLineByOperator<
-  Row extends { id: number; name: string; serviceId?: string | null },
+  Row extends RiddenServiceLink & { id: number },
 >(
   rows: readonly Row[],
   geometries: LineGeometryMap,
@@ -63,7 +55,7 @@ export function firstLineByOperator<
 ): ReadonlyMap<string, Row> {
   const first = new Map<string, Row>();
   for (const row of rows) {
-    const operator = operatorOfLine(row.name, geometries, keyByName, row.serviceId ?? null);
+    const operator = operatorOfLine(row, geometries, keyByName);
     if (!operator) continue;
     if (!first.has(operator)) first.set(operator, row);
   }
