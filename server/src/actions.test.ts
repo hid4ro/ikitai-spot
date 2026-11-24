@@ -114,6 +114,31 @@ describe("resolveRideFields: partial rides (review round 2, high)", () => {
   });
 });
 
+describe("resolveRideFields: a distinguishing qualifier never attaches to the wrong service (review round 4, medium)", () => {
+  test("「中央線（各駅停車）」 saves unlinked, not as jr-chuo-rapid", () => {
+    // The reviewer's reproduction: saving it as jr-chuo-rapid
+    // renamed the ride 「中央線快速」. The local service is not in
+    // the master yet, so an unknown ride stays section-less, and a
+    // partial ride for it is rejected until the service is added.
+    const fields = resolveRideFields("中央線（各駅停車）", {});
+    expect(fields.serviceId).toBeNull();
+    expect(fields.rideState).toBe("unknown");
+    expect(() =>
+      resolveRideFields("中央線（各駅停車）", {
+        rideState: "partial",
+        fromStationId: "003700",
+        toStationId: "003766",
+      }),
+    ).toThrow(/needs a known service/);
+  });
+
+  test("「武蔵野線 (JR東日本)」 links to jr-musashino", () => {
+    const fields = resolveRideFields("武蔵野線 (JR東日本)", {});
+    expect(fields.serviceId).toBe("jr-musashino");
+    expect(fields.rideState).toBe("unknown");
+  });
+});
+
 describe("resolveRideFields: unknown rides stay section-less", () => {
   test("endpoints supplied with unknown are dropped, never stored", () => {
     const fields = resolveRideFields("京王線", {

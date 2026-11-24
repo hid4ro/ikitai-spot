@@ -13,6 +13,7 @@ import {
   countRiddenServices,
   resolveRiddenLineKey,
   resolveRiddenLineKeys,
+  serviceForRow,
 } from "./line-resolution";
 
 const keyByName = buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
@@ -260,6 +261,31 @@ describe("national donut numerator (review round 2)", () => {
         keyByName,
       ),
     ).toBe(0);
+  });
+});
+
+describe("row display name agrees with the aggregation identity (review round 4)", () => {
+  test("an unlinked row shows its service's canonical name, not the recorded spelling", () => {
+    // The reviewer's reproduction: a 「武蔵野線」 row registered by
+    // name only showed 「武蔵野線」 while the donut counted it as
+    // the jr-musashino service — the display name and the
+    // aggregation identity disagreed. A row that resolves to a
+    // service shows that service's display name, whether or not a
+    // service_id was saved with it (the same rule the linked rows
+    // already follow: the display rule is service names everywhere).
+    expect(serviceForRow("武蔵野線", null)?.displayName).toBe("JR武蔵野線");
+    expect(serviceForRow("武蔵野線", null)?.id).toBe("jr-musashino");
+    expect(serviceForRow("JR中央線", null)?.displayName).toBe(
+      "JR中央線（快速）",
+    );
+    expect(serviceForRow("臨海副都心線", null)?.displayName).toBe(
+      "りんかい線",
+    );
+  });
+
+  test("a row that resolves to no service keeps its recorded name", () => {
+    expect(serviceForRow("中央線（各駅停車）", null)).toBeUndefined();
+    expect(serviceForRow("西武池袋線", null)).toBeUndefined();
   });
 });
 

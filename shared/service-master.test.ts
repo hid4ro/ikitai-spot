@@ -49,8 +49,10 @@ describe("master shape", () => {
     // different entries must never canonicalize to the same key —
     // otherwise a JR-less spelling could attach to the wrong
     // service. Two spellings of the SAME entry sharing a canonical
-    // key are fine (「JR中央線（快速）」 and 「JR中央線」 are both
-    // the rapid service).
+    // key are fine (「JR中央線」 canonicalizes to 「中央線」, and
+    // 「JR中央線（快速）」 to 「中央線（快速）」 — the （快速）
+    // qualifier is kept because it tells the rapid apart from the
+    // local service, review round 4).
     const keysByEntry = SERVICE_MASTER.map(
       (e) => new Set(e.ledgerNames.map((name) => canonicalLedgerName(name))),
     );
@@ -208,6 +210,39 @@ describe("ledger-name lookup", () => {
     // The prefix is stripped only for the lookup: a name the master
     // does not know still finds nothing.
     expect(serviceByLedgerName("JR存在しない線")).toBeUndefined();
+  });
+
+  test("「中央線（各駅停車）」 is a different service from the rapid and stays unlinked (review round 4)", () => {
+    // The reviewer's reproduction: a new 「中央線（各駅停車）」 row
+    // was saved as jr-chuo-rapid and then shown as 「中央線快速」.
+    // The （各駅停車） qualifier tells the local service apart
+    // from the rapid — it is not a redundant qualifier like
+    // （りんかい線） — so it must not be stripped for the lookup.
+    // The local service is not in the master yet, so the row stays
+    // unlinked until the master gains a local-service entry.
+    expect(serviceByLedgerName("中央線（各駅停車）")).toBeUndefined();
+    expect(serviceByLedgerName("中央線(各駅停車）")).toBeUndefined();
+    // The rapid service itself is unaffected.
+    expect(serviceByLedgerName("JR中央線（快速）")?.id).toBe("jr-chuo-rapid");
+    expect(serviceByLedgerName("中央線（快速）")?.id).toBe("jr-chuo-rapid");
+  });
+
+  test("a half-width parenthetical operator note resolves (review round 4)", () => {
+    // The reviewer's reproduction: 「武蔵野線 (JR東日本)」 was not
+    // recognized as the musashino service because the canonical
+    // form only handled full-width （） — the half-width parens
+    // and spaces are the same qualifier shape.
+    expect(serviceByLedgerName("武蔵野線 (JR東日本)")?.id).toBe(
+      "jr-musashino",
+    );
+    expect(serviceByLedgerName("武蔵野線（JR東日本）")?.id).toBe(
+      "jr-musashino",
+    );
+    expect(canonicalLedgerName("武蔵野線 (JR東日本)")).toBe("武蔵野線");
+    // A distinguishing qualifier is kept, not stripped.
+    expect(canonicalLedgerName("中央線（各駅停車）")).toBe(
+      "中央線（各駅停車）",
+    );
   });
 
   test("an unregistered name finds no service", () => {

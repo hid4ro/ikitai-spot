@@ -61,8 +61,12 @@ export function buildLineKeyByName(
 }
 
 /* The service a ledger row belongs to: its saved service_id when
-   the master knows it, otherwise the service its name spells. */
-function serviceForRow(
+   the master knows it, otherwise the service its name spells.
+   Exported so the ledger list shows the same service the
+   aggregates count (review round 4, low): a row that resolves to a
+   service shows that service's display name, whether or not a
+   service_id was saved with it. */
+export function serviceForRow(
   ledgerName: string,
   serviceId?: string | null,
 ): ServiceMasterEntry | undefined {

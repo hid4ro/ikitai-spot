@@ -52,8 +52,8 @@ import {
   countRiddenByOperator,
   countRiddenServices,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
+  serviceForRow,
 } from "./line-resolution";
-import { serviceById } from "../../shared/service-master";
 import { firstLineByOperator, lineGeometryBounds } from "./line-focus";
 import { pollForMap, type PollForMapHandle } from "./map-attach";
 import {
@@ -911,17 +911,19 @@ function resolveRiddenLineKey(
   );
 }
 
-/* The name a ledger row shows: the service's display name from its
-   saved service_id when the master knows it, otherwise the recorded
-   name. An alias spelling （「JR中央線」) therefore shows as the
-   service's canonical name (「JR中央線（快速）」) — the display
-   rule is service names everywhere, formal names stay in the
-   technical detail. */
+/* The name a ledger row shows: the service's display name when
+   the row resolves to a service — by its saved service_id, or by
+   its name when no id was saved — otherwise the recorded name.
+   An alias spelling （「JR中央線」) therefore shows as the
+   service's canonical name (「JR中央線（快速）」), and an
+   unlinked-but-resolvable spelling （「武蔵野線」) as
+   「JR武蔵野線」 — the display rule is service names everywhere,
+   and the row now agrees with the service the aggregates count
+   (review round 4, low). A name that resolves to no service keeps
+   its recorded name （「中央線（各駅停車）」 stays as recorded,
+   never renamed 「中央線快速」). */
 function riddenLineDisplayName(line: RiddenLine): string {
-  return (
-    (line.serviceId ? serviceById(line.serviceId)?.displayName : undefined) ??
-    line.name
-  );
+  return serviceForRow(line.name, line.serviceId)?.displayName ?? line.name;
 }
 
 /* The official color of a ledger line, via the same resolution the map

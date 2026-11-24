@@ -319,49 +319,103 @@ export function serviceById(id: string): ServiceMasterEntry | undefined {
   return SERVICE_MASTER.find((entry) => entry.id === id);
 }
 
-/* Canonical form for ledger-name lookup: trims, drops a trailing
-   （…） qualifier, and drops a leading JR / ＪＲ operator prefix.
-   "JR武蔵野線" and "武蔵野線" are the same service (review round 3:
-   the JR-less spelling registered with serviceId null and
-   double-counted its operator 2/1, because the map side already
-   strips the JR prefix while the master lookup did not). Only the
-   lookup is normalized; the recorded name itself is untouched.
-   Exported for the uniqueness test: two entries must never
-   canonicalize to the same key, or a JR-less spelling could attach
-   to the wrong service. */
-export function canonicalLedgerName(name: string): string {
+/* Half-width parentheses and the spaces around them are the same
+   qualifier shape as the full-width form: 「武蔵野線 (JR東日本)」
+   is the same spelling as 「武蔵野線（JR東日本）」 (review round 4,
+   low). Only the shape is normalized here; whether the qualifier
+   itself is dropped is decided by isRedundantQualifier below. */
+function normalizeParentheses(name: string): string {
   return name
     .trim()
-    .replace(/（[^）]*）$/, "")
-    .replace(/^(?:JR|ＪＲ)/, "");
+    .replace(/\(/g, "（")
+    .replace(/\)/g, "）")
+    .replace(/[ 　]+（/g, "（")
+    .replace(/）[ 　]+/g, "）");
+}
+
+/* A ledger name with no parenthetical handling — trim and a leading
+   JR / ＪＲ operator prefix only. Used inside the redundancy check
+   so it never recurses into canonicalLedgerName. */
+function bareLedgerName(name: string): string {
+  return name.trim().replace(/^(?:JR|ＪＲ)/, "");
+}
+
+/* Whether a trailing （…） qualifier is redundant — i.e. dropping
+   it cannot change which service the name means. Two shapes count:
+   (a) the qualifier names a service the master knows, by its
+       display name or a ledger spelling （「臨海副都心線
+       （りんかい線）」 — 「りんかい線」 is rinkai's own name);
+   (b) the qualifier names an operator （「武蔵野線 (JR東日本)」 —
+       the company abbreviation counts: a leading JR is stripped
+       and the rest must start the operator's name, so 「東日本」
+       matches 東日本旅客鉄道).
+   Anything else — 「快速」, 「各駅停車」 — tells services apart
+   and is kept: 「中央線（各駅停車）」 is the local service, not
+   the rapid, so it must never attach to jr-chuo-rapid (review
+   round 4, medium). */
+function isRedundantQualifier(content: string): boolean {
+  const q = content.trim();
+  if (!q) return false;
+  for (const entry of SERVICE_MASTER) {
+    const names = [entry.displayName, ...entry.ledgerNames];
+    if (names.some((n) => bareLedgerName(n) === bareLedgerName(q))) {
+      return true;
+    }
+  }
+  const company = q.replace(/^(?:JR|ＪＲ)/, "");
+  if (!company) return false;
+  for (const entry of SERVICE_MASTER) {
+    if (
+      entry.operator.startsWith(company) ||
+      company.startsWith(entry.operator)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Canonical form for ledger-name lookup: trims, unifies half-width
+   parentheses, drops a REDUNDANT trailing （…） qualifier, and
+   drops a leading JR / ＪＲ operator prefix. "JR武蔵野線" and
+   "武蔵野線" are the same service (review round 3: the JR-less
+   spelling registered with serviceId null and double-counted its
+   operator 2/1, because the map side already strips the JR prefix
+   while the master lookup did not). Only the lookup is normalized;
+   the recorded name itself is untouched.
+   The qualifier is dropped only when it is redundant (see
+   isRedundantQualifier): round 2's blanket strip turned
+   「中央線（各駅停車）」 into the rapid service — the qualifier
+   that tells the local service apart must survive. Exported for
+   the uniqueness test: two entries must never canonicalize to the
+   same key, or a JR-less spelling could attach to the wrong
+   service. */
+export function canonicalLedgerName(name: string): string {
+  const unified = normalizeParentheses(name).replace(/^(?:JR|ＪＲ)/, "");
+  const m = unified.match(/（([^）]*)）$/);
+  if (m && isRedundantQualifier(m[1]!)) {
+    return unified.slice(0, m.index);
+  }
+  return unified;
 }
 
 export function serviceByLedgerName(
   ledgerName: string,
 ): ServiceMasterEntry | undefined {
-  const name = ledgerName.trim();
+  const name = normalizeParentheses(ledgerName);
   const exact = SERVICE_MASTER.find((entry) =>
     entry.ledgerNames.includes(name),
   );
   if (exact) return exact;
-  // A trailing （…） qualifier does not make a different service:
-  // 「臨海副都心線（りんかい線）」 is the rinkai service, same as
-  // 「臨海副都心線」 (review round 2: the parenthetical spelling
-  // registered as its own line and double-counted its operator
-  // 2/1). The qualifier is stripped only for the lookup; the
-  // recorded name itself is untouched.
-  const stripped = name.replace(/（[^）]*）$/, "");
-  if (stripped !== name) {
-    const byStripped = SERVICE_MASTER.find((entry) =>
-      entry.ledgerNames.includes(stripped),
-    );
-    if (byStripped) return byStripped;
-  }
-  // A leading JR operator prefix does not make a different service
-  // either (review round 3): 「武蔵野線」 is the jr-musashino
-  // service, same as 「JR武蔵野線」. The canonical form also drops
-  // a trailing qualifier, so a JR-prefixed parenthetical spelling
-  // resolves here too.
+  // A redundant trailing qualifier and a leading JR prefix do not
+  // make a different service: 「臨海副都心線（りんかい線）」 is
+  // the rinkai service, same as 「臨海副都心線」 (review round 2),
+  // and 「武蔵野線」 is the jr-musashino service, same as
+  // 「JR武蔵野線」 (review round 3). The qualifier is stripped
+  // only for the lookup — and only when it is redundant — so a
+  // distinguishing qualifier （各駅停車） keeps the name from
+  // attaching to the wrong service (review round 4). The recorded
+  // name itself is untouched.
   const canonical = canonicalLedgerName(name);
   return SERVICE_MASTER.find((entry) =>
     entry.ledgerNames.some(
