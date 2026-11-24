@@ -240,3 +240,15 @@
   background: var(--signal-bg);
   box-shadow: inset 3px 0 0 var(--signal);
 }
+
+/* The ridden-line counterpart of .map-focused: the emphasis bar
+   and the background tint use the LINE's own color, handed in as
+   the --line-focus-color custom property by the focused row, so
+   selecting a line never repaints its row signal orange
+   (2026-11-25, the reader's request — the same rule as the map's
+   line focus layers). A row whose line color could not be
+   resolved sets no property and falls back to the signal color. */
+.map-focused-line {
+  background: color-mix(in srgb, var(--line-focus-color, var(--signal)) 12%, transparent);
+  box-shadow: inset 3px 0 0 var(--line-focus-color, var(--signal));
+}

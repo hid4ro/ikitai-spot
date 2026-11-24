@@ -11,6 +11,7 @@ import {
   blockById,
   isKnownMasterVersion,
   isN02StationId,
+  isRiddenServiceLinkReviewable,
   resolveRiddenService,
   serviceById,
   serviceFullPathSnapshot,
@@ -1730,6 +1731,69 @@ export const Actions = {
         .where(eq(schema.riddenLines.id, args.id));
       ctx.invalidateQueries();
       return { ok: true as const };
+    },
+  }),
+
+  /* Individual confirmation of a ridden line's service link
+     (subtask 1435): the row showed 「系統の連携を要確認」 because
+     its saved service ID disagrees with the current name rule, and
+     the caller picks the service actually ridden — the saved one
+     (confirm), a different one (relink), or none (unlink, with
+     null). The chosen service must exist in the master, but it is
+     NOT required to match the recorded name: the disagreement is
+     exactly what is under review, and the human's choice is the
+     validation — unlike a new registration's explicit ID, which
+     resolveRideFields validates against the name rule (a
+     name-matching requirement here would make relinking the very
+     rows that need it impossible). Only the three link columns
+     change (serviceId, serviceLinkSource 'explicit',
+     serviceMatchVersion null); the ride state, section, note,
+     context and dates are untouched, so a relinked partial row
+     keeps its recorded section even when its endpoints are not
+     boundary stations of the new service (the same partial-with-
+     unresolvable-endpoints shape the stage-2 triage recorded as a
+     remaining observation). An explicit unlink can be confirmed
+     again, so a mistaken unlink is reversible. */
+  confirmRiddenServiceLink: defineAction({
+    description:
+      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched.",
+    request: z.object({
+      id: z.number().int().positive(),
+      serviceId: z.string().max(100).nullable(),
+    }),
+    response: z.object({ ok: z.literal(true), serviceId: z.string().nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.riddenLines)
+        .where(eq(schema.riddenLines.id, args.id));
+      const line = rows[0];
+      if (!line) {
+        throw new Error(
+          `confirmRiddenServiceLink: unknown ridden line ${args.id}`,
+        );
+      }
+      if (!isRiddenServiceLinkReviewable(line)) {
+        throw new Error(
+          `confirmRiddenServiceLink: "${line.name}" does not need a link confirmation`,
+        );
+      }
+      if (args.serviceId != null && !serviceById(args.serviceId)) {
+        throw new Error(
+          `confirmRiddenServiceLink: unknown service "${args.serviceId}"`,
+        );
+      }
+      await db
+        .update(schema.riddenLines)
+        .set({
+          serviceId: args.serviceId,
+          serviceLinkSource: "explicit",
+          serviceMatchVersion: null,
+        })
+        .where(eq(schema.riddenLines.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true as const, serviceId: args.serviceId };
     },
   }),
 

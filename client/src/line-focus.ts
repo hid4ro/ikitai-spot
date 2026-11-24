@@ -62,6 +62,43 @@ export function firstLineByOperator<
   return first;
 }
 
+/* The group label for rows that resolve to no operator (unknown
+   names, and rows whose service link is held for review): the
+   路線 list groups by operator like the municipality ledger
+   groups by prefecture, and these rows still need a group to
+   live in — they are never dropped from the list. */
+export const UNKNOWN_OPERATOR_GROUP = "事業者不明";
+
+/* Ledger rows grouped by operator, in the order each operator
+   first appears in the ledger (the municipality ledger's groups
+   follow the server-ordered prefecture list; the lines ledger
+   has no such list, so first appearance is the stable order).
+   Rows keep ledger order inside their group. Every row lands in
+   exactly one group — a row with no operator goes to
+   UNKNOWN_OPERATOR_GROUP instead of vanishing. */
+export function groupLinesByOperator<
+  Row extends RiddenServiceLink & { id: number },
+>(
+  rows: readonly Row[],
+  geometries: LineGeometryMap,
+  keyByName: ReadonlyMap<string, string>,
+): { operator: string; rows: Row[] }[] {
+  const groups = new Map<string, Row[]>();
+  for (const row of rows) {
+    const operator = operatorOfLine(row, geometries, keyByName) ?? UNKNOWN_OPERATOR_GROUP;
+    const group = groups.get(operator);
+    if (group) {
+      group.push(row);
+    } else {
+      groups.set(operator, [row]);
+    }
+  }
+  return [...groups.entries()].map(([operator, groupRows]) => ({
+    operator,
+    rows: groupRows,
+  }));
+}
+
 /* Bounding box of a line geometry as [[minLng, minLat],
    [maxLng, maxLat]] — the shape MapLibre's fitBounds takes, the
    same contract as App.tsx's geometryBounds for municipality

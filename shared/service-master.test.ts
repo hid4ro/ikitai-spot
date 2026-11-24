@@ -18,6 +18,7 @@ import {
   formalLineNames,
   isKnownMasterVersion,
   isN02StationId,
+  isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
   resolveRiddenService,
   serviceById,
@@ -376,6 +377,39 @@ describe("legacy matching and saved link review", () => {
     const confirmed = resolveRiddenService({ ...row, serviceLinkSource: "explicit" });
     expect(confirmed.needsReview).toBe(false);
     expect(confirmed.service?.id).toBe(row.serviceId);
+  });
+
+  test("only rows awaiting confirmation (or an explicit unlink) are reviewable", () => {
+    // A saved link the current name rule disagrees with.
+    expect(
+      isRiddenServiceLinkReviewable({
+        name: "武蔵野線 (京王電鉄)",
+        serviceId: "jr-musashino",
+      }),
+    ).toBe(true);
+    // A clean link, auto or explicit, needs no confirmation.
+    expect(
+      isRiddenServiceLinkReviewable({ name: "京王線", serviceId: "keio" }),
+    ).toBe(false);
+    expect(
+      isRiddenServiceLinkReviewable({
+        name: "武蔵野線 (京王電鉄)",
+        serviceId: "jr-musashino",
+        serviceLinkSource: "explicit",
+      }),
+    ).toBe(false);
+    // An explicit unlink can be undone by confirming again.
+    expect(
+      isRiddenServiceLinkReviewable({
+        name: "武蔵野線 (京王電鉄)",
+        serviceId: null,
+        serviceLinkSource: "explicit",
+      }),
+    ).toBe(true);
+    // A never-linked row is not this operation's target.
+    expect(
+      isRiddenServiceLinkReviewable({ name: "武蔵野線 (京王電鉄)", serviceId: null }),
+    ).toBe(false);
   });
 });
 

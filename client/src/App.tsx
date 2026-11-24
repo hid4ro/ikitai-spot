@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -28,7 +29,7 @@ import type { Actions } from "../../server/src/actions";
 import { api, type ApiResponse } from "./api";
 import { mountMap, mountPlaceListMap } from "./map-helpers.mjs";
 import type { MapLibreLike, PlaceListMapHandle } from "./map-helpers.mjs";
-import type { GeoJsonGeometry } from "./geojson";
+import type { GeoJsonGeometry, GeoJsonLineGeometry } from "./geojson";
 import {
   ensureBoundaryManifest,
   ensurePrefectureBorders,
@@ -53,8 +54,12 @@ import {
   resolveRiddenLineKey,
 } from "./line-resolution";
 import {
+  SERVICE_MASTER,
   blocksForService,
+  isRiddenServiceLinkReviewable,
   resolveRiddenService,
+  serviceBoundaryStations,
+  serviceById,
   usableRiddenService,
 } from "../../shared/service-master";
 import {
@@ -69,7 +74,19 @@ import {
   JAPAN_LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
 } from "./line-totals";
-import { firstLineByOperator } from "./line-focus";
+import {
+  firstLineByOperator,
+  groupLinesByOperator,
+  operatorOfLine,
+  UNKNOWN_OPERATOR_GROUP,
+} from "./line-focus";
+import {
+  applyVariantPaint,
+  lineRowForPaintedKey,
+  municipalityRowForPaintedName,
+  stickyPaneVisibleTop,
+  type RecordMapVariant,
+} from "./map-variant";
 import { pollForMap, type PollForMapHandle } from "./map-attach";
 import {
   createSelectionSequencer,
@@ -2550,6 +2567,77 @@ function refreshNationwideBoundarySources(
   }
 }
 
+/* ---------------- unvisited-spot ghost points ----------------
+   The ghost of the スポット tab on the record map (tab split,
+   subtask 1439): the not-yet-visited spots — that tab's hero
+   data — drawn as small faint dots under everything else, so
+   either record tab still shows where the reader wants to go.
+   The points share the spot tab's own query (["spotPoints"]),
+   so the fetch happens once for the whole page. The layer is
+   display-only: it is never in any tap hit-test set. */
+
+const GHOST_SPOTS_SOURCE_ID = "ghost-spots";
+const GHOST_SPOTS_LAYER_ID = "ghost-spots-circle";
+
+function ghostSpotFeatures(
+  points: readonly SpotMapPoint[],
+): {
+  type: "Feature";
+  properties: { id: number };
+  geometry: { type: "Point"; coordinates: [number, number] };
+}[] {
+  return points
+    .filter((p) => !p.visited)
+    .map((p) => ({
+      type: "Feature" as const,
+      properties: { id: p.id },
+      geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] as [number, number] },
+    }));
+}
+
+/* Adds the ghost-spot source + layer to a live map, or refreshes
+   its data when they already exist. Inserted below every record
+   overlay (the visited fills first, the ridden lines when no
+   fills exist) so the dots stay a true underlay on both tabs;
+   the focus layers added later still paint above them. */
+function ensureGhostSpotPoints(
+  map: MapLibreLike,
+  features: ReturnType<typeof ghostSpotFeatures>,
+): void {
+  const data = { type: "FeatureCollection", features };
+  const source = map.getSource(GHOST_SPOTS_SOURCE_ID);
+  if (source) {
+    source.setData(data);
+    return;
+  }
+  map.addSource(GHOST_SPOTS_SOURCE_ID, { type: "geojson", data });
+  const beforeId = [
+    "visited-areas-fill",
+    "visited-lines-casing",
+    "visited-focus-fill",
+  ].find((id) => map.getLayer(id));
+  map.addLayer(
+    {
+      id: GHOST_SPOTS_LAYER_ID,
+      type: "circle",
+      source: GHOST_SPOTS_SOURCE_ID,
+      paint: {
+        /* The spot tab's own dots are #ea580c at 0.6; the ghost
+           keeps the hue at a whisper of the strength and size. */
+        "circle-radius": [
+          "interpolate", ["linear"], ["zoom"], 3, 2.5, 10, 3.5, 14, 4.5,
+        ],
+        "circle-color": "#ea580c",
+        "circle-opacity": 0.32,
+        "circle-stroke-width": 1,
+        "circle-stroke-color": "#ea580c",
+        "circle-stroke-opacity": 0.4,
+      },
+    },
+    beforeId,
+  );
+}
+
 function ensureFocusLayers(map: MapLibreLike) {
   if (!map.getSource(FOCUS_POLYGON_SOURCE_ID)) {
     map.addSource(FOCUS_POLYGON_SOURCE_ID, {
@@ -2834,13 +2922,19 @@ function clearFocusGeometry(map: MapLibreLike) {
 /* ---------------- ridden-line focus highlight ----------------
    The 路線 counterpart of the municipality focus above: while a
    line is focused, its NORMAL layers (visited-lines casing +
-   color) filter it out and the focus layers below replace it —
-   a pale-orange halo, a white casing, and a thick #ea580c core,
-   the same signal orange as the municipality focus fill, drawn
-   wider than any normal line so the focused line reads at a
-   glance. The line layers are never in the tap hit-test set, so
-   the highlight cannot intercept a municipality tap (and map taps
-   on lines stay out of scope, as before). */
+   color) filter it out and the focus layers below replace it.
+   Unlike the municipality focus, the paint keeps the line's OWN
+   color (2026-11-25, the reader's request: repainting the line
+   signal orange hides which line it is). The emphasis is carried
+   by width and layering instead — a halo in the line's own color
+   at low opacity, a white casing, and a core in the line's own
+   color, drawn wider than any normal line so the focused line
+   reads at a glance without losing its identity. The color rides
+   on each focus feature as a property (see setFocusSection), the
+   same contract as the normal line layers. The line layers are
+   never in the tap hit-test set, so the highlight cannot
+   intercept a municipality tap (and map taps on lines stay out
+   of scope, as before). */
 
 const LINE_FOCUS_SOURCE_ID = "visited-line-focus";
 
@@ -2858,7 +2952,7 @@ function ensureLineFocusLayers(map: MapLibreLike) {
       source: LINE_FOCUS_SOURCE_ID,
       layout: { "line-cap": "round", "line-join": "round" },
       paint: {
-        "line-color": "#ea580c",
+        "line-color": ["get", "color"],
         "line-opacity": 0.3,
         "line-width": 13,
       },
@@ -2884,7 +2978,7 @@ function ensureLineFocusLayers(map: MapLibreLike) {
       source: LINE_FOCUS_SOURCE_ID,
       layout: { "line-cap": "round", "line-join": "round" },
       paint: {
-        "line-color": "#ea580c",
+        "line-color": ["get", "color"],
         "line-opacity": 1,
         "line-width": 5,
       },
@@ -2900,7 +2994,7 @@ function ensureLineFocusLayers(map: MapLibreLike) {
    several formal lines — 埼京線 covers 山手線・赤羽線・東北線・
    川越線); null restores every line. The dashed unknown layer is
    excluded the same way: a focused unknown ride must not show
-   both as a dashed whole path and as the orange focus. */
+   both as a dashed whole path and as the focus highlight. */
 function setNormalLineExclusion(map: MapLibreLike, keys: readonly string[] | null) {
   const filter = keys
     ? ["all", ["!=", ["get", "dashed"], true], ["!", ["in", ["get", "key"], ["literal", keys]]]]
@@ -2919,12 +3013,16 @@ function setNormalLineExclusion(map: MapLibreLike, keys: readonly string[] | nul
   }
 }
 
-/* Paints one ridden service's painted legs as the orange focus
+/* Paints one ridden service's painted legs as the focus
    highlight, swapping them out of the normal line layers (see
    setNormalLineExclusion). `legs` are the service's painted legs
    from the line coverage — a partial ride highlights only its
-   ridden section, a full ride its whole path, an unknown ride its
-   whole path dashed in orange. */
+   ridden section, a full ride its whole path, an unknown ride
+   its whole path. Each feature carries its leg's own color (the
+   asset entry for the leg's key, the same lookup the normal
+   overlay features use) so the focus layers paint the line in
+   its own color; a leg whose asset entry has no color falls
+   back to the signal orange, the pre-2026-11-25 paint. */
 function setFocusSection(
   map: MapLibreLike,
   legs: readonly { key: string; coords: readonly [number, number][] }[],
@@ -2936,7 +3034,10 @@ function setFocusSection(
     type: "FeatureCollection",
     features: legs.map((leg) => ({
       type: "Feature",
-      properties: { key: leg.key },
+      properties: {
+        key: leg.key,
+        color: RIDDEN_LINE_GEOMETRIES[leg.key]?.color ?? "#ea580c",
+      },
       geometry: { type: "LineString", coordinates: leg.coords },
     })),
   });
@@ -2949,11 +3050,18 @@ function clearFocusLineGeometry(map: MapLibreLike) {
 
 function VisitedMapSection({
   active,
+  variant,
   deviceLoc,
   cameraRequest,
   onRetakeDeviceLocation,
 }: {
   active: boolean;
+  /* Which record tab is showing (tab split, subtask 1439): the
+     section stays mounted across the 市区町村 and 路線 tabs —
+     one map, one load of every dataset — and the variant only
+     swaps the hero / ghost paint on the map and which ledger
+     renders below it. See map-variant.ts for the paint side. */
+  variant: RecordMapVariant;
   /* The maps' shared Pixel position (App state) — the SAME position
      the スポット tab's map receives. Updated every time any
      stored-position read (a re-take on either tab, or the initial
@@ -3069,6 +3177,20 @@ function VisitedMapSection({
     queryKey: ["riddenLines"],
     queryFn: () => api.listRiddenLines({}),
   });
+  /* The スポット tab's points, under that tab's own query key so
+     the whole page shares ONE fetch (tab split, subtask 1439):
+     the not-yet-visited points become the ghost dots on this map
+     (see ensureGhostSpotPoints). */
+  const spotPointsQuery = useQuery({
+    queryKey: ["spotPoints"],
+    queryFn: () => api.listSpotPoints({}),
+  });
+  const ghostSpotPointFeatures = useMemo(
+    () => ghostSpotFeatures(spotPointsQuery.data?.points ?? []),
+    [spotPointsQuery.data],
+  );
+  const ghostSpotPointFeaturesRef = useRef(ghostSpotPointFeatures);
+  ghostSpotPointFeaturesRef.current = ghostSpotPointFeatures;
   const lineCoverage = useMemo(
     () => computeRiddenLineCoverage(
       riddenQuery.data?.lines ?? [],
@@ -3077,6 +3199,43 @@ function VisitedMapSection({
     ),
     [riddenQuery.data],
   );
+  /* Mirrors for the map tap listeners and the mount effect, which
+     run outside this render's closure: the current variant, the
+     ledger rows, and the coverage they resolve taps against. */
+  const variantRef = useRef(variant);
+  variantRef.current = variant;
+  const riddenRowsRef = useRef<readonly RiddenLine[]>([]);
+  riddenRowsRef.current = riddenQuery.data?.lines ?? [];
+  const lineCoverageRef = useRef(lineCoverage);
+  lineCoverageRef.current = lineCoverage;
+  /* The 路線 tab's ghost of everything NOT ridden (tab split,
+     subtask 1439 — the reader allowed unridden lines as a ghost
+     there): every formal line in the asset that no service paints
+     a leg on, in its own color, drawn by the mount as one thin
+     layer whose visibility the variant paint toggles. A service
+     can paint a formal line partially; the ghost then still
+     draws the line's whole path UNDER the painted legs, which is
+     what an underlay is for. */
+  const unriddenLineFeatures = useMemo(() => {
+    const paintedKeys = new Set<string>();
+    for (const painted of lineCoverage.perServiceLegs.values()) {
+      for (const leg of painted.legs) paintedKeys.add(leg.key);
+    }
+    const features: {
+      type: "Feature";
+      properties: { key: string; color: string };
+      geometry: GeoJsonLineGeometry;
+    }[] = [];
+    for (const [key, entry] of Object.entries(RIDDEN_LINE_GEOMETRIES)) {
+      if (paintedKeys.has(key)) continue;
+      features.push({
+        type: "Feature",
+        properties: { key, color: entry.color },
+        geometry: entry.geometry,
+      });
+    }
+    return features;
+  }, [lineCoverage]);
 
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
@@ -3451,8 +3610,9 @@ function VisitedMapSection({
   /* The 路線 counterpart of the municipality focus above: the
      ridden-line row the reader picked (from its ledger row, or from
      a 事業者別 bar via the operator's first row). Its row carries
-     the same map-focused emphasis and its track gets the orange
-     focus highlight on the map. The two focuses are mutually
+     the line-colored variant of the map-focused emphasis and its
+     track gets the focus highlight on the map, in the line's own
+     color. The two focuses are mutually
      exclusive — picking a line clears the municipality focus and
      vice versa — and a line focus is cleared the same ways a
      municipality one is (another pick, a blank map tap, deleting
@@ -3528,6 +3688,32 @@ function VisitedMapSection({
       }
       return next;
     });
+  /* The 路線 list's operator groups (tab split, subtask 1439):
+     the same lifted expansion state as the prefecture groups
+     above, because a 事業者別 bar tap or a map line tap must
+     open the target row's group before the row can be scrolled
+     to. Owned here, rendered by RiddenLinesBlock. */
+  const [expandedOperators, setExpandedOperators] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const toggleOperator = (name: string) =>
+    setExpandedOperators((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  const expandOperatorForLine = (line: RiddenLine) => {
+    const operator =
+      operatorOfLine(line, RIDDEN_LINE_GEOMETRIES, LINE_KEY_BY_NAME) ??
+      UNKNOWN_OPERATOR_GROUP;
+    setExpandedOperators((prev) =>
+      prev.has(operator) ? prev : new Set(prev).add(operator),
+    );
+  };
   const placesKey = municipalities
     .map((m) => `${m.id}${boundaryGeometryFor(m) ? "g" : ""}`)
     .join(",");
@@ -3983,6 +4169,39 @@ function VisitedMapSection({
           ],
         });
       }
+      /* Unridden lines, the 路線 tab's ghost (tab split, subtask
+         1439): every formal line no service paints, in its own
+         color at a whisper of the ridden lines' strength, BELOW
+         them in the paint order. The layer rides along on every
+         mount, but its visibility starts at "none": the variant
+         paint applied right after the mount (and on every tab
+         switch) shows it only on the 路線 tab. */
+      if (unriddenLineFeatures.length > 0) {
+        overlays.push({
+          id: "unridden-lines",
+          data: {
+            type: "FeatureCollection",
+            features: unriddenLineFeatures,
+          },
+          layers: [
+            {
+              id: "unridden-lines-ghost",
+              type: "line",
+              source: "unridden-lines",
+              layout: {
+                "line-cap": "round",
+                "line-join": "round",
+                visibility: "none",
+              },
+              paint: {
+                "line-color": ["get", "color"],
+                "line-width": 1.6,
+                "line-opacity": 0.25,
+              },
+            },
+          ],
+        });
+      }
       /* Prefecture borders (boundary hierarchy, 2026-11-22): the
          segments the municipality geometries share with a
          municipality of a DIFFERENT prefecture, extracted into
@@ -4022,6 +4241,7 @@ function VisitedMapSection({
         "unvisited-areas",
         "visited-areas-outlines",
         "prefecture-borders",
+        "unridden-lines",
         "visited-lines",
       ];
       overlays.sort(
@@ -4061,6 +4281,22 @@ function VisitedMapSection({
             ensureFocusListenersRef.current(map);
           } catch {
             /* listeners retry on the next focus call */
+          }
+          /* The mount bakes hero-strength paint for both overlay
+             families; the CURRENT variant's hero / ghost split is
+             applied over it (tab split, subtask 1439), and the
+             ghost spot points join the map. A remount under the
+             路線 tab must not flash the municipality hero first. */
+          try {
+            applyVariantPaint(map, variantRef.current);
+          } catch {
+            /* a half-torn-down map may refuse; the variant effect
+               re-applies on the next switch */
+          }
+          try {
+            ensureGhostSpotPoints(map, ghostSpotPointFeaturesRef.current);
+          } catch {
+            /* the ghost is an underlay; its data effect retries */
           }
           /* The map is live: the default framing (fit to the
              municipality the reader is in) may run now. */
@@ -4119,6 +4355,46 @@ function VisitedMapSection({
       }
     });
   }, [boundaryVersion, boundarySettled]);
+
+  /* Tab split (subtask 1439): a switch between the 市区町村 and
+     路線 tabs changes ONLY the variant — the section, the map,
+     and every loaded dataset stay exactly where they are, and
+     the hero / ghost paint is re-applied to the live layers.
+     The mount applies the same paint for its own variant, so
+     this effect's first run (mount-time variant) is a repeat. */
+  useEffect(() => {
+    withLiveMapRef.current((map) => {
+      try {
+        applyVariantPaint(map, variant);
+      } catch {
+        /* a half-torn-down map may refuse; the next mount
+           applies the then-current variant itself */
+      }
+    });
+  }, [variant]);
+
+  /* Entering the 路線 tab opens its list: the list is that tab's
+     main content below the map, and a map line tap needs its
+     rows laid out before it can scroll to one. Collapsing it by
+     hand afterwards still works — this only runs on the switch. */
+  useEffect(() => {
+    if (variant === "lines") setLinesExpanded(true);
+  }, [variant]);
+
+  /* Ghost spot points arriving after the mount (the shared
+     spotPoints query landing, or a visit toggle changing the
+     unvisited set) refresh the ghost source in place. */
+  useEffect(() => {
+    if (!boundarySettled) return;
+    withLiveMapRef.current((map) => {
+      try {
+        ensureGhostSpotPoints(map, ghostSpotPointFeatures);
+      } catch {
+        /* the ghost is an underlay; a failed refresh leaves the
+           previous dots, and the next mount rebuilds them */
+      }
+    });
+  }, [ghostSpotPointFeatures, boundarySettled]);
 
   /* Runs `fn` with the live MapLibre map as soon as it exists. The map
      handle is stored at mount time, but the underlying map only appears
@@ -4205,7 +4481,7 @@ function VisitedMapSection({
   cancelMapWaitersRef.current = cancelMapWaiters;
 
   /* Clears the LINE focus only: the ridden-line row emphasis and
-     the orange track highlight. Used wherever a municipality focus
+     the track highlight. Used wherever a municipality focus
      takes over, and when the focused line's row is deleted. */
   const clearLineFocus = () => {
     focusedLineIdRef.current = null;
@@ -4226,7 +4502,7 @@ function VisitedMapSection({
   clearLineFocusRef.current = clearLineFocus;
 
   /* Clears the focus highlight everywhere: the ledger row emphasis and
-     the orange geometry on the map — for BOTH focuses (municipality
+     the focus geometry on the map — for BOTH focuses (municipality
      and line). Used by the map blank-tap listener
      and when the focused row is deleted. */
   const clearFocus = () => {
@@ -4265,6 +4541,14 @@ function VisitedMapSection({
       prev.has(m.prefecture) ? prev : new Set(prev).add(m.prefecture),
     );
     pendingRowScrollRef.current = m.id;
+    /* A map tap supersedes any row scroll still correcting toward
+       a previous target: stop that loop now, instead of letting it
+       keep dragging the page while this tap's group expansion is
+       still rendering (the pending-scroll effect only starts the
+       new loop once the row is laid out). The line side's
+       focusLineFromMap bumps the same counter for the same
+       reason. */
+    rowScrollSeqRef.current += 1;
     const geometry = boundaryGeometryFor(m);
     withLiveMap((map) => {
       try {
@@ -4395,6 +4679,61 @@ function VisitedMapSection({
           /* fall through and treat it as a tap */
         }
       }
+      /* 路線 tab (tab split, subtask 1439): the lines are the
+         hero here, so the painted tracks ARE the tap target — a
+         tap on a track focuses its ledger row (track highlight +
+         the list scrolls to the row; the camera stays, the
+         reader is already looking at the line). Municipality
+         shapes stay untappable on this tab: their ledger is not
+         rendered here, so focusing one would strand the reader
+         with a highlight and no row. The unridden ghost tracks
+         are not hit-tested either (they have no row); a tap that
+         hits no ridden track is the usual blank tap. */
+      if (variantRef.current === "lines") {
+        if (e?.point !== undefined && e?.point !== null) {
+          try {
+            const layers = [
+              "visited-lines-color",
+              "visited-lines-unknown",
+              "visited-lines-casing",
+            ].filter((id) => map.getLayer(id));
+            if (layers.length > 0) {
+              /* The painted tracks are only a few pixels wide —
+                 too thin a target for a finger — so the hit test
+                 uses a small box around the tap point, the same
+                 allowance the spot map gives its dots. Features
+                 come back top-most first; the first that resolves
+                 to a ledger row wins. */
+              const pt = e.point as { x: number; y: number };
+              const R = 12;
+              const features = map.queryRenderedFeatures(
+                [
+                  [pt.x - R, pt.y - R],
+                  [pt.x + R, pt.y + R],
+                ],
+                { layers },
+              );
+              for (const f of features) {
+                const key = f.properties?.key;
+                if (typeof key !== "string") continue;
+                const row = lineRowForPaintedKey(
+                  riddenRowsRef.current,
+                  lineCoverageRef.current.perServiceLegs,
+                  key,
+                );
+                if (row) {
+                  focusLineFromMapRef.current(row);
+                  return;
+                }
+              }
+            }
+          } catch {
+            /* a failed hit test falls through to the blank tap */
+          }
+        }
+        clearFocusRef.current();
+        return;
+      }
       if (e?.point !== undefined && e?.point !== null) {
         try {
           /* Hit-test the dedicated opacity-0 hit layers, NOT the
@@ -4409,8 +4748,9 @@ function VisitedMapSection({
             for (const f of features) {
               const name = f.properties?.name;
               if (typeof name !== "string") continue;
-              const hit = municipalitiesRef.current.find(
-                (m) => `${m.prefecture} ${m.name}` === name,
+              const hit = municipalityRowForPaintedName(
+                municipalitiesRef.current,
+                name,
               );
               if (hit) {
                 focusFromMapRef.current(hit);
@@ -4503,8 +4843,21 @@ function VisitedMapSection({
     const pane = ledgerPaneRef.current;
     const paneActive =
       pane !== null && pane.contains(row) && pane.scrollHeight > pane.clientHeight;
-    const visibleTop = () =>
-      paneActive && pane ? Math.max(0, pane.getBoundingClientRect().top) : 0;
+    const visibleTop = () => {
+      if (paneActive && pane) return Math.max(0, pane.getBoundingClientRect().top);
+      /* Window path: once the page has scrolled, the sticky map
+         pane overlays the viewport's top (40dvh of it), and a row
+         behind it is NOT visible however its raw rect reads — the
+         verify loop below could otherwise declare the row "fully
+         visible" and never scroll at all, which is exactly how a
+         map tap's row stayed out of sight (subtask 1440). */
+      const el = mapContainerRef.current;
+      return stickyPaneVisibleTop(
+        el ? el.getBoundingClientRect() : null,
+        window.innerHeight,
+        bottomBarAllowance,
+      );
+    };
     const visibleBottom = () =>
       paneActive && pane
         ? Math.min(
@@ -4528,9 +4881,18 @@ function VisitedMapSection({
           (pane.clientHeight - rect.height) / 2;
         pane.scrollTo({ top: target, behavior: instant ? "auto" : "smooth" });
       } else {
-        row.scrollIntoView({
+        /* Center the row inside the HONEST visible range (below
+           the stuck map pane, above the tab bar), not the raw
+           viewport: scrollIntoView's "center" targets the raw
+           viewport center, which the verify loop's range may not
+           accept as visible, so the correction could never land. */
+        const rect = row.getBoundingClientRect();
+        const center = (visibleTop() + visibleBottom()) / 2;
+        const target =
+          window.scrollY + (rect.top + rect.height / 2) - center;
+        window.scrollTo({
+          top: Math.max(0, target),
           behavior: instant ? "auto" : "smooth",
-          block: "center",
         });
       }
     };
@@ -4689,7 +5051,7 @@ function VisitedMapSection({
     rowScrollSeqRef.current += 1;
     if (!painted || painted.legs.length === 0) {
       /* No track to paint (a row with no service link): the
-         previous row's orange highlight must not linger.
+         previous row's highlight must not linger.
          Clearing runs through the live map, guarded by the
          current selection — a superseded tap must not clear a
          newer row's highlight. */
@@ -4744,7 +5106,7 @@ function VisitedMapSection({
   };
 
   /* 事業者別（路線）bar tap: the reverse direction. The operator's
-     first ledger row is emphasized, its track gets the same orange
+     first ledger row is emphasized, its track gets the same focus
      highlight on the map (no camera move — the reader is looking
      at the chart and the list, exactly as a map tap on a
      municipality does not move the camera), the list opens if it
@@ -4773,6 +5135,10 @@ function VisitedMapSection({
       ? lineCoverage.perServiceLegs.get(service.id)
       : undefined;
     setLinesExpanded(true);
+    /* The row's operator group opens too (tab split, subtask
+       1439): with the list grouped by operator, an unexpanded
+       group would leave the row laid out nowhere. */
+    expandOperatorForLine(row);
     pendingLineScrollRef.current = row.id;
     /* If the list was already open and the row is already laid
        out, scroll right away: a repeat tap on the same operator
@@ -4798,7 +5164,7 @@ function VisitedMapSection({
       });
     } else {
       /* No track to paint (a row with no service link): the
-         previous row's orange highlight must not linger — the bar
+         previous row's highlight must not linger — the bar
          tap still changes the focused row. */
       withLiveMap((map) => {
         if (focusedLineIdRef.current !== row.id) return;
@@ -4825,6 +5191,65 @@ function VisitedMapSection({
     pendingLineScrollRef.current = null;
     scrollRowFullyIntoView(row);
   });
+
+  /* Map line tap on the 路線 tab (tab split, subtask 1439): the
+     reverse of a ledger row tap, with the municipality map tap's
+     contract — the tapped line gets the persistent highlight
+     (focus track on the map, emphasized row), its operator group
+     expands if folded, and the list scrolls to its row; the
+     camera does NOT move, the reader is already looking at the
+     line. (A row tap, by contrast, flies the map to the track —
+     see focusRiddenLine.) */
+  const focusLineFromMap = (line: RiddenLine) => {
+    if (resolveRiddenService(line).needsReview) return;
+    /* The two focuses are mutually exclusive, exactly as in
+       focusRiddenLine: clear the municipality focus (state +
+       geometry) without going through clearFocus, which would
+       clear this line focus too. */
+    focusedIdRef.current = null;
+    setFocusedId(null);
+    setTappedMunicipality(null);
+    const currentMap = mapHandleRef.current?.getMap() ?? null;
+    if (currentMap) {
+      try {
+        clearFocusGeometry(currentMap);
+      } catch {
+        /* the map may already be gone; the row emphasis is the cue */
+      }
+    }
+    focusedLineIdRef.current = line.id;
+    setFocusedLineId(line.id);
+    setLinesExpanded(true);
+    expandOperatorForLine(line);
+    pendingLineScrollRef.current = line.id;
+    /* A map tap supersedes any row scroll still running for a
+       municipality row; the line pending scroll starts its own. */
+    rowScrollSeqRef.current += 1;
+    const service = usableRiddenService(line);
+    const painted = service
+      ? lineCoverage.perServiceLegs.get(service.id)
+      : undefined;
+    withLiveMap((map) => {
+      /* A later tap supersedes this one: never paint a stale
+         highlight for a row the reader has already left. */
+      if (focusedLineIdRef.current !== line.id) return;
+      try {
+        if (painted && painted.legs.length > 0) {
+          setFocusSection(map, painted.legs);
+        } else {
+          /* No track to paint (a row with no service link): the
+             previous row's highlight must not linger. */
+          clearFocusLineGeometry(map);
+        }
+      } catch {
+        /* a failed highlight leaves the row emphasis as the cue */
+      }
+    });
+  };
+  /* Kept in a ref so the map listeners above always call the
+     latest version without re-registering. */
+  const focusLineFromMapRef = useRef(focusLineFromMap);
+  focusLineFromMapRef.current = focusLineFromMap;
 
   const invalidateVisited = () =>
     void queryClient.invalidateQueries({ queryKey: ["visitedMunicipalities"] });
@@ -4926,7 +5351,7 @@ function VisitedMapSection({
   };
 
   return (
-    <section aria-label="市区町村と路線の記録" className="pt-3">
+    <section aria-label={variant === "lines" ? "路線の記録" : "市区町村の記録"} className="pt-3">
       {/* Same opening as the スポット tab (pt-3 section, then the
           sticky full-bleed map at the very top with the shared
           MAP_PANE_HEIGHT): no header / intro text, no stats above
@@ -5088,6 +5513,10 @@ function VisitedMapSection({
               fills — same cleanup as the スポット tab's map. */}
           {mappable.length > 0 && !mapFailed && (
             <div className="mt-2 flex flex-wrap items-center gap-2 xl:col-start-1 xl:row-start-2">
+              {/* Fitting the camera to the current municipality is
+                  the 市区町村 tab's move; on the 路線 tab the row
+                  keeps only the shared re-take. */}
+              {variant === "municipalities" && (
               <button
                 type="button"
                 onClick={() => void frameCurrentMunicipality(true)}
@@ -5096,6 +5525,7 @@ function VisitedMapSection({
               >
                 {locBusy ? "確認中…" : "今いる市区町村に合わせる"}
               </button>
+              )}
               {/* Same re-take as the スポット tab: pressing it reads
                   the fresh Pixel position through App's map-only
                   re-take, and on success the marker moves AND the
@@ -5218,6 +5648,11 @@ function VisitedMapSection({
             />
           </div>
 
+          {/* The municipality ledger belongs to the 市区町村 tab
+              (tab split, subtask 1439); the 路線 tab renders the
+              grouped ridden-lines list in this column instead. */}
+          {variant === "municipalities" && (
+          <>
           <div
             ref={ledgerPaneRef}
             className="mt-3 space-y-4 xl:col-start-2 xl:row-start-1 xl:row-span-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1"
@@ -5405,9 +5840,13 @@ function VisitedMapSection({
           {deleteVisitedMutation.isError && (
             <p className="mt-2 text-sm text-[var(--signal)] xl:col-start-2 xl:row-start-5">削除に失敗しました</p>
           )}
+          </>
+          )}
         </>
       )}
 
+      {variant === "municipalities" && (
+      <>
       <div className="mt-3 flex gap-2 xl:col-start-1 xl:row-start-4">
         <button
           type="button"
@@ -5523,11 +5962,20 @@ function VisitedMapSection({
           {vMsg && <p className="text-sm text-[var(--dim)]">{vMsg}</p>}
         </form>
       )}
+      </>
+      )}
 
-      <div className="xl:col-start-2 xl:row-start-6">
+      {/* The ridden-lines list belongs to the 路線 tab (tab
+          split, subtask 1439): there it takes the side column
+          from the top, where the municipality ledger sits on
+          the other tab. */}
+      {variant === "lines" && (
+      <div className="xl:col-start-2 xl:row-start-1 xl:row-span-6">
         <RiddenLinesBlock
           focusedLineId={focusedLineId}
           linesExpanded={linesExpanded}
+          expandedOperators={expandedOperators}
+          onToggleOperator={toggleOperator}
           lineCoverage={lineCoverage}
           onToggleLines={() => setLinesExpanded((v) => !v)}
           onLineTap={focusRiddenLine}
@@ -5541,6 +5989,7 @@ function VisitedMapSection({
           }}
         />
       </div>
+      )}
       </div>
     </section>
   );
@@ -6170,6 +6619,8 @@ function SpotListMap({
 function RiddenLinesBlock({
   focusedLineId,
   linesExpanded,
+  expandedOperators,
+  onToggleOperator,
   lineCoverage,
   onToggleLines,
   onLineTap,
@@ -6186,6 +6637,14 @@ function RiddenLinesBlock({
      事業者別 bar tap must open the list before scrolling to its
      target row. */
   linesExpanded: boolean;
+  /* The operator groups' expansion (tab split, subtask 1439):
+     the list is grouped by operator like the municipality
+     ledger is grouped by prefecture, and the expansion state
+     lives in VisitedMapSection for the same reason as
+     linesExpanded — a bar tap or a map line tap must open the
+     target row's group before the row can be scrolled to. */
+  expandedOperators: ReadonlySet<string>;
+  onToggleOperator: (operator: string) => void;
   /* The stage-2 line coverage (owned by VisitedMapSection): each
      row's ridden distance and completeness, and the painted legs
      the block picker marks covered. */
@@ -6209,6 +6668,15 @@ function RiddenLinesBlock({
   });
   const lines = linesQuery.data?.lines ?? [];
   const totalLines = linesQuery.data?.total ?? 0;
+  /* Grouped by operator (tab split, subtask 1439), the same
+     shape as the municipality ledger's prefecture groups:
+     groups in first-appearance order, rows in ledger order,
+     unresolved rows under 事業者不明. */
+  const lineGroups = groupLinesByOperator(
+    lines,
+    RIDDEN_LINE_GEOMETRIES,
+    LINE_KEY_BY_NAME,
+  );
 
   const invalidateLines = () =>
     void queryClient.invalidateQueries({ queryKey: ["riddenLines"] });
@@ -6307,6 +6775,28 @@ function RiddenLinesBlock({
     onError: () => setBlockPickerError("区間の削除に失敗しました"),
   });
 
+  /* Link confirmation (subtask 1435): a row whose saved service
+     link disagrees with the current name rule shows 「系統の連携
+     を要確認」 and offers this panel, where the human picks the
+     service actually ridden — the saved one, a different one, or
+     none. The choice is stored explicit by
+     confirmRiddenServiceLink; an explicit unlink stays reviewable
+     so it can be undone. */
+  const [linkReviewLineId, setLinkReviewLineId] = useState<number | null>(null);
+  const [linkReviewChoice, setLinkReviewChoice] = useState("");
+  const [linkReviewMsg, setLinkReviewMsg] = useState<string | null>(null);
+  const confirmLinkMutation = useMutation({
+    mutationFn: async (args: { id: number; serviceId: string | null }) =>
+      await api.confirmRiddenServiceLink(args),
+    onSuccess: () => {
+      invalidateLines();
+      setLinkReviewLineId(null);
+      setLinkReviewMsg(null);
+    },
+    onError: () =>
+      setLinkReviewMsg("連携の確定に失敗しました。もう一度お試しください。"),
+  });
+
   return (
     <div className="mt-8">
       <button
@@ -6346,11 +6836,62 @@ function RiddenLinesBlock({
       )}
 
       {linesExpanded && totalLines > 0 && (
-        <ul className="mt-3 divide-y divide-[var(--border)] rounded-[var(--radius)] bg-[var(--surface)]">
-          {lines.map((line) => {
+        <div className="mt-3 space-y-4">
+          {lineGroups.map((group) => {
+            const groupExpanded = expandedOperators.has(group.operator);
+            return (
+            <div key={group.operator}>
+              <h4>
+                <button
+                  type="button"
+                  onClick={() => onToggleOperator(group.operator)}
+                  aria-expanded={groupExpanded}
+                  aria-label={`${group.operator}の路線一覧を${groupExpanded ? "閉じる" : "開く"}`}
+                  className="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-[var(--dim)]"
+                >
+                  <span>
+                    {group.operator}（{group.rows.length}）
+                  </span>
+                  <span aria-hidden="true" className="shrink-0 text-xs">
+                    {groupExpanded ? "▾" : "▸"}
+                  </span>
+                </button>
+              </h4>
+              {/* Collapsed groups keep their rows mounted
+                  (hidden), the municipality ledger's rule: the
+                  map focus paths register row elements and a
+                  group that unmounted its rows would break the
+                  scroll-to-row bookkeeping. */}
+              <ul
+                className={`mt-1.5 divide-y divide-[var(--border)] rounded-[var(--radius)] bg-[var(--surface)] ${
+                  groupExpanded ? "" : "hidden"
+                }`}
+              >
+          {group.rows.map((line) => {
             const editingLineContext = lineContextEditId === line.id;
             const rideLabel = riddenLineRideLabel(line);
-            const { service, needsReview } = resolveRiddenService(line);
+            const linkResolution = resolveRiddenService(line);
+            const { service, needsReview } = linkResolution;
+            const historicalVersions = linkResolution.needsReview
+              ? linkResolution.historicalAutoMatchVersions
+              : [];
+            const explicitlyUnlinked =
+              line.serviceId == null && line.serviceLinkSource === "explicit";
+            const reviewable = isRiddenServiceLinkReviewable(line);
+            /* The chosen service's boundaries, for the hint when
+               the row's recorded section does not fit it: the
+               section is kept as recorded, only the link changes. */
+            const chosenBoundaries =
+              linkReviewLineId === line.id && linkReviewChoice
+                ? serviceBoundaryStations(linkReviewChoice)
+                : [];
+            const sectionEndpointsMismatch =
+              linkReviewChoice !== "" &&
+              line.rideState === "partial" &&
+              line.fromStationId != null &&
+              line.toStationId != null &&
+              (chosenBoundaries.findIndex((s) => s.id === line.fromStationId) < 0 ||
+                chosenBoundaries.findIndex((s) => s.id === line.toStationId) < 0);
             const displayName = service?.displayName ?? line.name;
             const key = resolveRiddenLineKey(
               line,
@@ -6379,8 +6920,18 @@ function RiddenLinesBlock({
                 registerLineRow(line.id, el);
               }}
               className={`px-3 py-2.5 ${
-                focusedLineId === line.id ? "map-focused" : ""
+                focusedLineId === line.id ? "map-focused-line" : ""
               }`}
+              /* The focused row is emphasized in the line's OWN
+                 color (see .map-focused-line in theme.css): the
+                 resolved asset color rides in as a custom
+                 property, and an unresolved row sets none and
+                 falls back to the signal color. */
+              style={
+                focusedLineId === line.id && color
+                  ? ({ "--line-focus-color": color } as CSSProperties)
+                  : undefined
+              }
             >
               <div className="flex items-center gap-3">
                 {color && (
@@ -6534,6 +7085,132 @@ function RiddenLinesBlock({
                   )}
                 </div>
               )}
+              {/* Link confirmation (subtask 1435): only rows whose
+                  saved link is under review — or rows a human
+                  already unlinked — offer it. The panel sits
+                  outside the row's map button (buttons cannot
+                  nest), next to the context edit and block
+                  picker. */}
+              {reviewable && (
+                <div data-map-no-fly="" className="mt-1.5">
+                  {explicitlyUnlinked && (
+                    <p className="text-xs text-[var(--dim)]">
+                      系統の連携なし（確認済み）
+                    </p>
+                  )}
+                  {linkReviewLineId !== line.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLinkReviewMsg(null);
+                        setLinkReviewChoice(
+                          line.serviceId && serviceById(line.serviceId)
+                            ? line.serviceId
+                            : "",
+                        );
+                        setLinkReviewLineId(line.id);
+                      }}
+                      className="rounded-lg px-2 py-1 text-xs text-[var(--dim)] underline"
+                    >
+                      {needsReview ? "連携を確認する" : "連携を確認し直す"}
+                    </button>
+                  )}
+                  {linkReviewLineId === line.id && (
+                    <div className="mt-1 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-3">
+                      <p className="text-xs text-[var(--dim)]">
+                        以前の自動連携ルールでは、この記録がどの系統か確定できませんでした。実際に乗った系統を選んでください。記録された名前・区間・日付は変わりません。
+                      </p>
+                      {line.serviceId && (
+                        <p className="mt-1 text-xs">
+                          保存されている連携：
+                          {serviceById(line.serviceId)?.displayName ??
+                            line.serviceId}
+                        </p>
+                      )}
+                      {needsReview && historicalVersions.length > 0 && (
+                        <p className="mt-1 text-xs text-[var(--dim)]">
+                          旧ルール v{historicalVersions.join("・v")}
+                          では、保存されている系統に自動で連携されていました。
+                        </p>
+                      )}
+                      {needsReview && historicalVersions.length === 0 && (
+                        <p className="mt-1 text-xs text-[var(--dim)]">
+                          保存されている連携は、どの自動連携ルールでも説明できません。
+                        </p>
+                      )}
+                      <ul className="mt-2 space-y-1">
+                        {SERVICE_MASTER.map((entry) => (
+                          <li
+                            key={entry.id}
+                            className="flex items-center gap-2 text-xs"
+                          >
+                            <input
+                              type="radio"
+                              id={`link-${line.id}-${entry.id}`}
+                              name={`link-${line.id}`}
+                              checked={linkReviewChoice === entry.id}
+                              onChange={() => setLinkReviewChoice(entry.id)}
+                            />
+                            <label htmlFor={`link-${line.id}-${entry.id}`}>
+                              {entry.displayName}（{entry.operator}）
+                            </label>
+                          </li>
+                        ))}
+                        <li className="flex items-center gap-2 text-xs">
+                          <input
+                            type="radio"
+                            id={`link-${line.id}-none`}
+                            name={`link-${line.id}`}
+                            checked={linkReviewChoice === ""}
+                            onChange={() => setLinkReviewChoice("")}
+                          />
+                          <label htmlFor={`link-${line.id}-none`}>
+                            どの系統にも当てはまらない（連携しない）
+                          </label>
+                        </li>
+                      </ul>
+                      {sectionEndpointsMismatch && (
+                        <p className="mt-2 text-xs text-[var(--dim)]">
+                          記録されている区間（
+                          {line.fromStationName ?? line.fromStationId}→
+                          {line.toStationName ?? line.toStationId}
+                          ）の端点は、この系統の境界駅ではありません。区間の記録はそのまま残ります。
+                        </p>
+                      )}
+                      <div className="mt-2 flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            confirmLinkMutation.mutate({
+                              id: line.id,
+                              serviceId: linkReviewChoice || null,
+                            })
+                          }
+                          disabled={confirmLinkMutation.isPending}
+                          className="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-bold text-[var(--accent-ink)] disabled:opacity-50"
+                        >
+                          {confirmLinkMutation.isPending ? "確定中…" : "確定する"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLinkReviewLineId(null);
+                            setLinkReviewMsg(null);
+                          }}
+                          className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs"
+                        >
+                          やめる
+                        </button>
+                      </div>
+                      {linkReviewMsg && (
+                        <p className="mt-1 text-xs text-[var(--signal)]">
+                          {linkReviewMsg}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               {coveredBlocks && (
                 <div data-map-no-fly="" className="mt-1.5">
                   <button
@@ -6603,7 +7280,11 @@ function RiddenLinesBlock({
             </li>
             );
           })}
-        </ul>
+              </ul>
+            </div>
+            );
+          })}
+        </div>
       )}
       {lineDeleteError && (
         <p className="mt-2 text-sm text-[var(--signal)]">{lineDeleteError}</p>
@@ -7036,15 +7717,21 @@ export function App() {
     return () => mq.removeEventListener("change", onChange);
   }, []);
   const [showAllLists, setShowAllLists] = useState(false);
-  /* Bottom tab bar: スポット (spot list), 市区町村・路線 (the fill
-     map + ledger + ridden lines), その他 (dashboard / add-import /
-     settings). All state lives in this component, so switching tabs
-     never loses filters or form input. The second tab IS the fill
-     map (the reader's request): it opens straight onto the pinned
-     fill map — the old 訪問記録 / スポット分布 toggle is gone, and
-     the all-spots distribution map that used to follow below the
-     fill map was removed at the reader's request. */
-  const [tab, setTab] = useState<"spots" | "map" | "more">("spots");
+  /* Bottom tab bar: スポット (spot list), 市区町村 (the fill
+     map + ledger), 路線 (the same fill map, lines as the hero +
+     the operator-grouped ridden-lines list), その他 (dashboard /
+     add-import / settings). All state lives in this component, so
+     switching tabs never loses filters or form input. The second
+     tab IS the fill map (the reader's request): it opens straight
+     onto the pinned fill map — the old 訪問記録 / スポット分布
+     toggle is gone, and the all-spots distribution map that used
+     to follow below the fill map was removed at the reader's
+     request. The 市区町村 / 路線 split (2026-11-25, subtask
+     1439) shares ONE VisitedMapSection between the two tabs: the
+     section, its map, and every loaded dataset mount once, and a
+     switch only flips which family is the hero and which is the
+     ghost underlay — see RecordMapVariant in map-variant.ts. */
+  const [tab, setTab] = useState<"spots" | "map" | "lines" | "more">("spots");
   /* Save-failure messages rendered next to the control that failed.
      Each mutation below reports through onError into one of these, so
      the SDK's bottom failure notice never duplicates an in-page error. */
@@ -7925,18 +8612,21 @@ export function App() {
 
         )}
 
-        {/* ===== 市区町村・路線 tab: the fill map is the tab =====
+        {/* ===== 市区町村 / 路線 tabs: the fill map is the tab =====
             The fill map section is the whole tab and opens directly
             (its map is pinned to the top of the viewport, fitted by
             default to the municipality the reader is in). The old
             all-spots distribution map that followed below it was
             removed at the reader's request — spots have their own
-            map on the スポット tab. The section renders only while
-            this tab is active, exactly as the other tabs' sections
-            do. */}
-        {tab === "map" && (
+            map on the スポット tab. The section renders while
+            EITHER record tab is active (the split, subtask 1439):
+            one mount serves both, and `variant` alone decides
+            which family is the hero — switching tabs never
+            remounts the map or refetches a dataset. */}
+        {(tab === "map" || tab === "lines") && (
           <VisitedMapSection
             active
+            variant={tab === "lines" ? "lines" : "municipalities"}
             deviceLoc={deviceLocation}
             cameraRequest={mapCameraRequest}
             onRetakeDeviceLocation={() => retakeMapDeviceLocation("visited")}
@@ -8831,10 +9521,23 @@ export function App() {
               },
               {
                 key: "map",
-                label: "市区町村・路線",
+                label: "市区町村",
                 icon: (
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2ZM9 4v14M15 6v14" />
+                  </svg>
+                ),
+              },
+              {
+                key: "lines",
+                label: "路線",
+                icon: (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="5" y="3" width="14" height="13" rx="3" />
+                    <path d="M5 10h14" />
+                    <circle cx="9" cy="13.2" r="0.7" fill="currentColor" stroke="none" />
+                    <circle cx="15" cy="13.2" r="0.7" fill="currentColor" stroke="none" />
+                    <path d="M8.5 20.5 10.2 16M15.5 20.5 13.8 16" />
                   </svg>
                 ),
               },

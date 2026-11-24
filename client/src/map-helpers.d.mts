@@ -75,6 +75,15 @@ export type MapLibreLike = {
      focus fill replaces it, so the two never stack darker), while
      the separate opacity-0 hit layers keep it tappable. */
   setFilter: (layerId: string, filter: unknown) => void;
+  /* Repaint a layer in place: the 市区町村 / 路線 tab split swaps
+     which overlay family is the hero and which is the ghost
+     underlay by adjusting opacity / width on the live layers —
+     no remount, no data reload (see map-variant.ts). */
+  setPaintProperty: (layerId: string, name: string, value: unknown) => void;
+  /* Show / hide a whole layer in place (the unridden-lines ghost
+     only exists on the 路線 tab) — the layout twin of the paint
+     swap above. */
+  setLayoutProperty: (layerId: string, name: string, value: unknown) => void;
   addSource: (id: string, source: Record<string, unknown>) => void;
   /* beforeId inserts the layer below an existing one instead of on
      top — the boundary layers that arrive after the mount (background

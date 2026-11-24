@@ -10,8 +10,10 @@ import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import { buildLineKeyByName, resolveRiddenLineKey } from "./line-resolution";
 import {
   firstLineByOperator,
+  groupLinesByOperator,
   lineGeometryBounds,
   operatorOfLine,
+  UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
 
 const keyByName = buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
@@ -117,6 +119,53 @@ describe("firstLineByOperator (the bar-tap jump target)", () => {
     expect(
       firstLineByOperator([], RIDDEN_LINE_GEOMETRIES, keyByName).size,
     ).toBe(0);
+  });
+});
+
+describe("groupLinesByOperator (the 路線 tab's operator groups)", () => {
+  const groups = groupLinesByOperator(
+    LEDGER_ROWS,
+    RIDDEN_LINE_GEOMETRIES,
+    keyByName,
+  );
+
+  test("groups appear in first-appearance order, rows in ledger order", () => {
+    expect(groups.map((g) => g.operator)).toEqual([
+      "東日本旅客鉄道",
+      "北総鉄道",
+      "京王電鉄",
+      "東京臨海高速鉄道",
+    ]);
+    expect(groups[0]!.rows.map((r) => r.id)).toEqual([1, 4, 5, 6, 8, 10]);
+    expect(groups[1]!.rows.map((r) => r.id)).toEqual([3]);
+  });
+
+  test("an unresolvable row lands in the 事業者不明 group, last", () => {
+    const withUnknown = groupLinesByOperator(
+      [...LEDGER_ROWS, { id: 99, name: "存在しない線" }],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    const last = withUnknown[withUnknown.length - 1]!;
+    expect(last.operator).toBe(UNKNOWN_OPERATOR_GROUP);
+    expect(last.rows.map((r) => r.id)).toEqual([99]);
+  });
+
+  test("a row whose link is pending review groups as 事業者不明", () => {
+    /* Same rule as operatorOfLine: an unconfirmed auto link
+       names no operator, so the row cannot file itself under
+       the operator it merely guesses at. */
+    const review = groupLinesByOperator(
+      [{ id: 11, name: "中央線（各駅停車）", serviceId: "jr-chuo-rapid" }],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]!.operator).toBe(UNKNOWN_OPERATOR_GROUP);
+  });
+
+  test("an empty ledger groups to nothing", () => {
+    expect(groupLinesByOperator([], RIDDEN_LINE_GEOMETRIES, keyByName)).toEqual([]);
   });
 });
 

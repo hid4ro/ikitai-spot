@@ -845,6 +845,19 @@ export function usableRiddenService(
   return row.serviceId ? resolveRiddenService(row).service : undefined;
 }
 
+/* Whether a ledger row's service link can be confirmed by hand
+   (subtask 1435): rows whose saved link disagrees with the current
+   name rule (needsReview), plus rows a human already unlinked
+   (explicit, no service) so an unlink can be undone by confirming
+   again. A plain unlinked row (never linked, no provenance) is not
+   reviewable — linking a never-linked row is not this operation. */
+export function isRiddenServiceLinkReviewable(
+  row: RiddenServiceLink,
+): boolean {
+  if (resolveRiddenService(row).needsReview) return true;
+  return row.serviceId == null && row.serviceLinkSource === "explicit";
+}
+
 /* Expands a service into its formal lines, in running order —
    the 系統→正式線名 translation the map and the aggregates use. */
 export function expandService(
