@@ -8,6 +8,8 @@ import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import {
+  isKnownMasterVersion,
+  isN02StationId,
   serviceById,
   serviceByLedgerName,
   SERVICE_MASTER_VERSION,
@@ -47,20 +49,27 @@ type RideFields = {
 };
 
 /* Resolves the ride fields for a registration. State rules
-   (Codex review 1, findings 1–2):
+   (Codex review 1, findings 1–2; review 2, high):
    - unknown: no section. Any supplied endpoints are dropped, never
      stored — an unrecorded section must stay unrecorded.
    - partial: both endpoint station IDs plus a known service (the
      route) are required; a partial with an empty endpoint is
-     rejected, not stored.
+     rejected, not stored. The endpoints must be N02 station group
+     codes (six digits) and two different stations — "bad" is not a
+     station, and a section from a station to itself is no section.
    - full: the service and a master version that reproduces its
-     range are required.
+     range are required — and the version must be one the master
+     actually knows (the current version or the frozen migration
+     version); a blank or made-up version ("bogus") is rejected,
+     not stored.
    A known serviceId / version is resolved server-side when the
    caller omits it; an unknown serviceId is rejected outright (a
    caller typo must never silently attach a ride to the wrong
    service). When the caller passes no ride state, both endpoints
-   present means partial, otherwise unknown. */
-function resolveRideFields(
+   present means partial, otherwise unknown.
+   Exported for the regression tests (server/src/actions.test.ts):
+   the save-time validation is exercised directly, without a DB. */
+export function resolveRideFields(
   name: string,
   supplied: z.infer<typeof rideFieldsSchema>,
 ): RideFields {
@@ -102,12 +111,24 @@ function resolveRideFields(
         `resolveRideFields: partial ride for "${name}" needs both endpoint station IDs`,
       );
     }
+    const fromStationId = supplied.fromStationId.trim();
+    const toStationId = supplied.toStationId.trim();
+    if (!isN02StationId(fromStationId) || !isN02StationId(toStationId)) {
+      throw new Error(
+        `resolveRideFields: partial ride for "${name}" needs N02 station IDs (six-digit group codes)`,
+      );
+    }
+    if (fromStationId === toStationId) {
+      throw new Error(
+        `resolveRideFields: partial ride for "${name}" needs two different stations`,
+      );
+    }
     return {
       serviceId,
       rideState: "partial",
-      fromStationId: supplied.fromStationId.trim(),
+      fromStationId,
       fromStationName: supplied.fromStationName?.trim() || null,
-      toStationId: supplied.toStationId.trim(),
+      toStationId,
       toStationName: supplied.toStationName?.trim() || null,
       masterVersion,
     };
@@ -118,9 +139,9 @@ function resolveRideFields(
       `resolveRideFields: full ride for "${name}" needs a known service`,
     );
   }
-  if (!masterVersion) {
+  if (!masterVersion || !isKnownMasterVersion(masterVersion)) {
     throw new Error(
-      `resolveRideFields: full ride for "${name}" needs a master version`,
+      `resolveRideFields: full ride for "${name}" needs a known master version (got ${JSON.stringify(masterVersion)})`,
     );
   }
   return {
@@ -1527,6 +1548,7 @@ export const Actions = {
           id: schema.riddenLines.id,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
+          masterVersion: schema.riddenLines.masterVersion,
         })
         .from(schema.riddenLines)
         .where(eq(schema.riddenLines.name, name));
@@ -1544,7 +1566,10 @@ export const Actions = {
         // (review finding 3): the section restoration belongs to
         // the SQL migration, not to a re-registration. The UPDATE
         // itself re-checks that the row is still unlinked, so a
-        // concurrent link can never be overwritten.
+        // concurrent link can never be overwritten. The recorded
+        // master version is likewise kept when one is already there
+        // (review round 2): only a missing version is backfilled
+        // with the current one.
         if (!existing[0].serviceId) {
           const link = resolveRideFields(name, {});
           if (link.serviceId) {
@@ -1552,7 +1577,9 @@ export const Actions = {
               .update(schema.riddenLines)
               .set({
                 serviceId: link.serviceId,
-                masterVersion: link.masterVersion,
+                ...(existing[0].masterVersion
+                  ? {}
+                  : { masterVersion: link.masterVersion }),
               })
               .where(
                 and(
@@ -1626,12 +1653,18 @@ export const Actions = {
           name: schema.riddenLines.name,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
+          masterVersion: schema.riddenLines.masterVersion,
         })
         .from(schema.riddenLines);
       const seen = new Map(
         existing.map((r) => [
           r.name,
-          { id: r.id, hasContext: !!r.context, serviceId: r.serviceId },
+          {
+            id: r.id,
+            hasContext: !!r.context,
+            serviceId: r.serviceId,
+            masterVersion: r.masterVersion,
+          },
         ]),
       );
       const fresh: (typeof schema.riddenLines.$inferInsert)[] = [];
@@ -1662,7 +1695,9 @@ export const Actions = {
           // its ride state or section (review finding 3): a
           // re-import must not erase a section a caller recorded
           // explicitly. The UPDATE itself re-checks that the row is
-          // still unlinked.
+          // still unlinked. The recorded master version is likewise
+          // kept when one is already there (review round 2): only
+          // a missing version is backfilled with the current one.
           if (!known.serviceId && known.id > 0) {
             const link = resolveRideFields(name, {});
             if (link.serviceId) {
@@ -1671,7 +1706,9 @@ export const Actions = {
                   .update(schema.riddenLines)
                   .set({
                     serviceId: link.serviceId,
-                    masterVersion: link.masterVersion,
+                    ...(known.masterVersion
+                      ? {}
+                      : { masterVersion: link.masterVersion }),
                   })
                   .where(
                     and(
@@ -1681,6 +1718,9 @@ export const Actions = {
                   ),
               );
               known.serviceId = link.serviceId;
+              if (!known.masterVersion) {
+                known.masterVersion = link.masterVersion;
+              }
             }
           }
           continue;
@@ -1690,6 +1730,7 @@ export const Actions = {
           id: -1,
           hasContext: !!(entry.context?.trim()),
           serviceId: ride.serviceId,
+          masterVersion: ride.masterVersion,
         });
         fresh.push({
           name,

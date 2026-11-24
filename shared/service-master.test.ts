@@ -10,9 +10,12 @@ import {
   MIGRATED_MASTER_VERSION,
   MIGRATED_RIDES,
   SERVICE_MASTER,
+  SERVICE_MASTER_VERSION,
   assetKeysForService,
   expandService,
   formalLineNames,
+  isKnownMasterVersion,
+  isN02StationId,
   serviceById,
   serviceByLedgerName,
   type RestoredRide,
@@ -159,6 +162,21 @@ describe("ledger-name lookup", () => {
     expect(serviceByLedgerName("JR中央線")?.id).toBe("jr-chuo-rapid");
   });
 
+  test("「臨海副都心線（りんかい線）」 with the parenthetical is the rinkai service (review round 2)", () => {
+    // The reviewer registered 「りんかい線」 and
+    // 「臨海副都心線（りんかい線）」 and got 2/1 for 東京臨海高速鉄道:
+    // the parenthetical spelling matched no ledger name, so its row
+    // stayed unlinked and counted by map key instead of by service.
+    // A trailing （…） qualifier does not make a different service.
+    expect(serviceByLedgerName("臨海副都心線（りんかい線）")?.id).toBe(
+      "rinkai",
+    );
+    expect(serviceByLedgerName("臨海副都心線")?.id).toBe("rinkai");
+    // The qualifier is stripped only for the lookup: a base name
+    // the master does not know still finds nothing.
+    expect(serviceByLedgerName("存在しない線（快速）")).toBeUndefined();
+  });
+
   test("an unregistered name finds no service", () => {
     expect(serviceByLedgerName("存在しない線")).toBeUndefined();
     expect(serviceByLedgerName("西武池袋線")).toBeUndefined();
@@ -169,6 +187,30 @@ describe("ledger-name lookup", () => {
       expect(serviceById(entry.id)).toBe(entry);
     }
     expect(serviceById("does-not-exist")).toBeUndefined();
+  });
+});
+
+describe("save-time validation (review round 2)", () => {
+  test("isN02StationId accepts six-digit group codes only", () => {
+    expect(isN02StationId("003766")).toBe(true);
+    expect(isN02StationId("004135")).toBe(true);
+    // The reviewer's reproduction values.
+    expect(isN02StationId("bad")).toBe(false);
+    expect(isN02StationId("")).toBe(false);
+    expect(isN02StationId("12345")).toBe(false);
+    expect(isN02StationId("1234567")).toBe(false);
+    expect(isN02StationId("00376a")).toBe(false);
+    expect(isN02StationId(" 003766")).toBe(false);
+  });
+
+  test("isKnownMasterVersion accepts only versions the master knows", () => {
+    expect(isKnownMasterVersion(SERVICE_MASTER_VERSION)).toBe(true);
+    expect(isKnownMasterVersion(MIGRATED_MASTER_VERSION)).toBe(true);
+    // The reviewer's reproduction values.
+    expect(isKnownMasterVersion("bogus")).toBe(false);
+    expect(isKnownMasterVersion("")).toBe(false);
+    expect(isKnownMasterVersion(" ")).toBe(false);
+    expect(isKnownMasterVersion("2026-11-25")).toBe(false);
   });
 });
 

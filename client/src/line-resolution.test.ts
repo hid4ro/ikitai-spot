@@ -10,6 +10,7 @@ import { serviceByLedgerName } from "../../shared/service-master";
 import {
   buildLineKeyByName,
   countRiddenByOperator,
+  countRiddenServices,
   resolveRiddenLineKey,
   resolveRiddenLineKeys,
 } from "./line-resolution";
@@ -175,6 +176,24 @@ describe("per-operator counts", () => {
     expect(rinkaiCounts.get("東京臨海高速鉄道")).toBe(1);
   });
 
+  test("りんかい線 under both spellings counts once even with no saved service_id (review round 2)", () => {
+    // The reviewer's exact reproduction: both rows registered by
+    // name only, so neither carries a saved service_id — the second
+    // spelling （「臨海副都心線（りんかい線）」) matched no ledger
+    // name and fell back to its map key, double-counting the
+    // operator. The parenthetical spelling now resolves to rinkai
+    // through the master, so both rows are one service.
+    const counts = countRiddenByOperator(
+      [
+        { name: "りんかい線", serviceId: null },
+        { name: "臨海副都心線（りんかい線）", serviceId: null },
+      ],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(counts.get("東京臨海高速鉄道")).toBe(1);
+  });
+
   test("a saved service_id wins over the recorded name", () => {
     // A row recorded as 「臨海副都心線」 with no saved id still
     // resolves through the master's alias; with a saved id it
@@ -185,6 +204,41 @@ describe("per-operator counts", () => {
       keyByName,
     );
     expect(byName.get("東京臨海高速鉄道")).toBe(1);
+  });
+});
+
+describe("national donut numerator (review round 2)", () => {
+  const ALL_LEDGER_ROWS = LEDGER_ROWS.map(([name]) => ({
+    name,
+    serviceId: serviceByLedgerName(name)?.id ?? null,
+  }));
+
+  test("the nine legacy rows count as nine services, not six keys", () => {
+    // The donut used to show 6 / 597 (distinct resolved keys):
+    // 総武快速線・総武本線 share one key, and JR埼京線・山手線
+    // have no single key at all in stage 1. The numerator now
+    // counts distinct services, agreeing with the 事業者別 chart.
+    expect(countRiddenServices(ALL_LEDGER_ROWS, RIDDEN_LINE_GEOMETRIES, keyByName)).toBe(9);
+  });
+
+  test("a row with no known service still counts once by its resolved key", () => {
+    // 西武池袋線 is not in the master, but it names a real line,
+    // so it counts once for its operator — the donut must not drop
+    // rides the master has not learned yet.
+    expect(
+      countRiddenServices(
+        [{ name: "西武池袋線", serviceId: null }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(1);
+    expect(
+      countRiddenServices(
+        [{ name: "存在しない線", serviceId: null }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(0);
   });
 });
 

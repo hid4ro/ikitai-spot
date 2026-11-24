@@ -191,3 +191,25 @@ export function countRiddenByOperator(
   }
   return counts;
 }
+
+/* How many distinct services-or-lines the ledger's rows amount to:
+   the national donut's numerator (review round 2). The token is the
+   same one countRiddenByOperator uses — a service id when the row
+   links to a service, otherwise its resolved asset key — so the
+   nine legacy rows count 9, not the 6 distinct keys the donut used
+   to show. The 6-key count dropped JR埼京線 and 山手線 because
+   they paint nothing in stage 1, but they were still ridden, and
+   the 事業者別 chart already counts them — the donut now agrees
+   with it. The denominator stays the 597 N02 line units;
+   systematizing it is stage 2's distance-conquest work (see
+   DATA-PLAN.md). */
+export function countRiddenServices(
+  rows: readonly RiddenLineRow[],
+  geometries: Readonly<Record<string, { operator: string }>>,
+  keyByName: ReadonlyMap<string, string>,
+): number {
+  const counts = countRiddenByOperator(rows, geometries, keyByName);
+  let total = 0;
+  for (const n of counts.values()) total += n;
+  return total;
+}

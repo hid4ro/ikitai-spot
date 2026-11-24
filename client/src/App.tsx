@@ -50,6 +50,7 @@ import {
 import {
   buildLineKeyByName,
   countRiddenByOperator,
+  countRiddenServices,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
 } from "./line-resolution";
 import { serviceById } from "../../shared/service-master";
@@ -1180,7 +1181,7 @@ function ConquestCharts({
   prefectures,
   totalVisited,
   riddenLines,
-  riddenLineKeys,
+  riddenServiceCount,
   municipalityProgressPct,
   lineProgressPct,
   onOperatorSelect,
@@ -1189,7 +1190,10 @@ function ConquestCharts({
   prefectures: { name: string; total: number }[];
   totalVisited: number;
   riddenLines: { name: string; firstRiddenOn: string; serviceId: string | null }[];
-  riddenLineKeys: ReadonlySet<string>;
+  /* Distinct services ridden — the 路線 donut's numerator (review
+     round 2). The map overlay still paints by asset key; this count
+     is the service count, so it agrees with the 事業者別 bars below. */
+  riddenServiceCount: number;
   municipalityProgressPct: string;
   lineProgressPct: string;
   /* 事業者別（路線）bar tap (and its accessible button twin):
@@ -1209,9 +1213,11 @@ function ConquestCharts({
      countRiddenByOperator): JR総武快速線 and JR総武本線 are two
      services that share the one asset key 「総武線」, so both show;
      two spellings of one service （「JR中央線」 and 「JR中央線
-     （快速）」) count once. The donut above keeps the distinct-key
-     count — its denominator is the 597 distinct asset lines
-     nationwide. */
+     （快速）」) count once. The 路線 donut above counts the same
+     way — its value is the distinct-service total (see
+     countRiddenServices), not the distinct-key count. Its
+     denominator stays the 597 distinct asset lines nationwide
+     (systematizing the denominator is stage 2's work). */
   const operatorRidden = countRiddenByOperator(
     riddenLines,
     RIDDEN_LINE_GEOMETRIES,
@@ -1247,7 +1253,7 @@ function ConquestCharts({
         />
         <ProgressDonut
           title="路線"
-          value={riddenLineKeys.size}
+          value={riddenServiceCount}
           total={JAPAN_LINE_TOTAL}
           pctText={lineProgressPct}
           color={CHART_LINE_COLOR}
@@ -3075,15 +3081,27 @@ function VisitedMapSection({
      in Japan, lines against every railway line in Japan — the bundled
      asset carries all of them (国土数値情報 N02 line units), so a line
      ridden anywhere in the country resolves, draws, and counts. The
-     line numerator is the number of distinct asset lines the ledger's
-     ridden rows resolve to. */
+     line numerator is the number of distinct SERVICES ridden (see
+     countRiddenServices): the nine legacy rows are 9, not the 6
+     distinct asset keys they resolve to — JR埼京線 and 山手線 ride
+     services that paint nothing in stage 1, but they were still
+     ridden, and the 事業者別 chart already counts them. The
+     denominator stays the 597 N02 line units; the numerator and
+     denominator are therefore not yet in the same unit, and
+     systematizing the denominator is stage 2's distance-conquest
+     work (see DATA-PLAN.md). */
+  const riddenServiceCount = countRiddenServices(
+    riddenQuery.data?.lines ?? [],
+    RIDDEN_LINE_GEOMETRIES,
+    LINE_KEY_BY_NAME,
+  );
   const municipalityProgressPct =
     JAPAN_MUNICIPALITY_TOTAL > 0
       ? ((totalVisited / JAPAN_MUNICIPALITY_TOTAL) * 100).toFixed(2)
       : "0.00";
   const lineProgressPct =
     JAPAN_LINE_TOTAL > 0
-      ? ((riddenLineKeys.size / JAPAN_LINE_TOTAL) * 100).toFixed(1)
+      ? ((riddenServiceCount / JAPAN_LINE_TOTAL) * 100).toFixed(1)
       : "0.0";
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -5089,12 +5107,12 @@ function VisitedMapSection({
                 {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
               </span>
               <span>
-                路線 {riddenLineKeys.size.toLocaleString()} /{" "}
+                路線 {riddenServiceCount.toLocaleString()} /{" "}
                 {JAPAN_LINE_TOTAL.toLocaleString()}（{lineProgressPct}%）
               </span>
             </p>
             <p className="mt-1 text-xs text-[var(--dim)]">
-              路線数は国土数値情報の路線単位で、全国の全路線が分母です（総武快速線・総武本線は同じ路線単位として1路線に数えます）
+              路線数は乗った系統の数です。分母は全国の全路線（国土数値情報の路線単位・597）です
             </p>
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
@@ -5131,7 +5149,7 @@ function VisitedMapSection({
               prefectures={prefectures}
               totalVisited={totalVisited}
               riddenLines={riddenQuery.data?.lines ?? []}
-              riddenLineKeys={riddenLineKeys}
+              riddenServiceCount={riddenServiceCount}
               municipalityProgressPct={municipalityProgressPct}
               lineProgressPct={lineProgressPct}
               onOperatorSelect={focusLineFromOperator}

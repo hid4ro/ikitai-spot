@@ -39,6 +39,19 @@ export type StationRef = {
   name: string;
 };
 
+/* An N02 station group code is six digits — the only station
+   identity this codebase carries (see the "station ids are
+   six-digit N02 group codes" test). A partial ride's endpoints must
+   be codes in this shape; anything else ("bad", a name, a blank)
+   is not a station and must be rejected at save time (review round
+   2, high). This checks the shape, not membership in the full N02
+   station table — no such table is bundled — so a well-formed but
+   nonexistent code is still possible; the master itself is the
+   reference for real stations. */
+export function isN02StationId(id: string): boolean {
+  return /^\d{6}$/.test(id);
+}
+
 /* One stretch of a service: the formal line it runs on between two
    stations. `formalLineKey` is the asset key "路線名|運営会社" in
    RIDDEN_LINE_GEOMETRIES. */
@@ -310,7 +323,23 @@ export function serviceByLedgerName(
   ledgerName: string,
 ): ServiceMasterEntry | undefined {
   const name = ledgerName.trim();
-  return SERVICE_MASTER.find((entry) => entry.ledgerNames.includes(name));
+  const exact = SERVICE_MASTER.find((entry) =>
+    entry.ledgerNames.includes(name),
+  );
+  if (exact) return exact;
+  // A trailing （…） qualifier does not make a different service:
+  // 「臨海副都心線（りんかい線）」 is the rinkai service, same as
+  // 「臨海副都心線」 (review round 2: the parenthetical spelling
+  // registered as its own line and double-counted its operator
+  // 2/1). The qualifier is stripped only for the lookup; the
+  // recorded name itself is untouched.
+  const stripped = name.replace(/（[^）]*）$/, "");
+  if (stripped !== name) {
+    return SERVICE_MASTER.find((entry) =>
+      entry.ledgerNames.includes(stripped),
+    );
+  }
+  return undefined;
 }
 
 /* Expands a service into its formal lines, in running order —
@@ -405,6 +434,16 @@ export type RestoredRide = {
    migrated at (a later extension must never silently claim a
    stretch the rider never rode). */
 export const MIGRATED_MASTER_VERSION = "2026-11-24";
+
+/* The master versions a full ride may be recorded at: the current
+   version, or the frozen version the nine migrated rides were cut
+   at. A full ride's range must be reproducible from its version, so
+   an unknown version ("bogus", a blank, whitespace) must be
+   rejected at save time (review round 2, high). */
+export function isKnownMasterVersion(version: string): boolean {
+  const v = version.trim();
+  return v === SERVICE_MASTER_VERSION || v === MIGRATED_MASTER_VERSION;
+}
 
 export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
   "JR武蔵野線": {
