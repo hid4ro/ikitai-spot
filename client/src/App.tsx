@@ -82,7 +82,7 @@ import {
 } from "./line-focus";
 import {
   applyVariantPaint,
-  lineRowForPaintedKey,
+  lineRowForPaintedFeature,
   municipalityRowForPaintedName,
   stickyPaneVisibleTop,
   type RecordMapVariant,
@@ -2931,10 +2931,11 @@ function clearFocusGeometry(map: MapLibreLike) {
    color, drawn wider than any normal line so the focused line
    reads at a glance without losing its identity. The color rides
    on each focus feature as a property (see setFocusSection), the
-   same contract as the normal line layers. The line layers are
-   never in the tap hit-test set, so the highlight cannot
-   intercept a municipality tap (and map taps on lines stay out
-   of scope, as before). */
+   same contract as the normal line layers. On the 市区町村 tab
+   the line layers stay out of the tap hit-test set, so the
+   highlight cannot intercept a municipality tap; on the 路線 tab
+   the focus layers ARE hit-tested, so the highlighted track
+   itself stays tappable (see the line tap handler). */
 
 const LINE_FOCUS_SOURCE_ID = "visited-line-focus";
 
@@ -2989,18 +2990,20 @@ function ensureLineFocusLayers(map: MapLibreLike) {
 /* Line-focus switching, mirroring setNormalFillExclusion: while a
    line is focused its normal paint is filtered out of the
    visited-lines layers and the focus layers replace it, so the
-   line is never double-painted. `keys` are the asset line keys
-   the overlay features carry as a property (a service can span
-   several formal lines — 埼京線 covers 山手線・赤羽線・東北線・
-   川越線); null restores every line. The dashed unknown layer is
-   excluded the same way: a focused unknown ride must not show
-   both as a dashed whole path and as the focus highlight. */
-function setNormalLineExclusion(map: MapLibreLike, keys: readonly string[] | null) {
-  const filter = keys
-    ? ["all", ["!=", ["get", "dashed"], true], ["!", ["in", ["get", "key"], ["literal", keys]]]]
+   line is never double-painted. The exclusion is by SERVICE id
+   (the property every overlay feature carries), not by formal
+   line key: two services can share one key — 総武本線 and
+   総武快速線 both paint JR・総武線 — and focusing one must not
+   hide the other (integrated review round 1, medium). Null
+   restores every line. The dashed unknown layer is excluded the
+   same way: a focused unknown ride must not show both as a
+   dashed whole path and as the focus highlight. */
+function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
+  const filter = serviceId
+    ? ["all", ["!=", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
     : ["!=", ["get", "dashed"], true];
-  const dashedFilter = keys
-    ? ["all", ["==", ["get", "dashed"], true], ["!", ["in", ["get", "key"], ["literal", keys]]]]
+  const dashedFilter = serviceId
+    ? ["all", ["==", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
     : ["==", ["get", "dashed"], true];
   if (map.getLayer("visited-lines-casing")) {
     map.setFilter("visited-lines-casing", filter);
@@ -3022,20 +3025,24 @@ function setNormalLineExclusion(map: MapLibreLike, keys: readonly string[] | nul
    asset entry for the leg's key, the same lookup the normal
    overlay features use) so the focus layers paint the line in
    its own color; a leg whose asset entry has no color falls
-   back to the signal orange, the pre-2026-11-25 paint. */
+   back to the signal orange, the pre-2026-11-25 paint. The
+   features carry the serviceId too, so a tap on the highlight
+   itself resolves to the same service (the focus layers are in
+   the tap hit-test set — see the line tap handler). */
 function setFocusSection(
   map: MapLibreLike,
+  serviceId: string,
   legs: readonly { key: string; coords: readonly [number, number][] }[],
 ) {
   ensureLineFocusLayers(map);
-  const keys = [...new Set(legs.map((leg) => leg.key))];
-  setNormalLineExclusion(map, keys);
+  setNormalLineExclusion(map, serviceId);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
     features: legs.map((leg) => ({
       type: "Feature",
       properties: {
         key: leg.key,
+        serviceId,
         color: RIDDEN_LINE_GEOMETRIES[leg.key]?.color ?? "#ea580c",
       },
       geometry: { type: "LineString", coordinates: leg.coords },
@@ -3170,9 +3177,11 @@ function VisitedMapSection({
     .filter((x): x is { m: VisitedMunicipality; geometry: GeoJsonGeometry } => x.geometry !== null);
   const circled = mappable.filter((m) => boundaryGeometryFor(m) === null);
 
-  /* Ridden lines (same query key as RiddenLinesBlock below, so the two
-     share one fetch): the rows feed the stage-2 line coverage below,
-     which paints only the ridden sections. */
+  /* Ridden lines: this section owns the fetch and hands the rows
+     down to RiddenLinesBlock as props (integrated review round 1,
+     medium — the block used to run its own useQuery on the same
+     key, and switching tabs re-ran it). The rows feed the stage-2
+     line coverage below, which paints only the ridden sections. */
   const riddenQuery = useQuery({
     queryKey: ["riddenLines"],
     queryFn: () => api.listRiddenLines({}),
@@ -3199,6 +3208,13 @@ function VisitedMapSection({
     ),
     [riddenQuery.data],
   );
+  /* The map exists for the lines as much as for the municipalities
+     (integrated review round 1, high): a reader whose only
+     records are rides — zero visited municipalities — still gets
+     the map on the 路線 tab. The map's mount and every render
+     gate key off this, never off the municipality count alone. */
+  const hasRiddenLines = (riddenQuery.data?.lines.length ?? 0) > 0;
+  const showLiveMap = mappable.length > 0 || hasRiddenLines;
   /* Mirrors for the map tap listeners and the mount effect, which
      run outside this render's closure: the current variant, the
      ledger rows, and the coverage they resolve taps against. */
@@ -3240,20 +3256,30 @@ function VisitedMapSection({
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
      its whole path dashed. A leg's key is its formal line; the
-     color comes from the asset entry for that key. `key` and
-     `dashed` ride along so a line focus can filter its legs OUT
-     of the normal line layers while the focus highlight replaces
-     them (see setNormalLineExclusion). */
+     color comes from the asset entry for that key. `key`,
+     `serviceId` and `dashed` ride along so a line focus can
+     filter its legs OUT of the normal line layers while the
+     focus highlight replaces them (see setNormalLineExclusion)
+     and so a map tap can resolve the SERVICE that painted the
+     tapped leg: services sharing one formal line (総武本線 /
+     総武快速線 both draw JR・総武線) are told apart by
+     serviceId, never by key alone (integrated review round 1,
+     medium). */
   const riddenLineFeatures = useMemo(() => {
     const features: {
       type: "Feature";
-      properties: { key: string; color: string; dashed: boolean };
+      properties: {
+        key: string;
+        serviceId: string;
+        color: string;
+        dashed: boolean;
+      };
       geometry: {
         type: "LineString";
         coordinates: readonly [number, number][];
       };
     }[] = [];
-    for (const painted of lineCoverage.perServiceLegs.values()) {
+    for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
       for (const leg of painted.legs) {
         const entry = RIDDEN_LINE_GEOMETRIES[leg.key];
         if (!entry) continue;
@@ -3261,6 +3287,7 @@ function VisitedMapSection({
           type: "Feature",
           properties: {
             key: leg.key,
+            serviceId,
             color: entry.color,
             dashed: painted.unknown,
           },
@@ -3718,9 +3745,19 @@ function VisitedMapSection({
     .map((m) => `${m.id}${boundaryGeometryFor(m) ? "g" : ""}`)
     .join(",");
 
-  /* Mount the interactive map once the rows exist and the priority
-     boundary set has settled (boundarySettled — until then the
-     static preview covers the pane). No numbered pins
+  /* Mount the interactive map once the priority boundary set has
+     settled (boundarySettled — until then the static preview
+     covers the pane). The mount does NOT wait for the municipality
+     ledger's rows: they only feed the runtime's row-selection
+     sync, and on the 路線 tab — or for a reader whose only
+     records are rides — they do not exist at all, yet the map
+     must still come up (integrated review round 1, high: the
+     mount used to abort silently when the rows were short, and
+     the pane sat on ライブ地図を読み込み中 forever). Missing
+     rows are padded with detached placeholders so the runtime's
+     index alignment (rows[i] ↔ places[i]) survives; a detached
+     element's class toggles, listeners and scrollIntoView are
+     harmless no-ops. No numbered pins
      are drawn: zoomed out they piled up over the Kanto cluster and
      buried the painted fills, which are the actual collection. Places
      still register with the runtime (it frames the initial camera on
@@ -3731,7 +3768,7 @@ function VisitedMapSection({
      the stored static map of the same municipalities takes its
      place. */
   useEffect(() => {
-    if (mapFailed || !boundarySettled || mappable.length === 0) return;
+    if (mapFailed || !boundarySettled) return;
     setBasemapReady(false);
     const container = mapContainerRef.current;
     if (!container) return;
@@ -3780,10 +3817,14 @@ function VisitedMapSection({
         failMap(MAP_FAIL_NO_RUNTIME);
         return;
       }
-      const rows = mappable
-        .map((m) => rowRefs.current[mappableIndex.get(m.id) ?? -1])
-        .filter((el): el is HTMLElement => el !== null && el !== undefined);
-      if (cancelled || rows.length !== mappable.length) return;
+      const rows = mappable.map((m) => {
+        const el = rowRefs.current[mappableIndex.get(m.id) ?? -1];
+        /* Index-aligned placeholder (see the mount comment): a
+           row that is not rendered — the 路線 variant renders the
+           line ledger instead — must not abort the mount. */
+        return el ?? document.createElement("div");
+      });
+      if (cancelled) return;
       /* The fill: real boundary polygons where a shape is known (stored
          on the row or in the boundary data), and a circle at the
          representative point only for municipalities without one. */
@@ -4692,10 +4733,18 @@ function VisitedMapSection({
       if (variantRef.current === "lines") {
         if (e?.point !== undefined && e?.point !== null) {
           try {
+            /* The focus highlight layers are hit-tested too: a
+               focused line's normal paint is filtered out, so
+               without them the highlighted track itself could
+               never be tapped again (integrated review round 1,
+               medium). */
             const layers = [
               "visited-lines-color",
               "visited-lines-unknown",
               "visited-lines-casing",
+              "visited-line-focus-color",
+              "visited-line-focus-casing",
+              "visited-line-focus-halo",
             ].filter((id) => map.getLayer(id));
             if (layers.length > 0) {
               /* The painted tracks are only a few pixels wide —
@@ -4703,7 +4752,9 @@ function VisitedMapSection({
                  uses a small box around the tap point, the same
                  allowance the spot map gives its dots. Features
                  come back top-most first; the first that resolves
-                 to a ledger row wins. */
+                 to a ledger row wins. Resolution is by the
+                 feature's serviceId (see lineRowForPaintedFeature):
+                 services sharing one formal line stay apart. */
               const pt = e.point as { x: number; y: number };
               const R = 12;
               const features = map.queryRenderedFeatures(
@@ -4716,10 +4767,15 @@ function VisitedMapSection({
               for (const f of features) {
                 const key = f.properties?.key;
                 if (typeof key !== "string") continue;
-                const row = lineRowForPaintedKey(
+                const rawServiceId = f.properties?.serviceId;
+                const row = lineRowForPaintedFeature(
                   riddenRowsRef.current,
                   lineCoverageRef.current.perServiceLegs,
-                  key,
+                  {
+                    key,
+                    serviceId:
+                      typeof rawServiceId === "string" ? rawServiceId : null,
+                  },
                 );
                 if (row) {
                   focusLineFromMapRef.current(row);
@@ -5072,7 +5128,7 @@ function VisitedMapSection({
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    if (!mapFailed && mappable.length > 0) {
+    if (!mapFailed && showLiveMap) {
       mapContainerRef.current?.scrollIntoView({
         behavior: reduceMotion ? "auto" : "smooth",
         block: "start",
@@ -5085,7 +5141,7 @@ function VisitedMapSection({
         if (focusedLineIdRef.current !== line.id) return;
         try {
           ensureFocusListeners(map);
-          setFocusSection(map, painted.legs);
+          if (service) setFocusSection(map, service.id, painted.legs);
           if (bounds) {
             map.fitBounds(bounds, {
               padding: 36,
@@ -5157,7 +5213,7 @@ function VisitedMapSection({
            highlight for a row the reader has already left. */
         if (focusedLineIdRef.current !== row.id) return;
         try {
-          setFocusSection(map, painted.legs);
+          if (service) setFocusSection(map, service.id, painted.legs);
         } catch {
           /* a failed highlight leaves the row emphasis as the cue */
         }
@@ -5234,8 +5290,8 @@ function VisitedMapSection({
          highlight for a row the reader has already left. */
       if (focusedLineIdRef.current !== line.id) return;
       try {
-        if (painted && painted.legs.length > 0) {
-          setFocusSection(map, painted.legs);
+        if (painted && painted.legs.length > 0 && service) {
+          setFocusSection(map, service.id, painted.legs);
         } else {
           /* No track to paint (a row with no service link): the
              previous row's highlight must not linger. */
@@ -5369,7 +5425,7 @@ function VisitedMapSection({
         </p>
       )}
 
-      {visitedQuery.data && totalVisited === 0 && (
+      {visitedQuery.data && totalVisited === 0 && !hasRiddenLines && (
         <div className="mt-3 rounded-[var(--radius)] bg-[var(--surface)] p-6 text-center">
           <p className="font-[family-name:var(--font-display)] text-lg font-bold">まだ記録がありません</p>
           <p className="mt-2 text-sm text-[var(--dim)]">
@@ -5390,12 +5446,12 @@ function VisitedMapSection({
           that pane. */}
       <div
         className={
-          totalVisited > 0
+          totalVisited > 0 || hasRiddenLines
             ? "xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:gap-x-6"
             : undefined
         }
       >
-      {totalVisited > 0 && (
+      {(totalVisited > 0 || hasRiddenLines) && (
         <>
           {/* Sticky map first — the exact same wrapper as the
               スポット tab's pinned map (sticky, -mx-4 full-bleed,
@@ -5404,13 +5460,17 @@ function VisitedMapSection({
               both tabs. The grid placement lives on the wrapper;
               the map container inside keeps its own ref. */}
           <div className="sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1">
-          {mappable.length > 0 && !mapFailed && (
+          {showLiveMap && !mapFailed && (
             <div className="relative">
               <div
                 ref={mapContainerRef}
                 className={`${MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
                 role="img"
-                aria-label={`通った市区町村${mappable.length}件の地図`}
+                aria-label={
+                  mappable.length > 0
+                    ? `通った市区町村${mappable.length}件の地図`
+                    : "乗った路線の地図"
+                }
                 aria-hidden={!basemapReady}
               />
               {fallbackPhase !== "gone" && (
@@ -5439,7 +5499,7 @@ function VisitedMapSection({
               )}
             </div>
           )}
-          {(mapFailed || mappable.length === 0) && (
+          {(mapFailed || !showLiveMap) && (
             <figure
               className="map-fade-in"
               ref={(el) => {
@@ -5465,7 +5525,7 @@ function VisitedMapSection({
               </figcaption>
             </figure>
           )}
-          {mapFailed && mappable.length > 0 && (
+          {mapFailed && showLiveMap && (
             <div className="px-4 pt-1">
               <p className="text-xs text-[var(--dim)]">
                 地図を読み込めなかったため、静止画で表示しています。通信が戻れば自動で地図に切り替わります。
@@ -5489,7 +5549,7 @@ function VisitedMapSection({
               so the affected prefectures show without their
               boundary lines. Discreet, like the map-failure note
               above; the console carries the detail. */}
-          {boundaryFailed && !mapFailed && mappable.length > 0 && (
+          {boundaryFailed && !mapFailed && showLiveMap && (
             <p className="px-4 pt-1 text-xs text-[var(--dim)]">
               境界データの一部を読み込めなかったため、地図の境界線が一部欠けています。
             </p>
@@ -5500,7 +5560,7 @@ function VisitedMapSection({
               conditions just because the live map is not up. The
               store retries on its own, and again when the browser
               reports the connection is back. */}
-          {boundaryFailed && (mapFailed || mappable.length === 0) && (
+          {boundaryFailed && (mapFailed || !showLiveMap) && (
             <p className="px-4 pt-1 text-xs text-[var(--dim)]">
               境界データの一部を読み込めませんでした。通信が戻れば自動で再取得します。
             </p>
@@ -5511,7 +5571,7 @@ function VisitedMapSection({
               in one compact block (prefecture counts, progress, and
               the one-line counting note). No caption about the
               fills — same cleanup as the スポット tab's map. */}
-          {mappable.length > 0 && !mapFailed && (
+          {showLiveMap && !mapFailed && (
             <div className="mt-2 flex flex-wrap items-center gap-2 xl:col-start-1 xl:row-start-2">
               {/* Fitting the camera to the current municipality is
                   the 市区町村 tab's move; on the 路線 tab the row
@@ -5972,6 +6032,12 @@ function VisitedMapSection({
       {variant === "lines" && (
       <div className="xl:col-start-2 xl:row-start-1 xl:row-span-6">
         <RiddenLinesBlock
+          lines={riddenQuery.data?.lines ?? []}
+          totalLines={riddenQuery.data?.total ?? 0}
+          linesPending={riddenQuery.isPending}
+          linesError={riddenQuery.isError}
+          linesLoaded={riddenQuery.data !== undefined}
+          onRetryLines={() => void riddenQuery.refetch()}
           focusedLineId={focusedLineId}
           linesExpanded={linesExpanded}
           expandedOperators={expandedOperators}
@@ -6617,6 +6683,12 @@ function SpotListMap({
 /* The ridden-lines collection shown under the fill map: lines the user
    rode and got a line-trivia delivery for, with the first-ride date. */
 function RiddenLinesBlock({
+  lines,
+  totalLines,
+  linesPending,
+  linesError,
+  linesLoaded,
+  onRetryLines,
   focusedLineId,
   linesExpanded,
   expandedOperators,
@@ -6627,6 +6699,21 @@ function RiddenLinesBlock({
   onLineDeleted,
   registerLineRow,
 }: {
+  /* The ledger rows and their fetch state, owned by
+     VisitedMapSection (integrated review round 1, medium): the
+     block used to run its own useQuery on the same key, so a tab
+     switch re-ran the query and the list flickered through a
+     refetch. The parent's single fetch serves both the map and
+     this list; the block's mutations still invalidate the key,
+     which refetches the parent's query and flows back down. */
+  lines: RiddenLine[];
+  totalLines: number;
+  linesPending: boolean;
+  linesError: boolean;
+  /* True once a fetch has landed (the "no records yet" note must
+     not show while the first load is still in flight). */
+  linesLoaded: boolean;
+  onRetryLines: () => void;
   /* The focused line's ledger id (row emphasis), owned by
      VisitedMapSection — the same focus the map highlight and the
      事業者別 bar jumps share. */
@@ -6662,12 +6749,6 @@ function RiddenLinesBlock({
   registerLineRow: (id: number, el: HTMLElement | null) => void;
 }) {
   const queryClient = useQueryClient();
-  const linesQuery = useQuery({
-    queryKey: ["riddenLines"],
-    queryFn: () => api.listRiddenLines({}),
-  });
-  const lines = linesQuery.data?.lines ?? [];
-  const totalLines = linesQuery.data?.total ?? 0;
   /* Grouped by operator (tab split, subtask 1439), the same
      shape as the municipality ledger's prefecture groups:
      groups in first-appearance order, rows in ledger order,
@@ -6820,16 +6901,16 @@ function RiddenLinesBlock({
         電車トリビアを受け取った路線を、初めて乗った日と一緒に記録しています。
       </p>
 
-      {linesQuery.isPending && <p className="mt-3 text-sm text-[var(--dim)]">読み込み中…</p>}
-      {linesQuery.isError && (
+      {linesPending && <p className="mt-3 text-sm text-[var(--dim)]">読み込み中…</p>}
+      {linesError && (
         <p className="mt-3 text-sm text-[var(--signal)]">
           路線の記録の読み込みに失敗しました{" "}
-          <button type="button" className="underline" onClick={() => void linesQuery.refetch()}>
+          <button type="button" className="underline" onClick={onRetryLines}>
             再試行
           </button>
         </p>
       )}
-      {linesExpanded && linesQuery.data && totalLines === 0 && (
+      {linesExpanded && linesLoaded && totalLines === 0 && (
         <p className="mt-3 text-sm text-[var(--dim)]">
           まだ記録がありません。新しい路線でトリビアを受け取ると、ここに自動で追加されます。
         </p>
@@ -6879,8 +6960,10 @@ function RiddenLinesBlock({
               line.serviceId == null && line.serviceLinkSource === "explicit";
             const reviewable = isRiddenServiceLinkReviewable(line);
             /* The chosen service's boundaries, for the hint when
-               the row's recorded section does not fit it: the
-               section is kept as recorded, only the link changes. */
+               the row's recorded section does not fit it: such a
+               choice cannot be confirmed (the server refuses it —
+               integrated review round 1, high), so the hint says
+               so before the reader tries. */
             const chosenBoundaries =
               linkReviewLineId === line.id && linkReviewChoice
                 ? serviceBoundaryStations(linkReviewChoice)
@@ -6898,7 +6981,20 @@ function RiddenLinesBlock({
               RIDDEN_LINE_GEOMETRIES,
               LINE_KEY_BY_NAME,
             );
-            const color = key ? RIDDEN_LINE_GEOMETRIES[key]?.color : undefined;
+            /* A multi-line service (埼京線 spans 山手線・赤羽線・
+               東北線・川越線) has no single key, so the key lookup
+               above yields no color and the row fell back to the
+               default orange (integrated review round 1,
+               medium). The service's own color is the color of
+               the first leg it paints. */
+            const paintedLegs = service
+              ? lineCoverage.perServiceLegs.get(service.id)
+              : undefined;
+            const color = key
+              ? RIDDEN_LINE_GEOMETRIES[key]?.color
+              : paintedLegs && paintedLegs.legs.length > 0
+                ? RIDDEN_LINE_GEOMETRIES[paintedLegs.legs[0]!.key]?.color
+                : undefined;
             const usableService = usableRiddenService(line);
             const coverage = usableService
               ? lineCoverage.perService.get(usableService.id)
@@ -6974,7 +7070,12 @@ function RiddenLinesBlock({
                       km{coverage.complete ? " ・ 完乗" : ""}
                     </span>
                   )}
-                  {coverage && line.rideState === "unknown" && (
+                  {/* An unknown ride's distance is unknowable
+                      whether or not a service link resolves —
+                      unlinked and held-for-review rows show it
+                      too (integrated review round 1, M-4
+                      remainder: they used to show 区間不明 only). */}
+                  {line.rideState === "unknown" && (
                     <span className="block text-xs text-[var(--dim)]">
                       距離不明（区間が分からないため）
                     </span>
@@ -7174,7 +7275,7 @@ function RiddenLinesBlock({
                           記録されている区間（
                           {line.fromStationName ?? line.fromStationId}→
                           {line.toStationName ?? line.toStationId}
-                          ）の端点は、この系統の境界駅ではありません。区間の記録はそのまま残ります。
+                          ）の端点は、この系統の駅ではありません。この組み合わせでは確定できません。
                         </p>
                       )}
                       <div className="mt-2 flex gap-1.5">

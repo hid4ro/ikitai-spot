@@ -16,6 +16,7 @@ import {
   canonicalLedgerName,
   expandService,
   formalLineNames,
+  isExplicitlyUnlinked,
   isKnownMasterVersion,
   isN02StationId,
   isRiddenServiceLinkReviewable,
@@ -24,6 +25,7 @@ import {
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
+  serviceStationIds,
   stationRefById,
   validateSectionEndpoints,
   type RestoredRide,
@@ -755,5 +757,66 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(shinjuku.lng).toBeCloseTo(139.69993, 5);
     expect(shinjuku.lat).toBeCloseTo(35.6898, 5);
     expect(stationRefById("999999")).toBeUndefined();
+  });
+});
+
+describe("integrated review round 1: an explicit unlink is a confirmed answer", () => {
+  test("resolveRiddenService neither resolves nor quarantines an explicitly unlinked row", () => {
+    /* 「京王線」 would resolve by name; the human's confirmed
+       unlink must win over the name rule, and it must not come
+       back as 要確認 either — the question was answered. */
+    expect(
+      resolveRiddenService({
+        name: "京王線",
+        serviceId: null,
+        serviceLinkSource: "explicit",
+      }),
+    ).toEqual({ service: undefined, needsReview: false });
+  });
+
+  test("isExplicitlyUnlinked tells the confirmed unlink from a plain missing link", () => {
+    expect(
+      isExplicitlyUnlinked({
+        name: "京王線",
+        serviceId: null,
+        serviceLinkSource: "explicit",
+      }),
+    ).toBe(true);
+    expect(isExplicitlyUnlinked({ name: "京王線", serviceId: null })).toBe(false);
+    expect(
+      isExplicitlyUnlinked({
+        name: "京王線",
+        serviceId: null,
+        serviceLinkSource: "auto",
+      }),
+    ).toBe(false);
+    /* An explicit LINK is not an unlink. */
+    expect(
+      isExplicitlyUnlinked({
+        name: "京王線",
+        serviceId: "keio",
+        serviceLinkSource: "explicit",
+      }),
+    ).toBe(false);
+  });
+
+  test("serviceStationIds covers segment ends, block boundaries and migrated endpoints only", () => {
+    const keio = serviceStationIds("keio");
+    expect(keio.has("003700")).toBe(true); // 新宿, a segment end
+    expect(keio.has("003966")).toBe(true); // 調布, a block boundary only
+    expect(keio.has("003971")).toBe(true); // 聖蹟桜ヶ丘, a migrated endpoint only
+    expect(keio.has("003606")).toBe(false); // 国分寺 belongs to 中央線
+    const chuo = serviceStationIds("jr-chuo-rapid");
+    expect(chuo.has("003606")).toBe(true);
+    expect(chuo.has("003634")).toBe(true); // 立川
+    expect(serviceStationIds("no-such-service").size).toBe(0);
+    /* Every migrated ride's endpoints are in its own service's
+       set — the fit checks on both sides rely on it. */
+    for (const ride of Object.values(MIGRATED_RIDES)) {
+      if (!ride.from || !ride.to) continue;
+      const stations = serviceStationIds(ride.serviceId);
+      expect(stations.has(ride.from.id)).toBe(true);
+      expect(stations.has(ride.to.id)).toBe(true);
+    }
   });
 });

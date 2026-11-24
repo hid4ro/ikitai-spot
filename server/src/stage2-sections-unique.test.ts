@@ -113,3 +113,43 @@ describe("migration 0014 (stage 2 sections unique index)", () => {
     db.close();
   });
 });
+
+describe("migration 0014: the dedupe keeps a later duplicate's block_id", () => {
+  test("a survivor with no block_id adopts it from the duplicate being dropped", async () => {
+    const db = await migratedDb();
+    /* The same section twice: first added by hand (no block),
+       then again from the block picker (block_id set). Keeping
+       only the earliest row must not lose the block link —
+       otherwise the ledger can no longer untick that block
+       (integrated review round 1, H-3 remainder). */
+    db.exec(
+      `INSERT INTO ridden_line_sections
+         (ridden_line_id, from_station_id, to_station_id, direction, block_id, created_at)
+       VALUES (1, '003700', '003821', NULL, NULL, 0),
+              (1, '003700', '003821', NULL, 'keio/b2', 0)`,
+    );
+    await apply0014(db);
+    expect(countSections(db)).toBe(1);
+    const row = db
+      .query("SELECT block_id FROM ridden_line_sections")
+      .get() as { block_id: string | null };
+    expect(row.block_id).toBe("keio/b2");
+    db.close();
+  });
+
+  test("a survivor that already has a block_id keeps its own", async () => {
+    const db = await migratedDb();
+    db.exec(
+      `INSERT INTO ridden_line_sections
+         (ridden_line_id, from_station_id, to_station_id, direction, block_id, created_at)
+       VALUES (1, '003700', '003821', NULL, 'keio/b1', 0),
+              (1, '003700', '003821', NULL, 'keio/b2', 0)`,
+    );
+    await apply0014(db);
+    const row = db
+      .query("SELECT block_id FROM ridden_line_sections")
+      .get() as { block_id: string | null };
+    expect(row.block_id).toBe("keio/b1");
+    db.close();
+  });
+});

@@ -2,7 +2,8 @@ import { createClient } from "@libsql/client";
 import { expect, test } from "bun:test";
 import { drizzle } from "drizzle-orm/libsql";
 import { readdir } from "node:fs/promises";
-import { Actions } from "./actions";
+import { serviceFullPathSnapshot } from "../../shared/service-master";
+import { Actions, isUniqueConstraintError } from "./actions";
 import * as schema from "./schema";
 
 const aRide = { firstRiddenOn: "2026-11-24" };
@@ -243,4 +244,145 @@ test("confirmation rejects rows that do not need it, unknown services, and unkno
     expect((await Actions.listRiddenLines.handler(ctx, {})).lines).toEqual(rows);
   }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, master_version, created_at)
     VALUES ('武蔵野線 (京王電鉄)', '2026-11-23', 'jr-musashino', 'historical-master', 0)`));
+});
+
+test("confirming a link the recorded full ride does not fit is refused (integrated review round 1, high)", async () => {
+  await withLedger(async (client, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    /* The row's record is a FULL ride on 中央線快速: its stored
+       path snapshot is that service's path. Relinking the row
+       must not hand 京王線 a completion built from 中央線's
+       shape and kilometres. */
+    await client.execute({
+      sql: "UPDATE ridden_lines SET ride_state = 'full', path_snapshot = ? WHERE id = ?",
+      args: [
+        JSON.stringify(serviceFullPathSnapshot("jr-chuo-rapid")),
+        before.id,
+      ],
+    });
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "keio",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    /* The refusal leaves the stored link exactly as it was. */
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after).toMatchObject({
+      serviceId: "jr-musashino",
+      rideState: "full",
+    });
+    /* Confirming the service the ride was recorded on fits. */
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-chuo-rapid",
+      }),
+    ).toEqual({ ok: true, serviceId: "jr-chuo-rapid" });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, master_version, created_at)
+    VALUES ('武蔵野線 (京王電鉄)', '2026-11-23', 'jr-musashino', 'historical-master', 0)`));
+});
+
+test("confirming a partial ride onto a service that does not serve its endpoints is refused", async () => {
+  await withLedger(async (client, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    /* Primary section 新宿→立川 (both 中央線 stations), saved
+       link 京王線. 山手線 serves neither endpoint. */
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "yamanote",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    /* An additional section counts too: this one ends at 調布,
+       which 中央線 does not serve, so even the fitting service
+       is refused while the foreign section is on the record. */
+    await client.execute(
+      `INSERT INTO ridden_line_sections
+         (ridden_line_id, from_station_id, to_station_id, from_station_name, to_station_name, created_at)
+       VALUES (${before.id}, '003700', '003966', '新宿', '調布', 0)`,
+    );
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-chuo-rapid",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    /* With the foreign section gone, the relink fits and lands. */
+    await client.execute(
+      `DELETE FROM ridden_line_sections WHERE ridden_line_id = ${before.id}`,
+    );
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-chuo-rapid",
+      }),
+    ).toEqual({ ok: true, serviceId: "jr-chuo-rapid" });
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      serviceLinkSource: "explicit",
+      rideState: "partial",
+      fromStationId: "003700",
+      toStationId: "003634",
+    });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('中央線（各駅停車）', '2026-11-23', 'keio', 'partial', '003700', '003634', 'historical-master', 0)`));
+});
+
+test("an explicit unlink survives re-registration and re-import (integrated review round 1, medium)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    /* The row's name resolves to 京王線 by the name rule; the
+       human confirms "no service" instead. */
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: null,
+      }),
+    ).toEqual({ ok: true, serviceId: null });
+    /* Re-registering the name must not silently restore the
+       link the human removed... */
+    expect(
+      await Actions.addRiddenLine.handler(ctx, { ...aRide, name: "京王線" }),
+    ).toEqual({ created: false, id: before.id });
+    /* ...and neither must re-importing it. */
+    await Actions.importRiddenLines.handler(ctx, {
+      entries: [{ ...aRide, name: "京王線" }],
+    });
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after).toMatchObject({
+      serviceId: null,
+      serviceLinkSource: "explicit",
+      serviceMatchVersion: null,
+    });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, master_version, created_at)
+    VALUES ('京王線', '2026-11-23', 'jr-musashino', 'historical-master', 0)`));
+});
+
+test("isUniqueConstraintError sees through Drizzle's error wrapping (integrated review round 1, H-3)", () => {
+  /* The raw SQLite error, as the old message check expected. */
+  expect(
+    isUniqueConstraintError(
+      new Error("UNIQUE constraint failed: ridden_line_sections.ridden_line_id"),
+    ),
+  ).toBe(true);
+  /* Drizzle wraps driver errors: the constraint text lives on
+     the cause, not on the outer "Failed query" message — the
+     shape the parallel-registration race actually produces. */
+  const wrapped = new Error("Failed query: insert into `ridden_line_sections` ...", {
+    cause: new Error("UNIQUE constraint failed: ridden_line_sections.ridden_line_id"),
+  });
+  expect(isUniqueConstraintError(wrapped)).toBe(true);
+  const deep = new Error("outer", {
+    cause: new Error("middle", {
+      cause: new Error("UNIQUE constraint failed: x"),
+    }),
+  });
+  expect(isUniqueConstraintError(deep)).toBe(true);
+  expect(isUniqueConstraintError(new Error("some other failure"))).toBe(false);
+  expect(isUniqueConstraintError(undefined)).toBe(false);
 });

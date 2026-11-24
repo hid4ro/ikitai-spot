@@ -44,6 +44,7 @@ import {
   serviceBoundaryStations,
   serviceById,
   serviceIsLoop,
+  serviceStationIds,
   stationRefById,
   usableRiddenService,
   type FullPathSnapshot,
@@ -949,7 +950,21 @@ export function riddenLineIntervals(
 
 /* Translate saved rides into the paths and intervals used by both
    the map and distance totals. Unknown rides have a path but no
-   interval, so they are painted dashed and count zero kilometres. */
+   interval, so they are painted dashed and count zero kilometres.
+   A ride recorded under one service must never be counted as
+   another's (integrated review round 1, high — a relink changes
+   only the link columns, so the record itself is the only
+   evidence of fit):
+   - a full ride's stored snapshot is cut from its own service
+     (its pathId); a snapshot naming a different service means
+     the full ride belongs elsewhere, and the row is held out of
+     the aggregation entirely — the stored record is untouched,
+     it simply completes nothing here;
+   - a partial section counts only when both endpoints are
+     stations the linked service is known to serve
+     (serviceStationIds); a section recorded on another service
+     is held the same way, instead of being projected onto this
+     service's path wherever its endpoints happen to land. */
 export function computeRiddenLineCoverage(
   rows: readonly RecordedRiddenLine[],
   geometries: LineGeometryMap,
@@ -958,20 +973,59 @@ export function computeRiddenLineCoverage(
   const intervals = new Map<string, RideInterval[]>();
   const fullServiceIds = new Set<string>();
   const servicePaths = new Map<string, ServicePath>();
+  /* Contributions per service, in row order: the first
+     contributing row's fitting snapshot builds the path (the
+     pre-hold behaviour), full flags and intervals accumulate. */
+  const contributions = new Map<
+    string,
+    {
+      service: ServiceMasterEntry;
+      snapshot: FullPathSnapshot | null;
+      full: boolean;
+      intervals: RideInterval[];
+    }
+  >();
   for (const row of rows) {
     const service = usableRiddenService(row);
     if (!service) continue;
-    const serviceId = service.id;
-    if (!servicePaths.has(serviceId)) {
-      const snapshot = parseFullPathSnapshot(row.pathSnapshot);
-      servicePaths.set(serviceId, buildServicePath(service, geometries, snapshot));
+    const snapshot = parseFullPathSnapshot(row.pathSnapshot);
+    const snapshotFits =
+      snapshot == null || snapshot.pathId === service.pathId;
+    if (row.rideState === "full" && !snapshotFits) {
+      /* Held: a full ride recorded on another service. */
+      continue;
+    }
+    let contribution = contributions.get(service.id);
+    if (!contribution) {
+      contribution = {
+        service,
+        snapshot: snapshotFits ? snapshot : null,
+        full: false,
+        intervals: [],
+      };
+      contributions.set(service.id, contribution);
     }
     if (row.rideState === "full") {
-      fullServiceIds.add(serviceId);
+      contribution.full = true;
     } else if (row.rideState === "partial") {
-      const list = intervals.get(serviceId) ?? [];
-      list.push(...riddenLineIntervals(row, serviceId));
-      intervals.set(serviceId, list);
+      const knownStations = serviceStationIds(service.id);
+      contribution.intervals.push(
+        ...riddenLineIntervals(row, service.id).filter(
+          (interval) =>
+            knownStations.has(interval.from.id) &&
+            knownStations.has(interval.to.id),
+        ),
+      );
+    }
+  }
+  for (const [serviceId, contribution] of contributions) {
+    servicePaths.set(
+      serviceId,
+      buildServicePath(contribution.service, geometries, contribution.snapshot),
+    );
+    if (contribution.full) fullServiceIds.add(serviceId);
+    if (contribution.intervals.length > 0) {
+      intervals.set(serviceId, contribution.intervals);
     }
   }
   return computeLineCoverage(

@@ -622,3 +622,86 @@ describe("EdgeCoverage", () => {
     expect(cover.kilometresOn("x|y", geometries)).toBeCloseTo(10, 0);
   });
 });
+
+describe("rides recorded under another service (integrated review round 1, high)", () => {
+  /* A row explicitly linked to 京王線 whose RECORD was made on
+     中央線快速 — the shape the review reproduced by relinking a
+     完乗 row: the old service's ride must not become the new
+     service's achievement. */
+  const keioRow = {
+    name: "京王線",
+    serviceId: "keio",
+    serviceLinkSource: "explicit" as const,
+    fromStationId: null,
+    toStationId: null,
+    pathSnapshot: null as string | null,
+    sections: [] as never[],
+  };
+
+  test("a full ride whose snapshot belongs to another service completes nothing", () => {
+    const coverage = computeRiddenLineCoverage(
+      [
+        {
+          ...keioRow,
+          rideState: "full" as const,
+          pathSnapshot: JSON.stringify(serviceFullPathSnapshot("jr-chuo-rapid")),
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.perServiceLegs.has("keio")).toBe(false);
+    expect(coverage.completeServiceIds).toEqual([]);
+    expect(coverage.networkRiddenKm).toBe(0);
+  });
+
+  test("the same full ride with its own service's snapshot completes it", () => {
+    const coverage = computeRiddenLineCoverage(
+      [
+        {
+          ...keioRow,
+          rideState: "full" as const,
+          pathSnapshot: JSON.stringify(serviceFullPathSnapshot("keio")),
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.completeServiceIds).toEqual(["keio"]);
+    expect(coverage.perService.get("keio")!.riddenKm).toBeGreaterThan(30);
+  });
+
+  test("a partial section whose endpoints belong to another service counts nothing", () => {
+    const coverage = computeRiddenLineCoverage(
+      [
+        {
+          ...keioRow,
+          rideState: "partial" as const,
+          fromStationId: S.国分寺.id,
+          toStationId: S.立川.id,
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.perService.get("keio")!.riddenKm).toBe(0);
+    expect(coverage.networkRiddenKm).toBe(0);
+    expect(coverage.completeServiceIds).toEqual([]);
+  });
+
+  test("a partial section on the service's own stations still counts", () => {
+    const coverage = computeRiddenLineCoverage(
+      [
+        {
+          ...keioRow,
+          rideState: "partial" as const,
+          fromStationId: S.新宿.id,
+          toStationId: S.府中.id,
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.perService.get("keio")!.riddenKm).toBeGreaterThan(15);
+  });
+});

@@ -809,6 +809,16 @@ export function resolveRiddenService(
   row: RiddenServiceLink,
 ): RiddenServiceResolution {
   if (row.serviceId == null) {
+    /* An explicit unlink is a human's confirmed answer — "this
+       row has NO service" — not a missing link waiting to be
+       inferred again. Resolving the name anyway would silently
+       undo the confirmation on every read (integrated review
+       round 1, medium: the display side kept inferring the
+       service from the name after an explicit unlink). Only a
+       row with no provenance at all falls back to the name rule. */
+    if (row.serviceLinkSource === "explicit") {
+      return { service: undefined, needsReview: false };
+    }
     return { service: serviceByLedgerName(row.name), needsReview: false };
   }
   const saved = serviceById(row.serviceId);
@@ -843,6 +853,48 @@ export function usableRiddenService(
   row: RiddenServiceLink,
 ): ServiceMasterEntry | undefined {
   return row.serviceId ? resolveRiddenService(row).service : undefined;
+}
+
+/* Whether a human has confirmed this row has no service: no
+   saved ID, with explicit provenance. The distinction from a
+   plain unlinked row (never linked, no provenance) is what keeps
+   an explicit unlink from being undone by name inference on the
+   read side and by automatic backfill on the write side
+   (integrated review round 1, medium). */
+export function isExplicitlyUnlinked(row: RiddenServiceLink): boolean {
+  return row.serviceId == null && row.serviceLinkSource === "explicit";
+}
+
+/* The station IDs a service is known to serve, from the master
+   alone: every segment endpoint and block boundary, plus the
+   endpoints of the rides the SQL migration restored for this
+   service (the only record of mid-segment stations like 国分寺
+   on 中央線（快速）). A recorded section whose endpoints are not
+   in this set cannot belong to the service — the test the link
+   confirmation (server) and the coverage build (client) use to
+   keep one service's ride from being counted as another's
+   (integrated review round 1, high). Deliberately conservative:
+   a station the master does not know is "cannot judge", never
+   "close enough". */
+export function serviceStationIds(serviceId: string): ReadonlySet<string> {
+  const ids = new Set<string>();
+  const service = serviceById(serviceId);
+  if (service) {
+    for (const segment of service.segments) {
+      ids.add(segment.from.id);
+      ids.add(segment.to.id);
+    }
+    for (const block of service.blocks) {
+      ids.add(block.from.id);
+      ids.add(block.to.id);
+    }
+  }
+  for (const ride of Object.values(MIGRATED_RIDES)) {
+    if (ride.serviceId !== serviceId) continue;
+    if (ride.from) ids.add(ride.from.id);
+    if (ride.to) ids.add(ride.to.id);
+  }
+  return ids;
 }
 
 /* Whether a ledger row's service link can be confirmed by hand

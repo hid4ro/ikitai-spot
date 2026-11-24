@@ -16,6 +16,7 @@
 
 import {
   assetKeysForService,
+  isExplicitlyUnlinked,
   normalizeParentheses,
   resolveRiddenService,
   serviceByLedgerName,
@@ -167,6 +168,10 @@ export function resolveRiddenLineKey(
   serviceId?: string | null,
 ): string | null {
   const row = asRiddenLineRow(nameOrRow, serviceId);
+  /* An explicit unlink is a confirmed "no service": the name
+     fallback below must not resurrect a link the human removed
+     (integrated review round 1, medium). */
+  if (isExplicitlyUnlinked(row)) return null;
   const { service, needsReview } = resolveRiddenService(row);
   if (needsReview) return null;
   if (service) {
@@ -192,6 +197,7 @@ export function resolveRiddenLineKeys(
   serviceId?: string | null,
 ): string[] {
   const row = asRiddenLineRow(nameOrRow, serviceId);
+  if (isExplicitlyUnlinked(row)) return [];
   const { service, needsReview } = resolveRiddenService(row);
   if (needsReview) return [];
   if (service) {
@@ -224,6 +230,9 @@ export function countRiddenByOperator(
 ): ReadonlyMap<string, number> {
   const tokensByOperator = new Map<string, Set<string>>();
   for (const row of rows) {
+    /* An explicit unlink counts for no operator (integrated
+       review round 1, medium — the read side respects it). */
+    if (isExplicitlyUnlinked(row)) continue;
     const { service, needsReview } = resolveRiddenService(row);
     if (needsReview) continue;
     let operator: string | null = null;

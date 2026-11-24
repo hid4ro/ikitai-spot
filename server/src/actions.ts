@@ -9,12 +9,14 @@ import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } 
 import type { BatchItem } from "drizzle-orm/batch";
 import {
   blockById,
+  isExplicitlyUnlinked,
   isKnownMasterVersion,
   isN02StationId,
   isRiddenServiceLinkReviewable,
   resolveRiddenService,
   serviceById,
   serviceFullPathSnapshot,
+  serviceStationIds,
   SERVICE_MASTER_VERSION,
   SERVICE_MATCH_VERSION,
   stationRefById,
@@ -226,6 +228,103 @@ function riddenServiceBackfill(name: string) {
     serviceMatchVersion: link.serviceMatchVersion,
     masterVersion: sql`coalesce(${schema.riddenLines.masterVersion}, ${link.masterVersion})`,
   };
+}
+
+/* Whether an insert failed on a UNIQUE constraint, looking down
+   the whole error chain: Drizzle wraps the driver's error, and
+   the SQLite message ("UNIQUE constraint failed: …") sits on
+   error.cause, not on the outer error's message — checking only
+   the outer message let a racing duplicate add escape as an
+   error instead of returning the winner's row (integrated
+   review round 1, H-3 remainder). Exported for the regression
+   tests. */
+export function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    if (
+      current instanceof Error &&
+      current.message.includes("UNIQUE constraint failed")
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/* Whether a link confirmation's chosen service can honestly
+   carry the row's recorded ride (integrated review round 1,
+   high): relinking used to change only the link columns, so a
+   full ride recorded on 中央線（快速） became 京王線's full ride
+   (its stored snapshot painted and counted under the new
+   service), and a partial section's endpoints were projected
+   onto the new service's path wherever they landed. The fit is
+   judged from the master alone:
+   - unlinking always fits (nothing is aggregated);
+   - confirming the saved service always fits (the ride was
+     recorded under that very link);
+   - a full ride fits only the service its stored path snapshot
+     was cut from (the snapshot's pathId is the service's);
+   - a partial ride (primary section and every added section)
+     fits only when both endpoints are stations the chosen
+     service is known to serve (serviceStationIds).
+   Anything else cannot be judged from the record, so the
+   confirmation is refused and the original row — link and ride
+   alike — is left exactly as stored. Returns a problem phrase,
+   or null when the choice fits. Exported for the regression
+   tests. */
+export function riddenLinkFitProblem(
+  line: {
+    serviceId: string | null;
+    rideState: string | null;
+    fromStationId: string | null;
+    toStationId: string | null;
+    pathSnapshot: string | null;
+  },
+  sections: readonly { fromStationId: string; toStationId: string }[],
+  targetServiceId: string | null,
+): string | null {
+  if (targetServiceId == null) return null;
+  if (targetServiceId === line.serviceId) return null;
+  const target = serviceById(targetServiceId);
+  if (!target) return null;
+  const state = normalizeRideState(line.rideState);
+  if (state === "full") {
+    let snapshotPathId: string | null = null;
+    if (line.pathSnapshot) {
+      try {
+        const parsed: unknown = JSON.parse(line.pathSnapshot);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          typeof (parsed as { pathId?: unknown }).pathId === "string"
+        ) {
+          snapshotPathId = (parsed as { pathId: string }).pathId;
+        }
+      } catch {
+        snapshotPathId = null;
+      }
+    }
+    if (snapshotPathId !== target.pathId) {
+      return `a full ride's recorded path belongs to another service, not ${target.displayName}`;
+    }
+    return null;
+  }
+  const knownStations = serviceStationIds(target.id);
+  const pairs: { fromStationId: string; toStationId: string }[] = [
+    ...(state === "partial" && line.fromStationId && line.toStationId
+      ? [{ fromStationId: line.fromStationId, toStationId: line.toStationId }]
+      : []),
+    ...sections,
+  ];
+  for (const pair of pairs) {
+    for (const stationId of [pair.fromStationId, pair.toStationId]) {
+      if (!knownStations.has(stationId)) {
+        return `the recorded section's station ${stationId} is not a known station of ${target.displayName}`;
+      }
+    }
+  }
+  return null;
 }
 
 /* Defensive read-back: the column is NOT NULL DEFAULT 'unknown', but
@@ -1669,6 +1768,7 @@ export const Actions = {
           id: schema.riddenLines.id,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
+          serviceLinkSource: schema.riddenLines.serviceLinkSource,
         })
         .from(schema.riddenLines)
         .where(eq(schema.riddenLines.name, name));
@@ -1682,10 +1782,16 @@ export const Actions = {
           ctx.invalidateQueries();
         }
         // Backfill only an unlinked row. A conflicting saved ID may
-        // have been explicit and remains available for individual review.
-        const link = existing[0].serviceId
-          ? undefined
-          : riddenServiceBackfill(name);
+        // have been explicit and remains available for individual
+        // review — and an explicit UNLINK is a confirmed answer,
+        // not a missing link: re-registering the name must not
+        // silently restore the link a human removed (integrated
+        // review round 1, medium).
+        const link =
+          existing[0].serviceId ||
+          isExplicitlyUnlinked({ name, ...existing[0] })
+            ? undefined
+            : riddenServiceBackfill(name);
         if (link) {
           await db
             .update(schema.riddenLines)
@@ -1748,15 +1854,19 @@ export const Actions = {
      rows that need it impossible). Only the three link columns
      change (serviceId, serviceLinkSource 'explicit',
      serviceMatchVersion null); the ride state, section, note,
-     context and dates are untouched, so a relinked partial row
-     keeps its recorded section even when its endpoints are not
-     boundary stations of the new service (the same partial-with-
-     unresolvable-endpoints shape the stage-2 triage recorded as a
-     remaining observation). An explicit unlink can be confirmed
-     again, so a mistaken unlink is reversible. */
+     context and dates are untouched. An explicit unlink can be
+     confirmed again, so a mistaken unlink is reversible.
+     The choice must also FIT the recorded ride (integrated
+     review round 1, high — see riddenLinkFitProblem): a full
+     ride's stored path belongs to the service it was recorded
+     on, and a partial section's endpoints must be stations of
+     the chosen service. A choice that cannot carry the record
+     is refused, leaving the row exactly as stored — the
+     original record is preserved and nothing is aggregated
+     under the wrong service. */
   confirmRiddenServiceLink: defineAction({
     description:
-      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched.",
+      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched. The choice must fit the recorded ride: a full ride's stored path belongs to its own service, and a partial section's endpoints must be stations of the chosen service — a choice that cannot carry the record is refused and the row is left unchanged.",
     request: z.object({
       id: z.number().int().positive(),
       serviceId: z.string().max(100).nullable(),
@@ -1782,6 +1892,19 @@ export const Actions = {
       if (args.serviceId != null && !serviceById(args.serviceId)) {
         throw new Error(
           `confirmRiddenServiceLink: unknown service "${args.serviceId}"`,
+        );
+      }
+      const sectionRows = await db
+        .select({
+          fromStationId: schema.riddenLineSections.fromStationId,
+          toStationId: schema.riddenLineSections.toStationId,
+        })
+        .from(schema.riddenLineSections)
+        .where(eq(schema.riddenLineSections.riddenLineId, args.id));
+      const fitProblem = riddenLinkFitProblem(line, sectionRows, args.serviceId);
+      if (fitProblem) {
+        throw new Error(
+          `confirmRiddenServiceLink: "${line.name}" cannot be linked there — ${fitProblem}; the recorded link was left unchanged`,
         );
       }
       await db
@@ -1824,6 +1947,7 @@ export const Actions = {
           name: schema.riddenLines.name,
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
+          serviceLinkSource: schema.riddenLines.serviceLinkSource,
         })
         .from(schema.riddenLines);
       const seen = new Map(
@@ -1833,6 +1957,7 @@ export const Actions = {
             id: r.id,
             hasContext: !!r.context,
             serviceId: r.serviceId,
+            serviceLinkSource: r.serviceLinkSource,
           },
         ]),
       );
@@ -1860,7 +1985,10 @@ export const Actions = {
           } else {
             skipped++;
           }
-          if (!known.serviceId && known.id > 0) {
+          // An explicit unlink is a confirmed answer, not a
+          // missing link: re-importing must not restore it
+          // (integrated review round 1, medium).
+          if (!known.serviceId && known.serviceLinkSource !== "explicit" && known.id > 0) {
             const link = riddenServiceBackfill(name);
             if (link) {
               rideUpdates.push(
@@ -1884,6 +2012,7 @@ export const Actions = {
           id: -1,
           hasContext: !!(entry.context?.trim()),
           serviceId: ride.serviceId,
+          serviceLinkSource: ride.serviceLinkSource,
         });
         fresh.push({
           name,
@@ -2027,10 +2156,7 @@ export const Actions = {
           .returning({ id: schema.riddenLineSections.id });
         insertedId = inserted[0]?.id ?? null;
       } catch (error) {
-        if (
-          error instanceof Error &&
-          error.message.includes("UNIQUE constraint failed")
-        ) {
+        if (isUniqueConstraintError(error)) {
           const winner = await findDuplicate();
           if (winner) return { created: false, id: winner.id };
         }

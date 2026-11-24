@@ -147,12 +147,15 @@ export function applyVariantPaint(
    FIRST row in ledger order whose service paints that formal
    line key. A formal line can carry several services （総武線
    paints both 総武快速線 and 総武本線）, and their painted legs
-   overlap, so a tap cannot tell them apart — ledger order is
-   the deterministic tie-break, the same rule firstLineByOperator
-   uses for bar jumps. Rows without a usable service (unlinked,
-   or held for review) paint nothing and never match. Null when
-   no row paints the key (e.g. the tap hit an unridden ghost
-   track, which has no row). */
+   overlap, so a tap cannot tell them apart by key alone —
+   ledger order is the deterministic tie-break, the same rule
+   firstLineByOperator uses for bar jumps. Rows without a usable
+   service (unlinked, or held for review) paint nothing and
+   never match. Null when no row paints the key (e.g. the tap
+   hit an unridden ghost track, which has no row). The
+   key-only rule survives as the fallback of
+   lineRowForPaintedFeature below, for features painted before
+   they carried a serviceId. */
 export function lineRowForPaintedKey<
   Row extends RiddenServiceLink & { id: number },
 >(
@@ -171,6 +174,38 @@ export function lineRowForPaintedKey<
     if (painted.legs.some((leg) => leg.key === key)) return row;
   }
   return null;
+}
+
+/* The ledger row a tap on a painted line feature belongs to
+   (integrated review round 1, medium): the feature carries the
+   SERVICE that painted it, so a tap resolves to that service's
+   row — the 総武本線 track no longer selects the 総武快速線 row
+   just because both paint JR・総武線 and the 快速 row sorts
+   first. The service's row must actually paint the tapped key
+   (a feature and the coverage are built from the same legs, so
+   this is a consistency check, not a restriction). A feature
+   without a serviceId falls back to the key-only rule above. */
+export function lineRowForPaintedFeature<
+  Row extends RiddenServiceLink & { id: number },
+>(
+  rows: readonly Row[],
+  perServiceLegs: ReadonlyMap<
+    string,
+    { legs: readonly { key: string }[]; unknown: boolean }
+  >,
+  feature: { key: string; serviceId: string | null },
+): Row | null {
+  if (feature.serviceId) {
+    for (const row of rows) {
+      const service = usableRiddenService(row);
+      if (!service || service.id !== feature.serviceId) continue;
+      const painted = perServiceLegs.get(service.id);
+      if (painted && painted.legs.some((leg) => leg.key === feature.key)) {
+        return row;
+      }
+    }
+  }
+  return lineRowForPaintedKey(rows, perServiceLegs, feature.key);
 }
 
 /* The ledger row a tap on a painted municipality shape belongs

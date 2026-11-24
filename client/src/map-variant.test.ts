@@ -6,6 +6,7 @@
    Run with: bun test client/src/map-variant.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
+  lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
   stickyPaneVisibleTop,
@@ -237,5 +238,69 @@ describe("stickyPaneVisibleTop (row scroll's visible range under the stuck map)"
     /* A pane bottom below the tab-bar allowance clamps to just
        above it, so top < bottom always holds. */
     expect(stickyPaneVisibleTop({ top: 0, bottom: 790 }, 800, 96)).toBe(703);
+  });
+});
+
+describe("lineRowForPaintedFeature (map line tap → ledger row, by service)", () => {
+  /* 総武快速線 and 総武本線 both paint the one formal line
+     総武線： by key alone the tap always lands on whichever row
+     sorts first (the reviewer's reproduction). The feature's
+     serviceId tells them apart. */
+  const rows = [
+    {
+      id: 5,
+      name: "JR総武快速線",
+      serviceId: "jr-sobu-rapid",
+      serviceLinkSource: "explicit" as const,
+    },
+    {
+      id: 6,
+      name: "JR総武本線",
+      serviceId: "jr-sobu-local",
+      serviceLinkSource: "explicit" as const,
+    },
+  ];
+  const perServiceLegs = new Map([
+    [
+      "jr-sobu-rapid",
+      { legs: [{ key: "総武線|東日本旅客鉄道" }], unknown: false },
+    ],
+    [
+      "jr-sobu-local",
+      { legs: [{ key: "総武線|東日本旅客鉄道" }], unknown: false },
+    ],
+  ]);
+
+  test("a tap on the 本線's track selects the 本線 row, not the first row on the shared key", () => {
+    expect(
+      lineRowForPaintedFeature(rows, perServiceLegs, {
+        key: "総武線|東日本旅客鉄道",
+        serviceId: "jr-sobu-local",
+      })?.id,
+    ).toBe(6);
+    expect(
+      lineRowForPaintedFeature(rows, perServiceLegs, {
+        key: "総武線|東日本旅客鉄道",
+        serviceId: "jr-sobu-rapid",
+      })?.id,
+    ).toBe(5);
+  });
+
+  test("a feature without a serviceId falls back to the key-only rule", () => {
+    expect(
+      lineRowForPaintedFeature(rows, perServiceLegs, {
+        key: "総武線|東日本旅客鉄道",
+        serviceId: null,
+      })?.id,
+    ).toBe(5);
+  });
+
+  test("a serviceId whose service does not paint the tapped key resolves to no row", () => {
+    expect(
+      lineRowForPaintedFeature(rows, perServiceLegs, {
+        key: "中央線|東日本旅客鉄道",
+        serviceId: "jr-sobu-local",
+      }),
+    ).toBeNull();
   });
 });

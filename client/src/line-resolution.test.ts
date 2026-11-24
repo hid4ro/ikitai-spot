@@ -461,3 +461,42 @@ describe("normalization fallback", () => {
     expect(resolve("本線")).toBeNull();
   });
 });
+
+describe("an explicit unlink is respected on the read side (integrated review round 1)", () => {
+  const unlinked = {
+    name: "京王線",
+    serviceId: null,
+    serviceLinkSource: "explicit" as const,
+  };
+
+  test("an explicitly unlinked row resolves to no key and no expansion", () => {
+    /* 京王線 resolves by name when unmarked; the confirmed
+       unlink must not be undone by the name fallback. */
+    expect(
+      resolveRiddenLineKey(unlinked, RIDDEN_LINE_GEOMETRIES, keyByName),
+    ).toBeNull();
+    expect(
+      resolveRiddenLineKeys(unlinked, RIDDEN_LINE_GEOMETRIES, keyByName),
+    ).toEqual([]);
+  });
+
+  test("an explicitly unlinked row counts for no operator", () => {
+    const counts = countRiddenByOperator(
+      [unlinked],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(counts.size).toBe(0);
+  });
+
+  test("the same name without the explicit mark still resolves by name", () => {
+    expect(resolve("京王線")).toBe("京王線|京王電鉄");
+    expect(
+      resolveRiddenLineKey(
+        { name: "京王線", serviceId: null, serviceLinkSource: "auto" },
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe("京王線|京王電鉄");
+  });
+});
