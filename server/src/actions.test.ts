@@ -21,12 +21,48 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
     expect(fields.masterVersion).toBe(SERVICE_MASTER_VERSION);
   });
 
+  test("a full ride at the current version stores its path snapshot (stage 2)", () => {
+    // The snapshot is what the client paints from: the path id,
+    // the version it was cut at, and the segment list as it stood
+    // then — so a later master change never rewrites a past full
+    // ride's range.
+    const fields = resolveRideFields("京王線", {
+      rideState: "full",
+      masterVersion: SERVICE_MASTER_VERSION,
+    });
+    const snapshot = JSON.parse(fields.pathSnapshot!);
+    expect(snapshot.pathId).toBe("keio");
+    expect(snapshot.masterVersion).toBe(SERVICE_MASTER_VERSION);
+    expect(snapshot.segments).toHaveLength(1);
+    expect(snapshot.segments[0].formalLineKey).toBe("京王線|京王電鉄");
+  });
+
   test("a full ride with the frozen migration version is accepted", () => {
     const fields = resolveRideFields("京王線", {
       rideState: "full",
       masterVersion: MIGRATED_MASTER_VERSION,
     });
     expect(fields.masterVersion).toBe(MIGRATED_MASTER_VERSION);
+  });
+
+  test("a full ride at the frozen version stores a snapshot only while the versions coincide (stage 2)", () => {
+    // The snapshot is cut from the current master. While the
+    // frozen migration version IS the current version, a ride at
+    // it carries a snapshot like any current-version ride; once
+    // the master moves on, the same ride must store none (the
+    // client falls back to the current master instead of
+    // painting a range cut from the wrong version).
+    const fields = resolveRideFields("京王線", {
+      rideState: "full",
+      masterVersion: MIGRATED_MASTER_VERSION,
+    });
+    if (MIGRATED_MASTER_VERSION === SERVICE_MASTER_VERSION) {
+      expect(
+        JSON.parse(fields.pathSnapshot!).masterVersion,
+      ).toBe(SERVICE_MASTER_VERSION);
+    } else {
+      expect(fields.pathSnapshot).toBeNull();
+    }
   });
 
   test("a full ride with a made-up version is rejected", () => {
@@ -79,6 +115,7 @@ describe("resolveRideFields: partial rides (review round 2, high)", () => {
     expect(fields.rideState).toBe("partial");
     expect(fields.fromStationId).toBe("003821");
     expect(fields.toStationId).toBe("003971");
+    expect(fields.pathSnapshot).toBeNull();
   });
 
   test("a partial ride with made-up station ids is rejected", () => {
@@ -149,5 +186,6 @@ describe("resolveRideFields: unknown rides stay section-less", () => {
     expect(fields.rideState).toBe("unknown");
     expect(fields.fromStationId).toBeNull();
     expect(fields.toStationId).toBeNull();
+    expect(fields.pathSnapshot).toBeNull();
   });
 });

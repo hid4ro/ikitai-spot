@@ -8,16 +8,35 @@ import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import {
+  blockById,
   isKnownMasterVersion,
   isN02StationId,
   serviceById,
   serviceByLedgerName,
+  serviceFullPathSnapshot,
   SERVICE_MASTER_VERSION,
+  stationRefById,
+  validateSectionEndpoints,
   type RideState,
 } from "../../shared/service-master";
 import * as schema from "./schema";
 
 const rideStateSchema = z.enum(["unknown", "partial", "full"]);
+
+/* One added section of a ridden line (stage 2, subtask 1421):
+   a block pick, or a hand-entered section between two boundary
+   stations. direction is 'inner' | 'outer' on a loop service,
+   null elsewhere; blockId names the master block the section
+   covers, when it is exactly one block. */
+const riddenSectionSchema = z.object({
+  id: z.number(),
+  fromStationId: z.string(),
+  fromStationName: z.string().nullable(),
+  toStationId: z.string(),
+  toStationName: z.string().nullable(),
+  direction: z.enum(["inner", "outer"]).nullable(),
+  blockId: z.string().nullable(),
+});
 
 /* The ridden-lines ride fields (stage 1, subtask 1420): which
    service the row belongs to, the ride state, and the ridden
@@ -46,6 +65,11 @@ type RideFields = {
   toStationId: string | null;
   toStationName: string | null;
   masterVersion: string | null;
+  /* Stage 2: the full ride's versioned path, as JSON — the
+     snapshot the client paints from, so a later master change
+     never rewrites a past full ride's range. Only full rides
+     carry one; partial / unknown rides store null. */
+  pathSnapshot: string | null;
 };
 
 /* Resolves the ride fields for a registration. State rules
@@ -106,6 +130,7 @@ export function resolveRideFields(
       toStationId: null,
       toStationName: null,
       masterVersion,
+      pathSnapshot: null,
     };
   }
   if (rideState === "partial") {
@@ -139,6 +164,7 @@ export function resolveRideFields(
       toStationId,
       toStationName: supplied.toStationName?.trim() || null,
       masterVersion,
+      pathSnapshot: null,
     };
   }
   // full: the whole service, at a version that reproduces its range.
@@ -152,6 +178,17 @@ export function resolveRideFields(
       `resolveRideFields: full ride for "${name}" needs a known master version (got ${JSON.stringify(masterVersion)})`,
     );
   }
+  /* The snapshot is cut from the current master, so it is stored
+     only when the ride was recorded at the current version. A
+     full ride recorded at the frozen migration version keeps
+     null: its range is the current master's range for that
+     service in practice, and the client falls back to the
+     current master when no snapshot is stored — a snapshot cut
+     from the wrong version would be worse than none. */
+  const snapshot =
+    masterVersion === SERVICE_MASTER_VERSION
+      ? serviceFullPathSnapshot(service.id)
+      : null;
   return {
     serviceId,
     rideState: "full",
@@ -160,6 +197,7 @@ export function resolveRideFields(
     toStationId: null,
     toStationName: null,
     masterVersion,
+    pathSnapshot: snapshot ? JSON.stringify(snapshot) : null,
   };
 }
 
@@ -168,6 +206,16 @@ export function resolveRideFields(
 function normalizeRideState(raw: string | null): RideState {
   if (raw === "partial" || raw === "full") return raw;
   return "unknown";
+}
+
+/* Defensive read-back for an added section's direction: the column
+   is free text, but only 'inner' | 'outer' mean anything — a stray
+   value reads as no direction, never as a state the client cannot
+   show. */
+function normalizeSectionDirection(
+  raw: string | null,
+): "inner" | "outer" | null {
+  return raw === "inner" || raw === "outer" ? raw : null;
 }
 
 const spotSchema = z.object({
@@ -1501,6 +1549,11 @@ export const Actions = {
           toStationId: z.string().nullable(),
           toStationName: z.string().nullable(),
           masterVersion: z.string().nullable(),
+          /* Stage 2: the full ride's versioned path (JSON), and
+             the extra sections block picks added — the client
+             builds the painted intervals from these. */
+          pathSnapshot: z.string().nullable(),
+          sections: z.array(riddenSectionSchema),
         }),
       ),
       total: z.number(),
@@ -1514,6 +1567,25 @@ export const Actions = {
           asc(schema.riddenLines.firstRiddenOn),
           asc(schema.riddenLines.name),
         );
+      const sectionRows =
+        rows.length > 0
+          ? await db
+              .select()
+              .from(schema.riddenLineSections)
+              .where(
+                inArray(
+                  schema.riddenLineSections.riddenLineId,
+                  rows.map((r) => r.id),
+                ),
+              )
+              .orderBy(asc(schema.riddenLineSections.id))
+          : [];
+      const sectionsByLine = new Map<number, typeof sectionRows>();
+      for (const section of sectionRows) {
+        const list = sectionsByLine.get(section.riddenLineId) ?? [];
+        list.push(section);
+        sectionsByLine.set(section.riddenLineId, list);
+      }
       return {
         lines: rows.map((r) => ({
           id: r.id,
@@ -1528,6 +1600,16 @@ export const Actions = {
           toStationId: r.toStationId,
           toStationName: r.toStationName,
           masterVersion: r.masterVersion,
+          pathSnapshot: r.pathSnapshot,
+          sections: (sectionsByLine.get(r.id) ?? []).map((s) => ({
+            id: s.id,
+            fromStationId: s.fromStationId,
+            fromStationName: s.fromStationName,
+            toStationId: s.toStationId,
+            toStationName: s.toStationName,
+            direction: normalizeSectionDirection(s.direction),
+            blockId: s.blockId,
+          })),
         })),
         total: rows.length,
       };
@@ -1762,12 +1844,175 @@ export const Actions = {
     },
   }),
 
+  addRiddenSection: defineAction({
+    description:
+      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it.",
+    request: z.object({
+      riddenLineId: z.number().int().positive(),
+      fromStationId: z.string().max(20),
+      fromStationName: z.string().max(100).nullable().optional(),
+      toStationId: z.string().max(20),
+      toStationName: z.string().max(100).nullable().optional(),
+      direction: z.enum(["inner", "outer"]).nullable().optional(),
+      blockId: z.string().max(100).nullable().optional(),
+    }),
+    response: z.object({ created: z.boolean(), id: z.number().nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.riddenLines)
+        .where(eq(schema.riddenLines.id, args.riddenLineId));
+      const line = rows[0];
+      if (!line) {
+        throw new Error(
+          `addRiddenSection: unknown ridden line ${args.riddenLineId}`,
+        );
+      }
+      if (!line.serviceId) {
+        throw new Error(
+          `addRiddenSection: "${line.name}" is not linked to a service yet`,
+        );
+      }
+      if (normalizeRideState(line.rideState) === "full") {
+        throw new Error(
+          `addRiddenSection: "${line.name}" is a full ride — it already covers the whole service`,
+        );
+      }
+      const fromStationId = args.fromStationId.trim();
+      const toStationId = args.toStationId.trim();
+      const direction = args.direction ?? null;
+      const problem = validateSectionEndpoints(
+        line.serviceId,
+        fromStationId,
+        toStationId,
+        direction,
+      );
+      if (problem) {
+        throw new Error(`addRiddenSection: ${problem}`);
+      }
+      const blockId = args.blockId?.trim() || null;
+      if (blockId) {
+        const block = blockById(line.serviceId, blockId);
+        if (!block) {
+          throw new Error(
+            `addRiddenSection: unknown block "${blockId}" for "${line.name}"`,
+          );
+        }
+        const endpointsMatch =
+          (block.from.id === fromStationId && block.to.id === toStationId) ||
+          (block.from.id === toStationId && block.to.id === fromStationId);
+        if (!endpointsMatch) {
+          throw new Error(
+            `addRiddenSection: block "${blockId}" runs ${block.from.name}〜${block.to.name}, not the given section`,
+          );
+        }
+      }
+      // Station names come from the master when the caller omits
+      // them (the block list always sends them; a hand-entered
+      // section may not).
+      const fromName =
+        args.fromStationName?.trim() ||
+        stationRefById(fromStationId)?.name ||
+        null;
+      const toName =
+        args.toStationName?.trim() ||
+        stationRefById(toStationId)?.name ||
+        null;
+      const existing = await db
+        .select()
+        .from(schema.riddenLineSections)
+        .where(
+          eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
+        );
+      const duplicate = existing.find(
+        (s) =>
+          s.fromStationId === fromStationId &&
+          s.toStationId === toStationId &&
+          (s.direction ?? null) === direction,
+      );
+      if (duplicate) {
+        return { created: false, id: duplicate.id };
+      }
+      const inserted = await db
+        .insert(schema.riddenLineSections)
+        .values({
+          riddenLineId: args.riddenLineId,
+          fromStationId,
+          fromStationName: fromName,
+          toStationId,
+          toStationName: toName,
+          direction,
+          blockId,
+        })
+        .returning({ id: schema.riddenLineSections.id });
+      // An unknown row that gains a section now pins one down.
+      if (normalizeRideState(line.rideState) === "unknown") {
+        await db
+          .update(schema.riddenLines)
+          .set({ rideState: "partial" })
+          .where(eq(schema.riddenLines.id, args.riddenLineId));
+      }
+      ctx.invalidateQueries();
+      return { created: true, id: inserted[0]?.id ?? null };
+    },
+  }),
+
+  deleteRiddenSection: defineAction({
+    description:
+      "Removes one added section from a ridden-lines ledger row (stage 2, subtask 1421). Removing the row's last section when it has no primary section returns it to unknown — a ride with no section on record must not claim a partial one.",
+    request: z.object({ id: z.number().int().positive() }),
+    response: okResponse,
+    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      const db = ctx.db<typeof schema>();
+      const sections = await db
+        .select()
+        .from(schema.riddenLineSections)
+        .where(eq(schema.riddenLineSections.id, args.id));
+      const section = sections[0];
+      if (!section) return { ok: true as const };
+      await db
+        .delete(schema.riddenLineSections)
+        .where(eq(schema.riddenLineSections.id, args.id));
+      const remaining = await db
+        .select({ id: schema.riddenLineSections.id })
+        .from(schema.riddenLineSections)
+        .where(
+          eq(schema.riddenLineSections.riddenLineId, section.riddenLineId),
+        );
+      if (remaining.length === 0) {
+        const lines = await db
+          .select()
+          .from(schema.riddenLines)
+          .where(eq(schema.riddenLines.id, section.riddenLineId));
+        const line = lines[0];
+        if (
+          line &&
+          normalizeRideState(line.rideState) === "partial" &&
+          !line.fromStationId &&
+          !line.toStationId
+        ) {
+          await db
+            .update(schema.riddenLines)
+            .set({ rideState: "unknown" })
+            .where(eq(schema.riddenLines.id, line.id));
+        }
+      }
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
   deleteRiddenLine: defineAction({
     description: "Removes one railway line from the ridden-lines ledger (for correcting a wrong record).",
     request: z.object({ id: z.number().int().positive() }),
     response: okResponse,
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       const db = ctx.db<typeof schema>();
+      // Added sections go with their ledger row (stage 2).
+      await db
+        .delete(schema.riddenLineSections)
+        .where(eq(schema.riddenLineSections.riddenLineId, args.id));
       await db
         .delete(schema.riddenLines)
         .where(eq(schema.riddenLines.id, args.id));

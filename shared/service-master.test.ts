@@ -12,6 +12,7 @@ import {
   SERVICE_MASTER,
   SERVICE_MASTER_VERSION,
   assetKeysForService,
+  blocksForService,
   canonicalLedgerName,
   expandService,
   formalLineNames,
@@ -19,7 +20,11 @@ import {
   isN02StationId,
   serviceById,
   serviceByLedgerName,
+  serviceFullPathSnapshot,
+  stationRefById,
+  validateSectionEndpoints,
   type RestoredRide,
+  type StationRef,
 } from "./service-master";
 import { RIDDEN_LINE_GEOMETRIES } from "../client/src/assets/visited-lines";
 
@@ -418,19 +423,30 @@ describe("the nine migrated rides", () => {
           "SELECT service_id, ride_state, from_station_id, from_station_name, to_station_id, to_station_name, master_version FROM ridden_lines WHERE name = ? AND first_ridden_on = ?",
         )
         .get(name, date) as Row;
-    const toRide = (row: Row): RestoredRide => ({
-      serviceId: row.service_id!,
-      rideState: row.ride_state as RestoredRide["rideState"],
-      from:
-        row.from_station_id && row.from_station_name
-          ? { id: row.from_station_id, name: row.from_station_name }
-          : null,
-      to:
-        row.to_station_id && row.to_station_name
-          ? { id: row.to_station_id, name: row.to_station_name }
-          : null,
-      masterVersion: row.master_version!,
-    });
+    const toRide = (row: Row): RestoredRide => {
+      // The SQL stores only the station id + name; the coordinates
+      // ride along in the TS table, so the comparison attaches
+      // them from the expected ride (id + name must match exactly).
+      const stationWithCoords = (
+        id: string | null,
+        name: string | null,
+      ): StationRef | null => {
+        if (!id || !name) return null;
+        for (const ride of Object.values(MIGRATED_RIDES)) {
+          for (const station of [ride.from, ride.to]) {
+            if (station?.id === id && station.name === name) return station;
+          }
+        }
+        return { id, name, lng: 0, lat: 0 };
+      };
+      return {
+        serviceId: row.service_id!,
+        rideState: row.ride_state as RestoredRide["rideState"],
+        from: stationWithCoords(row.from_station_id, row.from_station_name),
+        to: stationWithCoords(row.to_station_id, row.to_station_name),
+        masterVersion: row.master_version!,
+      };
+    };
     // All seven columns of all nine rows match the TS table.
     for (const [name, ride] of Object.entries(MIGRATED_RIDES)) {
       const date = seed.find(([n]) => n === name)![1]!;
@@ -474,5 +490,120 @@ describe("the nine migrated rides", () => {
       expect(toRide(read(name, date))).toEqual(ride);
     }
     db.close();
+  });
+});
+
+describe("stage 2 blocks (subtask 1421)", () => {
+  test("every service's blocks partition it between boundary stations", () => {
+    for (const entry of SERVICE_MASTER) {
+      expect(entry.blocks.length).toBeGreaterThan(0);
+      // Blocks chain: each block starts where the previous ended.
+      for (let i = 1; i < entry.blocks.length; i++) {
+        expect(entry.blocks[i]!.from.id).toBe(entry.blocks[i - 1]!.to.id);
+      }
+      // The blocks cover the service end to end: first block starts
+      // at the first segment's from, last block ends at the last
+      // segment's to (a loop closes on its first station).
+      expect(entry.blocks[0]!.from.id).toBe(entry.segments[0]!.from.id);
+      expect(entry.blocks[entry.blocks.length - 1]!.to.id).toBe(
+        entry.segments[entry.segments.length - 1]!.to.id,
+      );
+      // Every station in the entry carries coordinates (the
+      // geometry code projects sections onto the line shape).
+      for (const station of [
+        ...entry.segments.flatMap((s) => [s.from, s.to]),
+        ...entry.blocks.flatMap((b) => [b.from, b.to]),
+      ]) {
+        expect(Number.isFinite(station.lng)).toBe(true);
+        expect(Number.isFinite(station.lat)).toBe(true);
+        expect(station.lng).toBeGreaterThan(122);
+        expect(station.lng).toBeLessThan(146);
+        expect(station.lat).toBeGreaterThan(24);
+        expect(station.lat).toBeLessThan(46);
+      }
+    }
+  });
+
+  test("block ids are unique across the master", () => {
+    const ids = SERVICE_MASTER.flatMap((e) => e.blocks.map((b) => b.id));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  test("validateSectionEndpoints: whole blocks and multi-block runs pass", () => {
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003766", "003700"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003766", "004029"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio", "003966", "003934"),
+    ).toBeNull();
+  });
+
+  test("validateSectionEndpoints: mid-block stations and reversed order fail", () => {
+    // 国分寺 is a real station on 中央線 but not a block boundary.
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003606", "004029"),
+    ).toMatch(/not a boundary station/);
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "004029", "003766"),
+    ).toMatch(/running order/);
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003766", "003766"),
+    ).toMatch(/two different stations/);
+    expect(validateSectionEndpoints("no-such-service", "003766", "003700")).toMatch(
+      /unknown service/,
+    );
+  });
+
+  test("validateSectionEndpoints: a loop needs a direction", () => {
+    expect(validateSectionEndpoints("yamanote", "004095", "003922")).toMatch(
+      /needs a direction/,
+    );
+    expect(
+      validateSectionEndpoints("yamanote", "004095", "003922", "outer"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("yamanote", "004095", "003922", "inner"),
+    ).toMatch(/runs outer, not inner/);
+    // A multi-block run round the loop still needs the direction.
+    expect(
+      validateSectionEndpoints("yamanote", "004095", "003335", "outer"),
+    ).toBeNull();
+  });
+
+  test("the full-path snapshot keeps the path id and version", () => {
+    const snapshot = serviceFullPathSnapshot("jr-saikyo")!;
+    expect(snapshot.pathId).toBe("jr-saikyo");
+    expect(snapshot.masterVersion).toBe(MIGRATED_MASTER_VERSION);
+    expect(snapshot.segments.length).toBe(4);
+    expect(snapshot.segments[0]!.formalLineKey).toBe(
+      "山手線|東日本旅客鉄道",
+    );
+    // The freight section records both its stand-in shape and the
+    // side of the loop it runs on (stage-1 review handoff).
+    expect(snapshot.segments[0]!.approximate).toBe(true);
+    expect(snapshot.segments[0]!.direction).toBe("outer");
+    expect(serviceFullPathSnapshot("no-such-service")).toBeNull();
+  });
+
+  test("stationRefById resolves segment ends, block boundaries and migrated endpoints", () => {
+    // A segment terminus (高尾 is only a segment end).
+    expect(stationRefById("004029")?.name).toBe("高尾");
+    // A block boundary that is no segment end （調布 is a 京王線
+    // block boundary only).
+    expect(stationRefById("003966")?.name).toBe("調布");
+    // A migrated endpoint that is neither （国分寺 is only in the
+    // restored 中央線 section; 聖蹟桜ヶ丘 only in the 京王線 one).
+    expect(stationRefById("003606")?.name).toBe("国分寺");
+    expect(stationRefById("003971")?.name).toBe("聖蹟桜ヶ丘");
+    // Coordinates ride along, so a resolved station can be
+    // projected onto the line shape.
+    const shinjuku = stationRefById("003700")!;
+    expect(shinjuku.name).toBe("新宿");
+    expect(shinjuku.lng).toBeCloseTo(139.69993, 5);
+    expect(shinjuku.lat).toBeCloseTo(35.6898, 5);
+    expect(stationRefById("999999")).toBeUndefined();
   });
 });

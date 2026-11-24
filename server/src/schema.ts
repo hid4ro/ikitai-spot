@@ -78,6 +78,13 @@ export const visitedMunicipalities = sqliteTable("visited_municipalities", {
 // record pins down no section; partial means from/to are the section
 // actually ridden; full means the whole service. masterVersion is the
 // master version the ride was recorded at.
+// Stage 2 (subtask 1421) adds pathSnapshot: the JSON of the
+// FullPathSnapshot the full ride was cut at (path id + master version
+// + the segment list as it stood then), so a past full ride keeps
+// reproducing its range. Null for partial / unknown rides, and for
+// full rides recorded before stage 2. Extra sections (block picks)
+// live in riddenLineSections, not here: the primary section above
+// stays the one the ride was first recorded with.
 export const riddenLines = sqliteTable("ridden_lines", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -91,6 +98,30 @@ export const riddenLines = sqliteTable("ridden_lines", {
   toStationId: text("to_station_id"),
   toStationName: text("to_station_name"),
   masterVersion: text("master_version"),
+  pathSnapshot: text("path_snapshot"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Added sections of a ridden line (stage 2, subtask 1421): one row
+// per extra section a block pick (or a hand-entered section between
+// two boundary stations) adds to the ledger row. The station pair is
+// the saved record; the geometry and the distance are derived at
+// draw time. direction is 'inner' | 'outer' on a loop service, null
+// elsewhere. blockId names the master block the section covers, when
+// the section is exactly one block — the client uses it to mark the
+// block covered. Rows are deleted with their ledger row (the delete
+// action removes them explicitly).
+export const riddenLineSections = sqliteTable("ridden_line_sections", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  riddenLineId: integer("ridden_line_id").notNull(),
+  fromStationId: text("from_station_id").notNull(),
+  fromStationName: text("from_station_name"),
+  toStationId: text("to_station_id").notNull(),
+  toStationName: text("to_station_name"),
+  direction: text("direction"),
+  blockId: text("block_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

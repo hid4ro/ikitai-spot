@@ -25,6 +25,15 @@
  * share of the line shape (a share would drift when the shape is
  * re-simplified or the source changes).
  *
+ * Stage 2 (subtask 1421) adds the input blocks (each service is
+ * partitioned into blocks between boundary stations), the station
+ * coordinates (N02 station-point centroids, used to project a
+ * section onto the line shape and so to paint only the ridden
+ * section and measure its distance), and the path id (a full
+ * ride's snapshot keeps the path id + master version it was cut
+ * at, so a past full ride reproduces its range even if the master
+ * later changes).
+ *
  * Shared by the client (display, resolution, expansion) and the
  * server (import defaults for new ledger rows), so it lives in
  * shared/ and stays free of DOM / platform imports. */
@@ -33,10 +42,38 @@ export type RideState = "unknown" | "partial" | "full";
 
 export type VerificationStatus = "draft" | "verified";
 
-/* One station, by N02 station group code (N02_005g) and name. */
+/* One station, by N02 station group code (N02_005g) and name.
+   lng/lat is the station's N02 station-point centroid (the mean of
+   the station's N02_005 feature geometries, 5 decimals) — the point
+   the stage-2 geometry code projects onto the line shape to find
+   where a section starts and ends. It is a point ON the station,
+   not the station building: spreads between a station's per-line
+   features are at most ~300 m (新宿), so a section endpoint
+   projects onto its line within a few hundred metres; a larger
+   projection distance means the shape itself is missing there
+   （東京 on 中央線 — the shape starts at 神田）, and the section
+   is flagged approximate. */
 export type StationRef = {
   id: string;
   name: string;
+  lng: number;
+  lat: number;
+};
+
+/* One block of a service (stage 2): the input granularity for
+   long services. A block is a contiguous run of the service
+   between two boundary stations; blocks partition the service in
+   running order, so a ride recorded block by block accumulates
+   into whole-service coverage without ever storing a share of the
+   line shape. The endpoints are station IDs — the saved record —
+   and the geometry/distance are derived at draw time. `direction`
+   only loop services carry: it says which side of the loop the
+   block runs on. */
+export type ServiceBlock = {
+  id: string;
+  from: StationRef;
+  to: StationRef;
+  direction?: "inner" | "outer";
 };
 
 /* An N02 station group code is six digits — the only station
@@ -74,6 +111,14 @@ export type ServiceSegment = {
 export type ServiceMasterEntry = {
   /* Stable id for the service, used as the ledger rows' service_id. */
   id: string;
+  /* The path this entry describes, as recorded at stage 2: the
+     service id names the path (one path per service for now — a
+     loop's two sides are the same path run in opposite directions,
+     told apart by the segment/block `direction`). A full ride's
+     snapshot stores this id with the master version, so a past
+     full ride keeps reproducing the range it was recorded at even
+     if the master later changes. */
+  pathId: string;
   /* The name as ridden and as the ledger records it — the display
      name everywhere (台帳・リスト・凡例・グラフ). */
   displayName: string;
@@ -85,6 +130,11 @@ export type ServiceMasterEntry = {
   operator: string;
   /* The formal lines, in running order. */
   segments: ServiceSegment[];
+  /* The stage-2 input blocks, in running order: a partition of
+     the service between boundary stations (see ServiceBlock).
+     Single-block services (りんかい線・北総線) have one block =
+     the whole service. */
+  blocks: ServiceBlock[];
   /* Where this entry came from (N02 edition, ledger notes, …). */
   sources: string[];
   /* YYYY-MM-DD once a human has verified the entry; null while draft. */
@@ -104,6 +154,7 @@ const LEDGER_SOURCE = "location-trivia/seen_lines.md（台帳の乗車記録）"
 export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   {
     id: "jr-musashino",
+    pathId: "jr-musashino",
     displayName: "JR武蔵野線",
     ledgerNames: ["JR武蔵野線"],
     operator: "東日本旅客鉄道",
@@ -111,8 +162,20 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "武蔵野線",
         formalLineKey: "武蔵野線|東日本旅客鉄道",
-        from: { id: "003876", name: "府中本町" },
-        to: { id: "003547", name: "西船橋" },
+        from: { id: "003876", name: "府中本町", lng: 139.47718, lat: 35.66583 },
+        to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-musashino/b1",
+        from: { id: "003876", name: "府中本町", lng: 139.47718, lat: 35.66583 },
+        to: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
+      },
+      {
+        id: "jr-musashino/b2",
+        from: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
+        to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -121,6 +184,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "hokuso",
+    pathId: "hokuso",
     displayName: "北総線",
     ledgerNames: ["北総線"],
     operator: "北総鉄道",
@@ -128,8 +192,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "北総線",
         formalLineKey: "北総線|北総鉄道",
-        from: { id: "003248", name: "京成高砂" },
-        to: { id: "003125", name: "印旛日本医大" },
+        from: { id: "003248", name: "京成高砂", lng: 139.86659, lat: 35.75087 },
+        to: { id: "003125", name: "印旛日本医大", lng: 140.20276, lat: 35.78782 },
+      },
+    ],
+    blocks: [
+      {
+        id: "hokuso/b1",
+        from: { id: "003248", name: "京成高砂", lng: 139.86659, lat: 35.75087 },
+        to: { id: "003125", name: "印旛日本医大", lng: 140.20276, lat: 35.78782 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -138,6 +209,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "jr-chuo-rapid",
+    pathId: "jr-chuo-rapid",
     displayName: "JR中央線（快速）",
     ledgerNames: ["JR中央線（快速）", "JR中央線"],
     operator: "東日本旅客鉄道",
@@ -145,8 +217,8 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "中央線",
         formalLineKey: "中央線|東日本旅客鉄道",
-        from: { id: "003766", name: "東京" },
-        to: { id: "003677", name: "神田" },
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003677", name: "神田", lng: 139.77088, lat: 35.69242 },
         approximate: true,
         note:
           "N02の中央線形状は神田で途切れる（形状の東端は神田付近で、東京駅から約1.1km）。東京〜神田は運行区間として明示するが、N02に形状が無いため描画・距離は神田以西の形状に限る（近似）。神田のグループコード003677はN02の（神田, 中央線）行で確認済み。",
@@ -154,10 +226,27 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "中央線",
         formalLineKey: "中央線|東日本旅客鉄道",
-        from: { id: "003677", name: "神田" },
-        to: { id: "004029", name: "高尾" },
+        from: { id: "003677", name: "神田", lng: 139.77088, lat: 35.69242 },
+        to: { id: "004029", name: "高尾", lng: 139.28217, lat: 35.64202 },
         note:
           "快速の運行範囲は東京〜高尾。N02の中央線単位はさらに先（塩尻方面）まで延びるが、快速としてはここまで。なおN02の駅ポイントに（東京, 中央線）の行は無い（東京駅のグループコード003766は他のJR線の行で確認済み）。駅IDは物理駅のコードであり、中央線が東京駅に発着することに変わりはない。",
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-chuo-rapid/b1",
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+      },
+      {
+        id: "jr-chuo-rapid/b2",
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003634", name: "立川", lng: 139.41396, lat: 35.69793 },
+      },
+      {
+        id: "jr-chuo-rapid/b3",
+        from: { id: "003634", name: "立川", lng: 139.41396, lat: 35.69793 },
+        to: { id: "004029", name: "高尾", lng: 139.28217, lat: 35.64202 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -166,6 +255,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "jr-sobu-rapid",
+    pathId: "jr-sobu-rapid",
     displayName: "JR総武快速線",
     ledgerNames: ["JR総武快速線"],
     operator: "東日本旅客鉄道",
@@ -173,8 +263,20 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "総武線",
         formalLineKey: "総武線|東日本旅客鉄道",
-        from: { id: "003766", name: "東京" },
-        to: { id: "004173", name: "千葉" },
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-sobu-rapid/b1",
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003589", name: "船橋", lng: 139.98422, lat: 35.70195 },
+      },
+      {
+        id: "jr-sobu-rapid/b2",
+        from: { id: "003589", name: "船橋", lng: 139.98422, lat: 35.70195 },
+        to: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -183,6 +285,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "jr-sobu-local",
+    pathId: "jr-sobu-local",
     displayName: "JR総武本線",
     ledgerNames: ["JR総武本線"],
     operator: "東日本旅客鉄道",
@@ -190,8 +293,25 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "総武線",
         formalLineKey: "総武線|東日本旅客鉄道",
-        from: { id: "003766", name: "東京" },
-        to: { id: "003397", name: "銚子" },
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003397", name: "銚子", lng: 140.82747, lat: 35.72933 },
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-sobu-local/b1",
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
+      },
+      {
+        id: "jr-sobu-local/b2",
+        from: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
+        to: { id: "003531", name: "佐倉", lng: 140.22675, lat: 35.70974 },
+      },
+      {
+        id: "jr-sobu-local/b3",
+        from: { id: "003531", name: "佐倉", lng: 140.22675, lat: 35.70974 },
+        to: { id: "003397", name: "銚子", lng: 140.82747, lat: 35.72933 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -200,6 +320,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "keio",
+    pathId: "keio",
     displayName: "京王線",
     ledgerNames: ["京王線"],
     operator: "京王電鉄",
@@ -207,8 +328,25 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "京王線",
         formalLineKey: "京王線|京王電鉄",
-        from: { id: "003700", name: "新宿" },
-        to: { id: "003934", name: "京王八王子" },
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003934", name: "京王八王子", lng: 139.34298, lat: 35.65805 },
+      },
+    ],
+    blocks: [
+      {
+        id: "keio/b1",
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003966", name: "調布", lng: 139.54474, lat: 35.65177 },
+      },
+      {
+        id: "keio/b2",
+        from: { id: "003966", name: "調布", lng: 139.54474, lat: 35.65177 },
+        to: { id: "003821", name: "府中", lng: 139.4801, lat: 35.67219 },
+      },
+      {
+        id: "keio/b3",
+        from: { id: "003821", name: "府中", lng: 139.4801, lat: 35.67219 },
+        to: { id: "003934", name: "京王八王子", lng: 139.34298, lat: 35.65805 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -217,6 +355,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "jr-saikyo",
+    pathId: "jr-saikyo",
     displayName: "JR埼京線",
     ledgerNames: ["JR埼京線"],
     operator: "東日本旅客鉄道",
@@ -224,30 +363,54 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "山手線",
         formalLineKey: "山手線|東日本旅客鉄道",
-        from: { id: "004135", name: "大崎" },
-        to: { id: "003390", name: "池袋" },
+        from: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+        to: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
         approximate: true,
+        direction: "outer",
         note:
-          "山手貨物線の区間。N02 2025に貨物線の路線単位が無いため山手線（旅客）の形状で代用し、概算として扱う。",
+          "山手貨物線の区間。N02 2025に貨物線の路線単位が無いため山手線（旅客）の形状で代用し、概算として扱う。外回り側（大崎→五反田→目黒→渋谷→新宿→池袋）を通る。",
       },
       {
         formalLineName: "赤羽線",
         formalLineKey: "赤羽線|東日本旅客鉄道",
-        from: { id: "003390", name: "池袋" },
-        to: { id: "003155", name: "赤羽" },
+        from: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003155", name: "赤羽", lng: 139.72105, lat: 35.77754 },
       },
       {
         formalLineName: "東北線",
         formalLineKey: "東北線|東日本旅客鉄道",
-        from: { id: "003155", name: "赤羽" },
-        to: { id: "002914", name: "大宮" },
+        from: { id: "003155", name: "赤羽", lng: 139.72105, lat: 35.77754 },
+        to: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
         note: "通称・東北本線。N02の路線単位名は東北線。",
       },
       {
         formalLineName: "川越線",
         formalLineKey: "川越線|東日本旅客鉄道",
-        from: { id: "002914", name: "大宮" },
-        to: { id: "002909", name: "川越" },
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002909", name: "川越", lng: 139.48307, lat: 35.90705 },
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-saikyo/b1",
+        from: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+        to: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
+        direction: "outer",
+      },
+      {
+        id: "jr-saikyo/b2",
+        from: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003155", name: "赤羽", lng: 139.72105, lat: 35.77754 },
+      },
+      {
+        id: "jr-saikyo/b3",
+        from: { id: "003155", name: "赤羽", lng: 139.72105, lat: 35.77754 },
+        to: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+      },
+      {
+        id: "jr-saikyo/b4",
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002909", name: "川越", lng: 139.48307, lat: 35.90705 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -258,6 +421,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "rinkai",
+    pathId: "rinkai",
     displayName: "りんかい線",
     /* The formal name 臨海副都心線 is a ledger spelling too — a row
        recorded under it is the same service, so it must link to
@@ -269,8 +433,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "臨海副都心線",
         formalLineKey: "臨海副都心線|東京臨海高速鉄道",
-        from: { id: "003997", name: "新木場" },
-        to: { id: "004135", name: "大崎" },
+        from: { id: "003997", name: "新木場", lng: 139.82668, lat: 35.64587 },
+        to: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+      },
+    ],
+    blocks: [
+      {
+        id: "rinkai/b1",
+        from: { id: "003997", name: "新木場", lng: 139.82668, lat: 35.64587 },
+        to: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -279,6 +450,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   },
   {
     id: "yamanote",
+    pathId: "yamanote",
     displayName: "山手線",
     ledgerNames: ["山手線"],
     operator: "東日本旅客鉄道",
@@ -286,8 +458,8 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "山手線",
         formalLineKey: "山手線|東日本旅客鉄道",
-        from: { id: "004095", name: "品川" },
-        to: { id: "003335", name: "田端" },
+        from: { id: "004095", name: "品川", lng: 139.73896, lat: 35.62851 },
+        to: { id: "003335", name: "田端", lng: 139.76157, lat: 35.73748 },
         direction: "outer",
         note:
           "環状線の外回り側（品川→大崎→渋谷→新宿→池袋→田端）。田端のグループコード003335はN02の（田端, 山手線）行で確認済み。",
@@ -295,16 +467,54 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
       {
         formalLineName: "東北線",
         formalLineKey: "東北線|東日本旅客鉄道",
-        from: { id: "003335", name: "田端" },
-        to: { id: "003766", name: "東京" },
+        from: { id: "003335", name: "田端", lng: 139.76157, lat: 35.73748 },
+        to: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
         direction: "outer",
         note: "通称・東北本線。N02の路線単位名は東北線。",
       },
       {
         formalLineName: "東海道線",
         formalLineKey: "東海道線|東日本旅客鉄道",
-        from: { id: "003766", name: "東京" },
-        to: { id: "004095", name: "品川" },
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004095", name: "品川", lng: 139.73896, lat: 35.62851 },
+        direction: "outer",
+      },
+    ],
+    blocks: [
+      {
+        id: "yamanote/b1",
+        from: { id: "004095", name: "品川", lng: 139.73896, lat: 35.62851 },
+        to: { id: "003922", name: "渋谷", lng: 139.70165, lat: 35.65898 },
+        direction: "outer",
+      },
+      {
+        id: "yamanote/b2",
+        from: { id: "003922", name: "渋谷", lng: 139.70165, lat: 35.65898 },
+        to: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        direction: "outer",
+      },
+      {
+        id: "yamanote/b3",
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
+        direction: "outer",
+      },
+      {
+        id: "yamanote/b4",
+        from: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003335", name: "田端", lng: 139.76157, lat: 35.73748 },
+        direction: "outer",
+      },
+      {
+        id: "yamanote/b5",
+        from: { id: "003335", name: "田端", lng: 139.76157, lat: 35.73748 },
+        to: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        direction: "outer",
+      },
+      {
+        id: "yamanote/b6",
+        from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004095", name: "品川", lng: 139.73896, lat: 35.62851 },
         direction: "outer",
       },
     ],
@@ -317,6 +527,34 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
 
 export function serviceById(id: string): ServiceMasterEntry | undefined {
   return SERVICE_MASTER.find((entry) => entry.id === id);
+}
+
+/* A station of the master by its N02 group code, with the
+   coordinates the stage-2 geometry code needs: the client
+   resolves a ledger row's stored station ids through this (its
+   primary section carries ids and names, but no coordinates),
+   and the server fills in station names for an added section.
+   Segments carry every terminus, blocks every boundary, and
+   the migrated rides carry their restored endpoints （国分寺・
+   聖蹟桜ヶ丘・品川シーサイド・目黒 are no block boundary) — all
+   three are searched, first match wins. One code names one
+   physical station, wherever it appears, so the matches agree. */
+export function stationRefById(stationId: string): StationRef | undefined {
+  for (const entry of SERVICE_MASTER) {
+    for (const segment of entry.segments) {
+      if (segment.from.id === stationId) return segment.from;
+      if (segment.to.id === stationId) return segment.to;
+    }
+    for (const block of entry.blocks) {
+      if (block.from.id === stationId) return block.from;
+      if (block.to.id === stationId) return block.to;
+    }
+  }
+  for (const ride of Object.values(MIGRATED_RIDES)) {
+    if (ride.from?.id === stationId) return ride.from;
+    if (ride.to?.id === stationId) return ride.to;
+  }
+  return undefined;
 }
 
 /* Half-width parentheses and the spaces around them are the same
@@ -432,8 +670,135 @@ export function expandService(
   return serviceById(serviceId)?.segments ?? [];
 }
 
-/* The formal line names of a service, de-duplicated in order
-   （埼京線 → 山手線・赤羽線・東北線・川越線）. */
+/* The blocks of a service, in running order — the stage-2 input
+   granularity (see ServiceBlock). */
+export function blocksForService(serviceId: string): readonly ServiceBlock[] {
+  return serviceById(serviceId)?.blocks ?? [];
+}
+
+export function blockById(
+  serviceId: string,
+  blockId: string,
+): ServiceBlock | undefined {
+  return blocksForService(serviceId).find((block) => block.id === blockId);
+}
+
+/* The boundary stations of a service, in running order: the first
+   block's from, then every block's to. A loop service's last
+   boundary is its first station again （品川 closes the 山手線）,
+   so the list has blocks.length + 1 entries for a loop, and the
+   same count for a line (its last to is its terminus). */
+export function serviceBoundaryStations(
+  serviceId: string,
+): readonly StationRef[] {
+  const blocks = blocksForService(serviceId);
+  if (blocks.length === 0) return [];
+  const stations: StationRef[] = [blocks[0]!.from];
+  for (const block of blocks) stations.push(block.to);
+  return stations;
+}
+
+/* Is this service a loop (its last block returns to its first
+   station)? Only loops need a direction to tell which side a
+   section runs on. */
+export function serviceIsLoop(serviceId: string): boolean {
+  const boundaries = serviceBoundaryStations(serviceId);
+  return (
+    boundaries.length > 1 &&
+    boundaries[0]!.id === boundaries[boundaries.length - 1]!.id
+  );
+}
+
+/* Validates a section (an added ride between two stations) for the
+   stage-2 block input. The endpoints must be boundary stations of
+   the service, in running order — a section may span several whole
+   blocks, but it may not start or end mid-block (arbitrary
+   stations are stage 3). On a loop the caller must also give the
+   direction, since the same two stations can be joined either way
+   round. Returns an error string, or null when the section is
+   valid. This is the rule the server's addRiddenSection enforces;
+   the client checks it first so a bad tap never reaches the
+   server. */
+export function validateSectionEndpoints(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+  direction?: "inner" | "outer" | null,
+): string | null {
+  const service = serviceById(serviceId);
+  if (!service) return `unknown service "${serviceId}"`;
+  if (fromStationId === toStationId) {
+    return "a section needs two different stations";
+  }
+  const boundaries = serviceBoundaryStations(serviceId);
+  const fromIndex = boundaries.findIndex((s) => s.id === fromStationId);
+  const toIndex = boundaries.findIndex((s) => s.id === toStationId);
+  if (fromIndex < 0) {
+    return `"${fromStationId}" is not a boundary station of ${service.displayName}`;
+  }
+  if (toIndex < 0) {
+    return `"${toStationId}" is not a boundary station of ${service.displayName}`;
+  }
+  if (serviceIsLoop(serviceId)) {
+    if (!direction) {
+      return `${service.displayName} is a loop: a section needs a direction (inner/outer)`;
+    }
+    // Any two distinct boundaries join either way round a loop;
+    // the direction says which way. The blocks' own direction
+    // must agree when the section is a single block.
+    const blocks = blocksForService(serviceId);
+    const block = blocks.find(
+      (b) =>
+        (b.from.id === fromStationId && b.to.id === toStationId) ||
+        (b.from.id === toStationId && b.to.id === fromStationId),
+    );
+    if (block?.direction && block.direction !== direction) {
+      return `block ${block.from.name}〜${block.to.name} runs ${block.direction}, not ${direction}`;
+    }
+    return null;
+  }
+  if (fromIndex >= toIndex) {
+    return "the section runs against the service's running order";
+  }
+  return null;
+}
+
+/* The versioned path of a service, as a full ride records it: the
+   path id, the master version it was cut at, and the segment list
+   (formal line, endpoints, direction, approximate flag) as it
+   stood then. A later master change never rewrites a stored
+   snapshot, so a past full ride keeps reproducing the range it
+   was recorded at — the 版付き経路 the stage-1 review asked
+   stage 2 to provide. */
+export type FullPathSnapshot = {
+  pathId: string;
+  masterVersion: string;
+  segments: {
+    formalLineKey: string;
+    from: StationRef;
+    to: StationRef;
+    direction?: "inner" | "outer";
+    approximate?: boolean;
+  }[];
+};
+
+export function serviceFullPathSnapshot(
+  serviceId: string,
+): FullPathSnapshot | null {
+  const service = serviceById(serviceId);
+  if (!service) return null;
+  return {
+    pathId: service.pathId,
+    masterVersion: SERVICE_MASTER_VERSION,
+    segments: service.segments.map((segment) => ({
+      formalLineKey: segment.formalLineKey,
+      from: segment.from,
+      to: segment.to,
+      ...(segment.direction ? { direction: segment.direction } : {}),
+      ...(segment.approximate ? { approximate: true } : {}),
+    })),
+  };
+}
 export function formalLineNames(serviceId: string): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
@@ -545,50 +910,50 @@ export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
   "JR中央線（快速）": {
     serviceId: "jr-chuo-rapid",
     rideState: "partial",
-    from: { id: "003606", name: "国分寺" },
-    to: { id: "003766", name: "東京" },
+    from: { id: "003606", name: "国分寺", lng: 139.48013, lat: 35.70045 },
+    to: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR総武快速線": {
     serviceId: "jr-sobu-rapid",
     rideState: "partial",
-    from: { id: "003766", name: "東京" },
-    to: { id: "004173", name: "千葉" },
+    from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
+    to: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR総武本線": {
     serviceId: "jr-sobu-local",
     rideState: "partial",
-    from: { id: "003531", name: "佐倉" },
-    to: { id: "004173", name: "千葉" },
+    from: { id: "003531", name: "佐倉", lng: 140.22675, lat: 35.70974 },
+    to: { id: "004173", name: "千葉", lng: 140.1136, lat: 35.61275 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "京王線": {
     serviceId: "keio",
     rideState: "partial",
-    from: { id: "003821", name: "府中" },
-    to: { id: "003971", name: "聖蹟桜ヶ丘" },
+    from: { id: "003821", name: "府中", lng: 139.4801, lat: 35.67219 },
+    to: { id: "003971", name: "聖蹟桜ヶ丘", lng: 139.44687, lat: 35.65079 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR埼京線": {
     serviceId: "jr-saikyo",
     rideState: "partial",
-    from: { id: "003700", name: "新宿" },
-    to: { id: "004135", name: "大崎" },
+    from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+    to: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "りんかい線": {
     serviceId: "rinkai",
     rideState: "partial",
-    from: { id: "004135", name: "大崎" },
-    to: { id: "004182", name: "品川シーサイド" },
+    from: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+    to: { id: "004182", name: "品川シーサイド", lng: 139.7498, lat: 35.60979 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
   "山手線": {
     serviceId: "yamanote",
     rideState: "partial",
-    from: { id: "004135", name: "大崎" },
-    to: { id: "004072", name: "目黒" },
+    from: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+    to: { id: "004072", name: "目黒", lng: 139.71568, lat: 35.63272 },
     masterVersion: MIGRATED_MASTER_VERSION,
   },
 };

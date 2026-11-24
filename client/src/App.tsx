@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -49,12 +50,30 @@ import {
 } from "./assets/visited-lines";
 import {
   buildLineKeyByName,
-  countRiddenByOperator,
-  countRiddenServices,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
   serviceForRow,
 } from "./line-resolution";
-import { firstLineByOperator, lineGeometryBounds } from "./line-focus";
+import {
+  blocksForService,
+  serviceById,
+  stationRefById,
+} from "../../shared/service-master";
+import {
+  buildServicePath,
+  computeLineCoverage,
+  coveredBlockIds,
+  parseFullPathSnapshot,
+  sectionBounds,
+  type LineCoverage,
+  type LineGeometryMap,
+  type RideInterval,
+  type ServicePath,
+} from "./line-geometry";
+import {
+  JAPAN_LINE_TOTAL_KM,
+  OPERATOR_TOTAL_KM,
+} from "./line-totals";
+import { firstLineByOperator } from "./line-focus";
 import { pollForMap, type PollForMapHandle } from "./map-attach";
 import {
   createSelectionSequencer,
@@ -897,8 +916,8 @@ const LINE_KEY_BY_NAME: ReadonlyMap<string, string> =
    was actually ridden. Returns null when nothing resolves — the
    line then simply has no track drawn and no color chip. Multi-line
    services (JR埼京線, and 山手線 since the loop split) also return
-   null here: no single key stands for them, and stage 2 will paint
-   their ridden section instead of a whole line. */
+   null here: no single key stands for them — their track comes from
+   the line coverage instead (stage 2 paints the ridden section). */
 function resolveRiddenLineKey(
   ledgerName: string,
   serviceId?: string | null,
@@ -1006,6 +1025,7 @@ function ProgressDonut({
   pctText,
   color,
   doneLabel,
+  unit,
 }: {
   title: string;
   value: number;
@@ -1013,13 +1033,19 @@ function ProgressDonut({
   pctText: string;
   color: string;
   doneLabel: string;
+  /* Appended to both numbers in the hole (the 路線 donut passes
+     "km": 123.4km / 26,735.5km). Values keep one decimal at most,
+     so a distance never shows a spurious long fraction. */
+  unit?: string;
 }) {
+  const fmt = (n: number) =>
+    n.toLocaleString(undefined, { maximumFractionDigits: 1 });
   const data = [
     { name: doneLabel, value },
     { name: "残り", value: Math.max(0, total - value) },
   ];
   return (
-    <figure className="min-w-[140px] flex-1" aria-label={`${title}の制覇率 ${pctText}%（${value} / ${total}）`}>
+    <figure className="min-w-[140px] flex-1" aria-label={`${title}の制覇率 ${pctText}%（${fmt(value)}${unit ?? ""} / ${fmt(total)}${unit ?? ""}）`}>
       <figcaption className="text-center text-sm font-medium">{title}</figcaption>
       <div className="relative mx-auto h-[150px] w-[150px]">
         <PieChart width={150} height={150} aria-hidden="true">
@@ -1043,7 +1069,9 @@ function ProgressDonut({
             <span className="text-sm font-bold">%</span>
           </span>
           <span className="mt-1 text-xs text-[var(--dim)]">
-            {value.toLocaleString()} / {total.toLocaleString()}
+            {fmt(value)}
+            {unit} / {fmt(total)}
+            {unit}
           </span>
         </div>
       </div>
@@ -1183,7 +1211,10 @@ function ConquestCharts({
   prefectures,
   totalVisited,
   riddenLines,
-  riddenServiceCount,
+  networkRiddenKm,
+  completeServiceCount,
+  unpreparedLines,
+  operatorKm,
   municipalityProgressPct,
   lineProgressPct,
   onOperatorSelect,
@@ -1192,10 +1223,18 @@ function ConquestCharts({
   prefectures: { name: string; total: number }[];
   totalVisited: number;
   riddenLines: { name: string; firstRiddenOn: string; serviceId: string | null }[];
-  /* Distinct services ridden — the 路線 donut's numerator (review
-     round 2). The map overlay still paints by asset key; this count
-     is the service count, so it agrees with the 事業者別 bars below. */
-  riddenServiceCount: number;
+  /* The 路線 donut's numerator (stage 2): the deduped ridden
+     distance in km, against every formal line in Japan
+     (26,735.5 km). The same number the map paints, so the donut
+     and the map always agree. */
+  networkRiddenKm: number;
+  /* Services ridden end to end, and N02 lines the master does
+     not cover yet — the two notes under the donut. */
+  completeServiceCount: number;
+  unpreparedLines: number;
+  /* Per-operator ridden distance (formal-line based, deduped —
+     the parent bar, matching the painted total). */
+  operatorKm: ReadonlyMap<string, number>;
   municipalityProgressPct: string;
   lineProgressPct: string;
   /* 事業者別（路線）bar tap (and its accessible button twin):
@@ -1211,23 +1250,16 @@ function ConquestCharts({
     (p) => !PREFECTURE_MUNICIPALITY_TOTALS.has(p.name),
   );
 
-  /* Per-operator counts are per DISTINCT SERVICE (see
-     countRiddenByOperator): JR総武快速線 and JR総武本線 are two
-     services that share the one asset key 「総武線」, so both show;
-     two spellings of one service （「JR中央線」 and 「JR中央線
-     （快速）」) count once. The 路線 donut above counts the same
-     way — its value is the distinct-service total (see
-     countRiddenServices), not the distinct-key count. Its
-     denominator stays the 597 distinct asset lines nationwide
-     (systematizing the denominator is stage 2's work). */
-  const operatorRidden = countRiddenByOperator(
-    riddenLines,
-    RIDDEN_LINE_GEOMETRIES,
-    LINE_KEY_BY_NAME,
-  );
-  const operatorRows: ProgressRow[] = [...operatorRidden.entries()]
+  /* Per-operator bars are distances (stage 2): the parent is the
+     formal-line-based deduped total, so a shared stretch ridden
+     as two services counts once here — the same number the map
+     paints. The denominator is the operator's whole network
+     (every formal line, ridden or not). The per-system distance
+     lives on each ledger row instead: a stretch ridden as 埼京線
+     never credits another system. */
+  const operatorRows: ProgressRow[] = [...operatorKm.entries()]
     .map(([name, done]) => {
-      const total = LINE_OPERATOR_TOTALS.get(name) ?? done;
+      const total = OPERATOR_TOTAL_KM[name] ?? done;
       return { name, done, total, rest: Math.max(0, total - done) };
     })
     .sort(
@@ -1255,13 +1287,21 @@ function ConquestCharts({
         />
         <ProgressDonut
           title="路線"
-          value={riddenServiceCount}
-          total={JAPAN_LINE_TOTAL}
+          value={networkRiddenKm}
+          total={JAPAN_LINE_TOTAL_KM}
           pctText={lineProgressPct}
           color={CHART_LINE_COLOR}
           doneLabel="乗車済み"
+          unit="km"
         />
       </div>
+      {(completeServiceCount > 0 || unpreparedLines > 0) && (
+        <p className="mt-1 text-center text-xs text-[var(--dim)]">
+          {completeServiceCount > 0 && `完乗 ${completeServiceCount}系統`}
+          {completeServiceCount > 0 && unpreparedLines > 0 && " ・ "}
+          {unpreparedLines > 0 && `未整備 ${unpreparedLines}線`}
+        </p>
+      )}
 
       {prefRows.length > 0 && (
         <div className="mt-4">
@@ -1307,13 +1347,18 @@ function ConquestCharts({
                     aria-label={`${row.name}の乗った路線へ移動`}
                     className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium"
                   >
-                    {row.name} {row.done}路線
+                    {row.name}{" "}
+                    {row.done.toLocaleString(undefined, {
+                      maximumFractionDigits: 1,
+                    })}
+                    km
                   </button>
                 ))}
               </div>
             )}
             <p className="mt-1 text-xs text-[var(--dim)]">
-              乗った路線がある事業者だけを表示しています（全{LINE_OPERATOR_TOTALS.size}事業者のうち{operatorRows.length}事業者）
+              乗った路線がある事業者だけを表示しています（全{LINE_OPERATOR_TOTALS.size}事業者のうち{operatorRows.length}事業者）。
+              距離は地図で塗られた区間の重複を除いた合計で、分母は各事業者の全路線の総延長です
             </p>
           </>
         ) : (
@@ -2898,32 +2943,50 @@ function ensureLineFocusLayers(map: MapLibreLike) {
 /* Line-focus switching, mirroring setNormalFillExclusion: while a
    line is focused its normal paint is filtered out of the
    visited-lines layers and the focus layers replace it, so the
-   line is never double-painted. `key` is the asset line key the
-   overlay features carry as a property; null restores every line. */
-function setNormalLineExclusion(map: MapLibreLike, key: string | null) {
-  const filter = key ? ["!=", ["get", "key"], key] : null;
+   line is never double-painted. `keys` are the asset line keys
+   the overlay features carry as a property (a service can span
+   several formal lines — 埼京線 covers 山手線・赤羽線・東北線・
+   川越線); null restores every line. The dashed unknown layer is
+   excluded the same way: a focused unknown ride must not show
+   both as a dashed whole path and as the orange focus. */
+function setNormalLineExclusion(map: MapLibreLike, keys: readonly string[] | null) {
+  const filter = keys
+    ? ["all", ["!=", ["get", "dashed"], true], ["!", ["in", ["get", "key"], ["literal", keys]]]]
+    : ["!=", ["get", "dashed"], true];
+  const dashedFilter = keys
+    ? ["all", ["==", ["get", "dashed"], true], ["!", ["in", ["get", "key"], ["literal", keys]]]]
+    : ["==", ["get", "dashed"], true];
   if (map.getLayer("visited-lines-casing")) {
     map.setFilter("visited-lines-casing", filter);
   }
   if (map.getLayer("visited-lines-color")) {
     map.setFilter("visited-lines-color", filter);
   }
+  if (map.getLayer("visited-lines-unknown")) {
+    map.setFilter("visited-lines-unknown", dashedFilter);
+  }
 }
 
-/* Paints one asset line as the orange focus highlight, swapping it
-   out of the normal line layers (see setNormalLineExclusion). */
-function setFocusLine(
+/* Paints one ridden service's painted legs as the orange focus
+   highlight, swapping them out of the normal line layers (see
+   setNormalLineExclusion). `legs` are the service's painted legs
+   from the line coverage — a partial ride highlights only its
+   ridden section, a full ride its whole path, an unknown ride its
+   whole path dashed in orange. */
+function setFocusSection(
   map: MapLibreLike,
-  key: string,
-  entry: (typeof RIDDEN_LINE_GEOMETRIES)[string],
+  legs: readonly { key: string; coords: readonly [number, number][] }[],
 ) {
   ensureLineFocusLayers(map);
-  setNormalLineExclusion(map, key);
+  const keys = [...new Set(legs.map((leg) => leg.key))];
+  setNormalLineExclusion(map, keys);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
-    features: [
-      { type: "Feature", properties: { key }, geometry: entry.geometry },
-    ],
+    features: legs.map((leg) => ({
+      type: "Feature",
+      properties: { key: leg.key },
+      geometry: { type: "LineString", coordinates: leg.coords },
+    })),
   });
 }
 
@@ -3048,63 +3111,153 @@ function VisitedMapSection({
   const circled = mappable.filter((m) => boundaryGeometryFor(m) === null);
 
   /* Ridden lines (same query key as RiddenLinesBlock below, so the two
-     share one fetch): each ledger name resolves to at most one asset
-     line key, and several ledger rows can land on the same key
-     (JR総武快速線 and JR総武本線 are both 「総武線」) — the set keeps
-     each painted line unique. Stage 1 still paints whole single-key
-     lines; a multi-line service (JR埼京線) paints nothing yet, and
-     stage 2 will paint only its ridden section instead. */
+     share one fetch): the rows feed the stage-2 line coverage below,
+     which paints only the ridden sections. */
   const riddenQuery = useQuery({
     queryKey: ["riddenLines"],
     queryFn: () => api.listRiddenLines({}),
   });
-  const riddenLineKeys = new Set<string>();
-  for (const line of riddenQuery.data?.lines ?? []) {
-    const key = resolveRiddenLineKey(line.name, line.serviceId);
-    if (key) riddenLineKeys.add(key);
-  }
-  const riddenLineFeatures = [...riddenLineKeys].flatMap((key) => {
-    const entry = RIDDEN_LINE_GEOMETRIES[key];
-    if (!entry) return [];
-    return [
-      {
-        type: "Feature",
-        /* `key` rides along so a line focus can filter this line
-           OUT of the normal line layers while its focus highlight
-           replaces it (see setNormalLineExclusion). */
-        properties: { color: entry.color, key },
-        geometry: entry.geometry,
-      },
-    ];
-  });
-  const riddenLinesKey = [...riddenLineKeys].sort().join(",");
+  /* Ridden lines: paint only what was actually ridden (stage 2).
+     The coverage is computed from the ledger rows: each row's
+     service contributes its primary section (from the stage-1
+     migration) plus its added sections, a full ride contributes
+     its whole path (from the stored snapshot when there is one),
+     and a row with no section contributes nothing but its whole
+     path painted dashed. A service spans several formal lines
+     （埼京線 = 山手線・赤羽線・東北線・川越線), so the overlay
+     carries one feature per painted leg, keyed by its formal
+     line — and the same leg can belong to several services, which
+     is why the coverage dedups by edge, not by service. */
+  const lineCoverage: LineCoverage = useMemo(() => {
+    const rows = riddenQuery.data?.lines ?? [];
+    const intervals = new Map<string, RideInterval[]>();
+    const fullServiceIds = new Set<string>();
+    const servicePaths = new Map<string, ServicePath>();
+    const geometries =
+      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
+    const addInterval = (
+      serviceId: string,
+      fromStationId: string,
+      toStationId: string,
+      direction: "inner" | "outer" | null,
+    ) => {
+      const from = stationRefById(fromStationId);
+      const to = stationRefById(toStationId);
+      /* An endpoint the master cannot resolve (a station added
+         after the master, or a bad id) has no coordinates to
+         project: the section is skipped, and the row falls back
+         to painting its whole path dashed — it still counts
+         nothing, so the distance stays honest. */
+      if (!from || !to) return;
+      const list = intervals.get(serviceId) ?? [];
+      list.push({ serviceId, from, to, direction });
+      intervals.set(serviceId, list);
+    };
+    for (const row of rows) {
+      const serviceId = row.serviceId;
+      if (!serviceId) continue;
+      const service = serviceById(serviceId);
+      if (!service) continue;
+      /* The path is built once per service (the graph cache
+         makes repeat builds cheap) and only for services with a
+         row — a service with no ride paints nothing. */
+      if (!servicePaths.has(serviceId)) {
+        servicePaths.set(
+          serviceId,
+          buildServicePath(
+            service,
+            geometries,
+            parseFullPathSnapshot(row.pathSnapshot),
+          ),
+        );
+      }
+      if (row.rideState === "full") {
+        fullServiceIds.add(serviceId);
+      } else if (row.rideState === "partial") {
+        if (row.fromStationId && row.toStationId) {
+          addInterval(
+            serviceId,
+            row.fromStationId,
+            row.toStationId,
+            null,
+          );
+        }
+        for (const section of row.sections ?? []) {
+          addInterval(
+            serviceId,
+            section.fromStationId,
+            section.toStationId,
+            section.direction,
+          );
+        }
+      }
+    }
+    return computeLineCoverage(
+      intervals,
+      fullServiceIds,
+      servicePaths,
+      geometries,
+      JAPAN_LINE_TOTAL,
+    );
+  }, [riddenQuery.data]);
 
-  /* Progress denominators: municipalities against every municipality
-     in Japan, lines against every railway line in Japan — the bundled
-     asset carries all of them (国土数値情報 N02 line units), so a line
-     ridden anywhere in the country resolves, draws, and counts. The
-     line numerator is the number of distinct SERVICES ridden (see
-     countRiddenServices): the nine legacy rows are 9, not the 6
-     distinct asset keys they resolve to — JR埼京線 and 山手線 ride
-     services that paint nothing in stage 1, but they were still
-     ridden, and the 事業者別 chart already counts them. The
-     denominator stays the 597 N02 line units; the numerator and
-     denominator are therefore not yet in the same unit, and
-     systematizing the denominator is stage 2's distance-conquest
-     work (see DATA-PLAN.md). */
-  const riddenServiceCount = countRiddenServices(
-    riddenQuery.data?.lines ?? [],
-    RIDDEN_LINE_GEOMETRIES,
-    LINE_KEY_BY_NAME,
-  );
+  /* The overlay features: one per painted leg, so a partial ride
+     paints only its ridden section and an unknown ride paints
+     its whole path dashed. A leg's key is its formal line; the
+     color comes from the asset entry for that key. `key` and
+     `dashed` ride along so a line focus can filter its legs OUT
+     of the normal line layers while the focus highlight replaces
+     them (see setNormalLineExclusion). */
+  const riddenLineFeatures = useMemo(() => {
+    const features: {
+      type: "Feature";
+      properties: { key: string; color: string; dashed: boolean };
+      geometry: {
+        type: "LineString";
+        coordinates: readonly [number, number][];
+      };
+    }[] = [];
+    for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
+      const service = serviceById(serviceId);
+      if (!service) continue;
+      for (const leg of painted.legs) {
+        const entry = RIDDEN_LINE_GEOMETRIES[leg.key];
+        if (!entry) continue;
+        features.push({
+          type: "Feature",
+          properties: {
+            key: leg.key,
+            color: entry.color,
+            dashed: painted.unknown,
+          },
+          geometry: { type: "LineString", coordinates: leg.coords },
+        });
+      }
+    }
+    return features;
+  }, [lineCoverage]);
+
+  const riddenLinesKey = [...lineCoverage.perServiceLegs.keys()]
+    .sort()
+    .join(",");
+
+  /* Progress: the main metric is the deduped ridden distance
+     against every formal line in Japan (26,735.5 km). The
+     numerator is the painted total, so the donut, the header,
+     and the map always agree. The count of complete services
+     and the unprepared-lines note ride alongside it. */
+  const networkRiddenKm = lineCoverage.networkRiddenKm;
+  const completeServiceCount = lineCoverage.completeServiceIds.length;
+  const unpreparedLines = lineCoverage.unpreparedLines;
   const municipalityProgressPct =
     JAPAN_MUNICIPALITY_TOTAL > 0
       ? ((totalVisited / JAPAN_MUNICIPALITY_TOTAL) * 100).toFixed(2)
       : "0.00";
   const lineProgressPct =
-    JAPAN_LINE_TOTAL > 0
-      ? ((riddenServiceCount / JAPAN_LINE_TOTAL) * 100).toFixed(1)
+    JAPAN_LINE_TOTAL_KM > 0
+      ? ((networkRiddenKm / JAPAN_LINE_TOTAL_KM) * 100).toFixed(1)
       : "0.0";
+  const networkRiddenKmText = `${networkRiddenKm.toLocaleString(undefined, { maximumFractionDigits: 1 })}km`;
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const fallbackMapRef = useRef<HTMLElement>(null);
@@ -3421,9 +3574,10 @@ function VisitedMapSection({
      exclusive — picking a line clears the municipality focus and
      vice versa — and a line focus is cleared the same ways a
      municipality one is (another pick, a blank map tap, deleting
-     the row). focusedLineKeyRef holds the row's resolved asset key
-     (null for an unresolved row like JR埼京線: the row still
-     highlights, there is just no track to paint). */
+     the row). focusedLineKeyRef holds the row's service id (null
+     for a row with no service link: the row still highlights,
+     there is just no track to paint). Written only — the map
+     re-applies the focus from the row id, never from this ref. */
   const [focusedLineId, setFocusedLineId] = useState<number | null>(null);
   const focusedLineIdRef = useRef<number | null>(null);
   const focusedLineKeyRef = useRef<string | null>(null);
@@ -3911,6 +4065,7 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
+              filter: ["!=", ["get", "dashed"], true],
               paint: {
                 "line-color": "#ffffff",
                 "line-width": 5.5,
@@ -3922,10 +4077,29 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
+              filter: ["!=", ["get", "dashed"], true],
               paint: {
                 "line-color": ["get", "color"],
                 "line-width": 3.5,
                 "line-opacity": 0.95,
+              },
+            },
+            /* Unknown rides (a row with no section on record):
+               the whole path as a thin dashed line in the
+               service's color — visible, but clearly not a
+               ridden section. The minutes' rule: unknown is
+               never painted as if it were ridden. */
+            {
+              id: "visited-lines-unknown",
+              type: "line",
+              source: "visited-lines",
+              layout: { "line-cap": "round", "line-join": "round" },
+              filter: ["==", ["get", "dashed"], true],
+              paint: {
+                "line-color": ["get", "color"],
+                "line-width": 2,
+                "line-opacity": 0.6,
+                "line-dasharray": [2, 2],
               },
             },
           ],
@@ -4601,13 +4775,15 @@ function VisitedMapSection({
      emphasize it (orange focus highlight on the map, highlighted
      row in the list) — the 路線 counterpart of focusMunicipality
      above, with the same contract: the highlight stays until
-     another row is tapped, the map's empty area is tapped, or the
-     row is deleted; when the interactive map cannot run, the
+     another row is tapped, the map's empty area is tapped, or
+     the row is deleted; when the interactive map cannot run, the
      static map image is scrolled into view instead and only the
-     row emphasis applies. A row whose name resolves to no asset
-     line (JR埼京線) has no track to frame, so only its row
-     highlights. Delete / context-edit controls carry
-     data-map-no-fly and never reach here (they are separate
+     row emphasis applies. The highlight is the row's painted
+     legs from the line coverage — a partial ride frames only its
+     ridden section, a full ride its whole path, an unknown ride
+     its whole path dashed — so a multi-line service (JR埼京線)
+     finally has a track to frame. Delete / context-edit controls
+     carry data-map-no-fly and never reach here (they are separate
      buttons, checked in RiddenLinesBlock). */
   const focusRiddenLine = (line: RiddenLine) => {
     /* The two focuses are mutually exclusive: clear the
@@ -4627,16 +4803,18 @@ function VisitedMapSection({
     focusedLineIdRef.current = line.id;
     setFocusedLineId(line.id);
     pendingLineScrollRef.current = null;
-    const key = resolveRiddenLineKey(line.name, line.serviceId);
-    focusedLineKeyRef.current = key;
+    const painted = line.serviceId
+      ? lineCoverage.perServiceLegs.get(line.serviceId)
+      : undefined;
+    focusedLineKeyRef.current = line.serviceId ?? null;
     /* A line tap supersedes any row scroll still running. */
     rowScrollSeqRef.current += 1;
-    if (!key) {
-      /* No single track to paint (JR埼京線, and 山手線 since the
-         loop split): the previous row's orange highlight must not
-         linger. Clearing runs through the live map, guarded by the
-         current selection — a superseded tap must not clear a newer
-         row's highlight. */
+    if (!painted || painted.legs.length === 0) {
+      /* No track to paint (a row with no service link): the
+         previous row's orange highlight must not linger.
+         Clearing runs through the live map, guarded by the
+         current selection — a superseded tap must not clear a
+         newer row's highlight. */
       if (!mapFailed) {
         withLiveMap((map) => {
           if (focusedLineIdRef.current !== line.id) return;
@@ -4649,8 +4827,6 @@ function VisitedMapSection({
       }
       return;
     }
-    const entry = RIDDEN_LINE_GEOMETRIES[key];
-    if (!entry) return;
 
     const reduceMotion =
       typeof window !== "undefined" &&
@@ -4661,7 +4837,7 @@ function VisitedMapSection({
         behavior: reduceMotion ? "auto" : "smooth",
         block: "start",
       });
-      const bounds = lineGeometryBounds(entry.geometry);
+      const bounds = sectionBounds(painted.legs);
       withLiveMap((map) => {
         /* A later tap supersedes this one: never paint a stale
            highlight (or fly the camera) for a row the reader has
@@ -4669,7 +4845,7 @@ function VisitedMapSection({
         if (focusedLineIdRef.current !== line.id) return;
         try {
           ensureFocusListeners(map);
-          setFocusLine(map, key, entry);
+          setFocusSection(map, painted.legs);
           if (bounds) {
             map.fitBounds(bounds, {
               padding: 36,
@@ -4714,8 +4890,10 @@ function VisitedMapSection({
     }
     focusedLineIdRef.current = row.id;
     setFocusedLineId(row.id);
-    const key = resolveRiddenLineKey(row.name, row.serviceId);
-    focusedLineKeyRef.current = key;
+    const painted = row.serviceId
+      ? lineCoverage.perServiceLegs.get(row.serviceId)
+      : undefined;
+    focusedLineKeyRef.current = row.serviceId ?? null;
     setLinesExpanded(true);
     pendingLineScrollRef.current = row.id;
     /* If the list was already open and the row is already laid
@@ -4729,24 +4907,21 @@ function VisitedMapSection({
       pendingLineScrollRef.current = null;
       scrollRowFullyIntoView(rowEl);
     }
-    if (key) {
-      const entry = RIDDEN_LINE_GEOMETRIES[key];
-      if (entry) {
-        withLiveMap((map) => {
-          /* A later tap supersedes this one: never paint a stale
-             highlight for a row the reader has already left. */
-          if (focusedLineIdRef.current !== row.id) return;
-          try {
-            setFocusLine(map, key, entry);
-          } catch {
-            /* a failed highlight leaves the row emphasis as the cue */
-          }
-        });
-      }
+    if (painted && painted.legs.length > 0) {
+      withLiveMap((map) => {
+        /* A later tap supersedes this one: never paint a stale
+           highlight for a row the reader has already left. */
+        if (focusedLineIdRef.current !== row.id) return;
+        try {
+          setFocusSection(map, painted.legs);
+        } catch {
+          /* a failed highlight leaves the row emphasis as the cue */
+        }
+      });
     } else {
-      /* No single track to paint (JR埼京線, and 山手線 since the
-         loop split): the previous row's orange highlight must not
-         linger — the bar tap still changes the focused row. */
+      /* No track to paint (a row with no service link): the
+         previous row's orange highlight must not linger — the bar
+         tap still changes the focused row. */
       withLiveMap((map) => {
         if (focusedLineIdRef.current !== row.id) return;
         try {
@@ -5109,12 +5284,12 @@ function VisitedMapSection({
                 {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
               </span>
               <span>
-                路線 {riddenServiceCount.toLocaleString()} /{" "}
-                {JAPAN_LINE_TOTAL.toLocaleString()}（{lineProgressPct}%）
+                路線 {networkRiddenKmText} /{" "}
+                {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
               </span>
             </p>
             <p className="mt-1 text-xs text-[var(--dim)]">
-              路線数は乗った系統の数です。分母は全国の全路線（国土数値情報の路線単位・597）です
+              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,735.5km）で、区間が分からない記録は破線で描き、距離には数えません
             </p>
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
@@ -5145,13 +5320,20 @@ function VisitedMapSection({
                 <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-[#ea580c]" />
                 選択中
               </span>
+              <span className="flex items-center gap-1.5">
+                <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-dashed border-[#ea580c]" />
+                乗った区間（区間不明は破線）
+              </span>
             </div>
             <ConquestCharts
               municipalities={municipalities}
               prefectures={prefectures}
               totalVisited={totalVisited}
               riddenLines={riddenQuery.data?.lines ?? []}
-              riddenServiceCount={riddenServiceCount}
+              networkRiddenKm={networkRiddenKm}
+              completeServiceCount={completeServiceCount}
+              unpreparedLines={unpreparedLines}
+              operatorKm={lineCoverage.perOperatorKm}
               municipalityProgressPct={municipalityProgressPct}
               lineProgressPct={lineProgressPct}
               onOperatorSelect={focusLineFromOperator}
@@ -5468,6 +5650,7 @@ function VisitedMapSection({
         <RiddenLinesBlock
           focusedLineId={focusedLineId}
           linesExpanded={linesExpanded}
+          lineCoverage={lineCoverage}
           onToggleLines={() => setLinesExpanded((v) => !v)}
           onLineTap={focusRiddenLine}
           onLineDeleted={(id) => {
@@ -6109,6 +6292,7 @@ function SpotListMap({
 function RiddenLinesBlock({
   focusedLineId,
   linesExpanded,
+  lineCoverage,
   onToggleLines,
   onLineTap,
   onLineDeleted,
@@ -6124,6 +6308,10 @@ function RiddenLinesBlock({
      事業者別 bar tap must open the list before scrolling to its
      target row. */
   linesExpanded: boolean;
+  /* The stage-2 line coverage (owned by VisitedMapSection): each
+     row's ridden distance and completeness, and the painted legs
+     the block picker marks covered. */
+  lineCoverage: LineCoverage;
   onToggleLines: () => void;
   /* Row tap: fly the map to the line and highlight it (the delete
      and context-edit controls below are separate buttons carrying
@@ -6205,6 +6393,42 @@ function RiddenLinesBlock({
     onError: () => setLineContextMsg("行程の保存に失敗しました。もう一度お試しください。"),
   });
 
+  /* Block picker (stage 2): one toggle per master block of the
+     row's service. Toggling a block on adds it as a section
+     (addRiddenSection, with the block id so the toggle can find
+     it again); toggling off deletes that section. A block covered
+     by a bigger section (the row's primary section, or a section
+     spanning several blocks) shows checked but disabled — no
+     single section represents it, so it cannot be unticked on
+     its own. Full rides have nothing to pick: the whole service
+     is already covered. */
+  const [blockPickerLineId, setBlockPickerLineId] = useState<number | null>(null);
+  const [blockPickerError, setBlockPickerError] = useState<string | null>(null);
+  const addSectionMutation = useMutation({
+    mutationFn: async (args: {
+      riddenLineId: number;
+      fromStationId: string;
+      fromStationName: string;
+      toStationId: string;
+      toStationName: string;
+      direction: "inner" | "outer" | null;
+      blockId: string;
+    }) => await api.addRiddenSection(args),
+    onSuccess: () => {
+      setBlockPickerError(null);
+      invalidateLines();
+    },
+    onError: () => setBlockPickerError("区間の追加に失敗しました"),
+  });
+  const deleteSectionMutation = useMutation({
+    mutationFn: async (id: number) => await api.deleteRiddenSection({ id }),
+    onSuccess: () => {
+      setBlockPickerError(null);
+      invalidateLines();
+    },
+    onError: () => setBlockPickerError("区間の削除に失敗しました"),
+  });
+
   return (
     <div className="mt-8">
       <button
@@ -6248,6 +6472,50 @@ function RiddenLinesBlock({
           {lines.map((line) => {
             const editingLineContext = lineContextEditId === line.id;
             const rideLabel = riddenLineRideLabel(line);
+            const coverage = line.serviceId
+              ? lineCoverage.perService.get(line.serviceId)
+              : undefined;
+            /* The row's intervals (primary section + added
+               sections) for the block picker: which master blocks
+               this row covers whole. Endpoints the master cannot
+               resolve are skipped — the picker then simply shows
+               fewer blocks covered. */
+            const rowIntervals: RideInterval[] = [];
+            if (line.serviceId) {
+              const pushInterval = (
+                fromId: string,
+                toId: string,
+                direction: "inner" | "outer" | null,
+              ) => {
+                const from = stationRefById(fromId);
+                const to = stationRefById(toId);
+                if (from && to) {
+                  rowIntervals.push({
+                    serviceId: line.serviceId!,
+                    from,
+                    to,
+                    direction,
+                  });
+                }
+              };
+              if (
+                line.rideState === "partial" &&
+                line.fromStationId &&
+                line.toStationId
+              ) {
+                pushInterval(line.fromStationId, line.toStationId, null);
+              }
+              for (const s of line.sections ?? []) {
+                pushInterval(s.fromStationId, s.toStationId, s.direction);
+              }
+            }
+            const blocks = line.serviceId
+              ? blocksForService(line.serviceId)
+              : [];
+            const coveredBlocks = line.serviceId
+              ? coveredBlockIds(line.serviceId, rowIntervals)
+              : new Set<string>();
+            const pickerOpen = blockPickerLineId === line.id;
             return (
             <li
               key={line.id}
@@ -6280,6 +6548,18 @@ function RiddenLinesBlock({
                   <span className="block truncate text-sm font-medium">{riddenLineDisplayName(line)}</span>
                   {rideLabel && (
                     <span className="block text-xs text-[var(--dim)]">{rideLabel}</span>
+                  )}
+                  {coverage && line.rideState !== "unknown" && (
+                    <span className="block text-xs text-[var(--dim)]">
+                      {coverage.riddenKm.toLocaleString(undefined, {
+                        maximumFractionDigits: 1,
+                      })}
+                      km /{" "}
+                      {coverage.totalKm.toLocaleString(undefined, {
+                        maximumFractionDigits: 1,
+                      })}
+                      km{coverage.complete ? " ・ 完乗" : ""}
+                    </span>
                   )}
                   {line.note && (
                     <span className="block text-xs text-[var(--dim)]">{line.note}</span>
@@ -6384,6 +6664,76 @@ function RiddenLinesBlock({
                   </div>
                   {lineContextMsg && (
                     <p className="mt-1 text-xs text-[var(--signal)]">{lineContextMsg}</p>
+                  )}
+                </div>
+              )}
+              {/* Block picker (stage 2): the master blocks of this
+                  service, one toggle each. Full rides have nothing
+                  to pick; a row with no service link has no blocks
+                  to offer. */}
+              {line.serviceId && line.rideState !== "full" && blocks.length > 0 && (
+                <div data-map-no-fly="" className="mt-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setBlockPickerLineId(pickerOpen ? null : line.id)
+                    }
+                    aria-expanded={pickerOpen}
+                    className="rounded-lg px-2 py-1 text-xs text-[var(--dim)] underline"
+                  >
+                    区間を選ぶ{pickerOpen ? "（閉じる）" : ""}
+                  </button>
+                  {pickerOpen && (
+                    <ul className="mt-1 space-y-1">
+                      {blocks.map((block) => {
+                        const covered = coveredBlocks.has(block.id);
+                        const exactSection = (line.sections ?? []).find(
+                          (s) => s.blockId === block.id,
+                        );
+                        /* Covered by a bigger section (no exact
+                           section for this block): checked but
+                           disabled — unticking it alone would mean
+                           splitting that section, which is stage 3. */
+                        const disabled = covered && !exactSection;
+                        const busy =
+                          addSectionMutation.isPending ||
+                          deleteSectionMutation.isPending;
+                        return (
+                          <li key={block.id} className="flex items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              id={`block-${line.id}-${block.id}`}
+                              checked={covered}
+                              disabled={disabled || busy}
+                              onChange={() => {
+                                if (covered) {
+                                  if (exactSection) {
+                                    deleteSectionMutation.mutate(exactSection.id);
+                                  }
+                                } else {
+                                  addSectionMutation.mutate({
+                                    riddenLineId: line.id,
+                                    fromStationId: block.from.id,
+                                    fromStationName: block.from.name,
+                                    toStationId: block.to.id,
+                                    toStationName: block.to.name,
+                                    direction: block.direction ?? null,
+                                    blockId: block.id,
+                                  });
+                                }
+                              }}
+                            />
+                            <label htmlFor={`block-${line.id}-${block.id}`}>
+                              {block.from.name}→{block.to.name}
+                              {disabled ? "（区間の一部として記録済み）" : ""}
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {blockPickerError && pickerOpen && (
+                    <p className="mt-1 text-xs text-[var(--signal)]">{blockPickerError}</p>
                   )}
                 </div>
               )}
