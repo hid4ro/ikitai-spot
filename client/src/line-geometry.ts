@@ -645,15 +645,20 @@ export function clipServicePath(
   if (!fromArc || !toArc) return null;
   /* Snap to the path ends: a station's recorded point sits off
      the track, so its nearest point on the path can land a few
-     dozen metres past the path's own start (or short of its
+     hundred metres past the path's own start (or short of its
      end) — without the snap, blocks that tile a service would
-     leave slivers uncovered at the ends and never complete it. */
+     leave slivers uncovered at the ends and never complete it.
+     The snap reaches the documented maximum station offset
+     (APPROXIMATE_PROJECTION_M, 300 m): the old 0.1 km snap left
+     0.12–0.17 km slivers on three services (stage 2 review,
+     H-2), so selecting every block never completed them. */
+  const END_SNAP_KM = 0.3;
   let fromKm = fromArc.arcKm;
   let toKm = toArc.arcKm;
-  if (fromKm < 0.1) fromKm = 0;
-  if (fromKm > oriented.totalKm - 0.1) fromKm = oriented.totalKm;
-  if (toKm < 0.1) toKm = 0;
-  if (toKm > oriented.totalKm - 0.1) toKm = oriented.totalKm;
+  if (fromKm < END_SNAP_KM) fromKm = 0;
+  if (fromKm > oriented.totalKm - END_SNAP_KM) fromKm = oriented.totalKm;
+  if (toKm < END_SNAP_KM) toKm = 0;
+  if (toKm > oriented.totalKm - END_SNAP_KM) toKm = oriented.totalKm;
   let startKm = fromKm;
   let endKm = toKm;
   if (isLoop && direction) {

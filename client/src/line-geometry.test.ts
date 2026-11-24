@@ -7,6 +7,7 @@
    regression shows up as a wrong distance, not a wrong map. */
 import { describe, expect, test } from "bun:test";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
+import { JAPAN_LINE_TOTAL_KM, LINE_TOTAL_KM } from "./line-totals";
 import {
   buildLineGraph,
   buildServicePath,
@@ -26,6 +27,7 @@ import {
   type ServicePath,
 } from "./line-geometry";
 import {
+  blocksForService,
   MIGRATED_RIDES,
   SERVICE_MASTER_VERSION,
   serviceById,
@@ -185,6 +187,27 @@ describe("real asset: service totals against railway kilometres", () => {
     expect(saikyo.totalKm).toBeGreaterThan(36.9);
     expect(saikyo.totalKm).toBeLessThan(60);
     expect(saikyo.approximate).toBe(true); /* the freight stand-in */
+  });
+
+  test("the line totals sum every separated component (stage 2 review, M-1)", () => {
+    /* The separated pieces are genuine parts of the same formal
+       line: the totals now land within a few percent of the
+       published lengths, where the old largest-only rule dropped
+       the second half (Chikuhi 42.4, Kagoshima 230.5). */
+    const cases: [string, number][] = [
+      ["筑肥線|九州旅客鉄道", 68.3],
+      ["鹿児島線|九州旅客鉄道", 281.9],
+      ["信越線|東日本旅客鉄道", 181.6],
+    ];
+    for (const [key, publishedKm] of cases) {
+      expect(LINE_TOTAL_KM[key]).toBeGreaterThan(publishedKm * 0.95);
+      expect(LINE_TOTAL_KM[key]).toBeLessThan(publishedKm * 1.05);
+    }
+    /* The Nemuro Line's shape is still missing a stretch (its
+       total stays well short of the published 443.8 km), but the
+       second piece is counted now: 359.7, not the old 305.1. */
+    expect(LINE_TOTAL_KM["根室線|北海道旅客鉄道"]).toBeGreaterThan(350);
+    expect(JAPAN_LINE_TOTAL_KM).toBeCloseTo(26903.9, 0);
   });
 });
 
@@ -348,6 +371,36 @@ describe("coverage: dedup and per-service isolation", () => {
     const coverage = coverageFor(intervals);
     expect(coverage.perService.get("keio")!.complete).toBe(true);
     expect(coverage.completeServiceIds).toContain("keio");
+  });
+
+  test("selecting every block completes the service (stage 2 review, H-2)", () => {
+    /* The block picker tiles a service: picking all its blocks
+       must complete it. Before the end-snap fix, three services
+       fell short by 0.12–0.17 km — a clip ending at a terminus
+       station whose recorded point sits up to ~300 m off the
+       shape, and the 0.1 km snap did not reach it. */
+    for (const serviceId of [
+      "jr-chuo-rapid",
+      "jr-sobu-rapid",
+      "jr-sobu-local",
+      "jr-saikyo",
+      "yamanote",
+      "keio",
+      "jr-musashino",
+      "hokuso",
+      "rinkai",
+    ]) {
+      const intervals = blocksForService(serviceId).map((block) => ({
+        serviceId,
+        from: block.from,
+        to: block.to,
+        direction: block.direction,
+      }));
+      const coverage = coverageFor(new Map([[serviceId, intervals]]));
+      const service = coverage.perService.get(serviceId)!;
+      expect(service.complete).toBe(true);
+      expect(service.riddenKm).toBeCloseTo(service.totalKm, 1);
+    }
   });
 
   test("the unprepared-lines note counts the lines the master does not cover", () => {

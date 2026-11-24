@@ -6,7 +6,14 @@
 // dashboard, it just cannot join proximity checks.
 // `settings` is a single-row table (id = 1) holding the alert radius.
 
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import {
+  integer,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 export const spots = sqliteTable("spots", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -117,19 +124,35 @@ export const riddenLines = sqliteTable("ridden_lines", {
 // the section is exactly one block — the client uses it to mark the
 // block covered. Rows are deleted with their ledger row (the delete
 // action removes them explicitly).
-export const riddenLineSections = sqliteTable("ridden_line_sections", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  riddenLineId: integer("ridden_line_id").notNull(),
-  fromStationId: text("from_station_id").notNull(),
-  fromStationName: text("from_station_name"),
-  toStationId: text("to_station_id").notNull(),
-  toStationName: text("to_station_name"),
-  direction: text("direction"),
-  blockId: text("block_id"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+export const riddenLineSections = sqliteTable(
+  "ridden_line_sections",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    riddenLineId: integer("ridden_line_id").notNull(),
+    fromStationId: text("from_station_id").notNull(),
+    fromStationName: text("from_station_name"),
+    toStationId: text("to_station_id").notNull(),
+    toStationName: text("to_station_name"),
+    direction: text("direction"),
+    blockId: text("block_id"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    /* One section per station pair per row (stage 2 review, H-3):
+       the handler checks first, but two calls at once could both
+       pass the check — the index is the real guard. direction is
+       nullable, so COALESCE it: two sections with no direction
+       are the same section. */
+    uniqueIndex("ridden_line_sections_unique_section").on(
+      t.riddenLineId,
+      t.fromStationId,
+      t.toStationId,
+      sql`COALESCE(${t.direction}, '')`,
+    ),
+  ],
+);
 
 export const settings = sqliteTable("settings", {
   id: integer("id").primaryKey(),

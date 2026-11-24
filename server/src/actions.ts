@@ -1845,7 +1845,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it.",
+      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -1924,33 +1924,54 @@ export const Actions = {
         args.toStationName?.trim() ||
         stationRefById(toStationId)?.name ||
         null;
-      const existing = await db
-        .select()
-        .from(schema.riddenLineSections)
-        .where(
-          eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
+      /* The same section twice returns the existing row instead of
+         duplicating it. The check below stops a sequential double
+         add; the unique index on the table (migration 0014) is
+         what stops two calls racing past the check together — the
+         insert then fails and the winner's row is returned. */
+      const findDuplicate = async () => {
+        const existing = await db
+          .select()
+          .from(schema.riddenLineSections)
+          .where(
+            eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
+          );
+        return existing.find(
+          (s) =>
+            s.fromStationId === fromStationId &&
+            s.toStationId === toStationId &&
+            (s.direction ?? null) === direction,
         );
-      const duplicate = existing.find(
-        (s) =>
-          s.fromStationId === fromStationId &&
-          s.toStationId === toStationId &&
-          (s.direction ?? null) === direction,
-      );
+      };
+      const duplicate = await findDuplicate();
       if (duplicate) {
         return { created: false, id: duplicate.id };
       }
-      const inserted = await db
-        .insert(schema.riddenLineSections)
-        .values({
-          riddenLineId: args.riddenLineId,
-          fromStationId,
-          fromStationName: fromName,
-          toStationId,
-          toStationName: toName,
-          direction,
-          blockId,
-        })
-        .returning({ id: schema.riddenLineSections.id });
+      let insertedId: number | null;
+      try {
+        const inserted = await db
+          .insert(schema.riddenLineSections)
+          .values({
+            riddenLineId: args.riddenLineId,
+            fromStationId,
+            fromStationName: fromName,
+            toStationId,
+            toStationName: toName,
+            direction,
+            blockId,
+          })
+          .returning({ id: schema.riddenLineSections.id });
+        insertedId = inserted[0]?.id ?? null;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("UNIQUE constraint failed")
+        ) {
+          const winner = await findDuplicate();
+          if (winner) return { created: false, id: winner.id };
+        }
+        throw error;
+      }
       // An unknown row that gains a section now pins one down.
       if (normalizeRideState(line.rideState) === "unknown") {
         await db
@@ -1959,7 +1980,7 @@ export const Actions = {
           .where(eq(schema.riddenLines.id, args.riddenLineId));
       }
       ctx.invalidateQueries();
-      return { created: true, id: inserted[0]?.id ?? null };
+      return { created: true, id: insertedId };
     },
   }),
 

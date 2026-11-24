@@ -984,7 +984,7 @@ function ProgressDonut({
   color: string;
   doneLabel: string;
   /* Appended to both numbers in the hole (the 路線 donut passes
-     "km": 123.4km / 26,735.5km). Values keep one decimal at most,
+     "km": 123.4km / 26,903.9km). Values keep one decimal at most,
      so a distance never shows a spurious long fraction. */
   unit?: string;
 }) {
@@ -1175,7 +1175,7 @@ function ConquestCharts({
   riddenLines: readonly RiddenLine[];
   /* The 路線 donut's numerator (stage 2): the deduped ridden
      distance in km, against every formal line in Japan
-     (26,735.5 km). The same number the map paints, so the donut
+     (26,903.9 km). The same number the map paints, so the donut
      and the map always agree. */
   networkRiddenKm: number;
   /* Services ridden end to end, and N02 lines the master does
@@ -3124,7 +3124,7 @@ function VisitedMapSection({
   );
 
   /* Progress: the main metric is the deduped ridden distance
-     against every formal line in Japan (26,735.5 km). The
+     against every formal line in Japan (26,903.9 km). The
      numerator is the painted total, so the donut, the header,
      and the map always agree. The count of complete services
      and the unprepared-lines note ride alongside it. */
@@ -5167,7 +5167,7 @@ function VisitedMapSection({
               </span>
             </p>
             <p className="mt-1 text-xs text-[var(--dim)]">
-              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,735.5km）で、区間が分からない記録は破線で描き、距離には数えません
+              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
             </p>
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
@@ -6421,6 +6421,11 @@ function RiddenLinesBlock({
                         maximumFractionDigits: 1,
                       })}
                       km{coverage.complete ? " ・ 完乗" : ""}
+                    </span>
+                  )}
+                  {coverage && line.rideState === "unknown" && (
+                    <span className="block text-xs text-[var(--dim)]">
+                      距離不明（区間が分からないため）
                     </span>
                   )}
                   {line.note && (
