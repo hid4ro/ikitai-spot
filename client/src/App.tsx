@@ -6522,19 +6522,43 @@ export function App() {
 
   /* Subtask 450 — first-render stagger for the spot list (design
      memo: stagger only the first display's top rows, to lead the
-     eye). Fires once, the first time the スポット tab shows with
-     data; after 800ms the class is gone, so later polls, paging,
-     and filter changes render instantly with no replay. Reduced
-     motion removes the travel in theme.css. */
-  const [listStagger, setListStagger] = useState(false);
-  const listStaggerDoneRef = useRef(false);
+     eye). Round-1 re-review fix: the first non-empty display pins
+     its top six row ids, so paging, filtering, and tab changes
+     never re-animate; the view key (tab / page / filters) ends the
+     stagger as soon as it changes, and the 800ms end timer lives
+     in its own effect, independent of list-data updates — a data
+     change inside the window used to clear the timer while the
+     class stayed on, replaying the stagger on every later
+     display. Reduced motion removes the travel in theme.css. */
+  const [staggerIds, setStaggerIds] = useState<number[] | null>(null);
+  const staggerArmedRef = useRef(false);
+  const staggerKey = `${tab}|${page}|${filter}|${listFilter}|${tagFilter}|${search}|${memoOnly}`;
+  const staggerKeyRef = useRef(staggerKey);
+  /* Arm once: the first non-empty スポット list pins its top six
+     ids. Later data updates (polls, edits) never re-arm it. */
   useEffect(() => {
-    if (tab !== "spots" || !spotsQuery.data || listStaggerDoneRef.current) return;
-    listStaggerDoneRef.current = true;
-    setListStagger(true);
-    const t = window.setTimeout(() => setListStagger(false), 800);
+    if (tab !== "spots" || !spotsQuery.data || staggerArmedRef.current) return;
+    const ids = (spotsQuery.data.spots ?? []).slice(0, 6).map((s) => s.id);
+    if (ids.length === 0) return;
+    staggerArmedRef.current = true;
+    staggerKeyRef.current = staggerKey;
+    setStaggerIds(ids);
+  }, [tab, spotsQuery.data, staggerKey]);
+  /* End the stagger when the view changes (page, filter, tab) —
+     the pinned ids belong to the first display only. */
+  useEffect(() => {
+    if (!staggerArmedRef.current) return;
+    if (staggerKey === staggerKeyRef.current) return;
+    setStaggerIds(null);
+  }, [staggerKey]);
+  /* End timer, independent of list-data updates: its only
+     dependency is the pinned ids, so a refresh inside the window
+     cannot cancel the timer while the class stays on. */
+  useEffect(() => {
+    if (staggerIds === null) return;
+    const t = window.setTimeout(() => setStaggerIds(null), 800);
     return () => window.clearTimeout(t);
-  }, [tab, spotsQuery.data]);
+  }, [staggerIds]);
 
   const invalidate = () => {
     /* Stamp the edit: fetches that started before this moment must
@@ -6970,16 +6994,22 @@ export function App() {
           side by side (phase 4). The width is a plain class switch
           on the same element, and nothing remounts on resize or
           theme change. On the その他 tab the same <main> also
-          becomes the two-column grid at xl; the sections carry the
-          placement classes, so below xl they stack in the exact
+          becomes the two-column grid at xl; the sections (and the
+          right-column wrapper) carry the placement classes, so below
+          xl they stack in the exact
           previous reading order (dashboard → add/import → settings),
           with the tab's top padding moved onto <main> so the two
           columns start at the same height. Subtask 450: from 1536px
           up the column widens again (2xl:max-w-7xl, 1280px of
           content) so the dashboard's stats strip can span the full
           width and the スポット tab can run its controls as a left
-          rail beside the list; below 2xl nothing changes. */}
-      <main className={`mx-auto w-full max-w-3xl px-4 pb-28 xl:max-w-5xl 2xl:max-w-7xl ${tab === "more" ? "pt-5 xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6" : ""}`}>
+          rail beside the list; below 2xl nothing changes. Round-1
+          re-review fix: the 2xl widening applies to the スポット
+          and その他 tabs only — on the map tab the wider column
+          also stretched the fallback image (385px → 545px tall)
+          and pushed the 「地図を再読み込み」 button off-screen at
+          1600×600, so the map tab keeps the xl width. */}
+      <main className={`mx-auto w-full max-w-3xl px-4 pb-28 xl:max-w-5xl ${tab === "spots" || tab === "more" ? "2xl:max-w-7xl" : ""} ${tab === "more" ? "pt-5 xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6" : ""}`}>
         {/* ===== dashboard (その他 tab) =====
             Subtask 450: the stats + progress strip spans the full
             width at xl (col 1 / -1), so the five stat cells get
@@ -7065,10 +7095,10 @@ export function App() {
             the stats + progress strip above can span the full width
             at xl: the two sections stay adjacent in DOM order, so
             below xl the reading order is unchanged (stats → progress
-            → lists → add/import → settings). Each section keeps its
-            own {tab === "more"} conditional, as the add/import and
-            settings sections do — two sibling sections cannot share
-            one parenthesised conditional. */}
+            → lists → add/import → settings). The リスト別 section
+            keeps its own {tab === "more"} conditional; the add/import
+            and settings sections share one, inside their right-column
+            wrapper (round-1 re-review fix). */}
         {tab === "more" && (
         <section aria-label="リスト別" className="xl:col-start-1 xl:row-start-2">
           {/* リスト別 loading: a plain 読み込み中… line (plus the
@@ -7199,7 +7229,12 @@ export function App() {
               this wrapper is a plain div and everything stacks
               exactly as before; only classes arrange it, so the
               inputs never remount and focus, text, filters, and page
-              survive resizes. */}
+              survive resizes. Round-1 re-review fix: the rail is no
+              longer sticky — with 34 tags it runs taller than the
+              viewport, and the sticky pin left the lower tags
+              unreachable even after 2500px of page scroll at
+              1536×600; as a normal in-flow column the whole rail
+              scrolls with the page. */}
           <div className="2xl:grid 2xl:grid-cols-[20rem_minmax(0,1fr)] 2xl:items-start 2xl:gap-x-6">
           {/* Management controls under the map, tidied into one
               compact stack (DOM order stays search → visit state →
@@ -7212,7 +7247,7 @@ export function App() {
               inline with its chips. Only classes arrange them — the
               inputs never remount, so focus, text, filters, and page
               survive resizes. */}
-          <div className="mt-3 space-y-2 2xl:col-start-1 2xl:row-span-2 2xl:sticky 2xl:top-[calc(min(40dvh,20rem)_+_1.25rem)]">
+          <div className="mt-3 space-y-2 2xl:col-start-1 2xl:row-span-2">
             <div>
               <label htmlFor="spot-search" className="sr-only">スポットを検索</label>
               <input
@@ -7448,15 +7483,20 @@ export function App() {
           <ul ref={listRef} className="mt-3 space-y-2">
             {pageSpots.map((spot, index) => {
               const isSelected = selectedId === spot.id;
+              /* Round-1 re-review fix: animate only the pinned
+                 first-display ids, at their pinned position — a
+                 row keeps its delay even if its page index shifts,
+                 and rows outside the pinned set never animate. */
+              const staggerIndex = staggerIds === null ? -1 : staggerIds.indexOf(spot.id);
               return (
                 <li
                   key={spot.id}
-                  style={listStagger && index < 6 ? { animationDelay: `${index * 30}ms` } : undefined}
+                  style={staggerIndex >= 0 ? { animationDelay: `${staggerIndex * 30}ms` } : undefined}
                   className={`rounded-[var(--radius)] p-3 ${
                     isSelected
                       ? "bg-[var(--surface-alt)] shadow-[inset_3px_0_0_var(--accent)]"
                       : "bg-[var(--surface)]"
-                  }${listStagger && index < 6 ? " row-stagger" : ""}`}
+                  }${staggerIndex >= 0 ? " row-stagger" : ""}`}
                 >
                   {/* Compact row: name, list chip, visit state, memo
                       excerpt, address, tags. The row itself is the
@@ -7736,9 +7776,18 @@ export function App() {
 
         )}
 
-        {/* ===== add / import (その他 tab) ===== */}
+        {/* ===== add / import + settings (その他 tab) =====
+            Round-1 re-review fix: the two right-column sections
+            share one wrapper in grid row 2, so expanding the
+            リスト別 block (row 2, left column) can no longer push
+            設定 down — the wrapper's children stack from its top
+            no matter how tall the row grows. Below xl the wrapper
+            is a plain div and the sections stack in the previous
+            reading order (dashboard → lists → add/import →
+            settings). */}
         {tab === "more" && (
-        <section aria-label="スポットの追加と取り込み" className="mt-8 xl:col-start-2 xl:row-start-2 xl:mt-0">
+        <div className="mt-8 xl:col-start-2 xl:row-start-2 xl:mt-0">
+        <section aria-label="スポットの追加と取り込み">
           <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">追加・取り込み</h2>
           <div className="mt-3 flex gap-2">
             <button
@@ -7848,11 +7897,7 @@ export function App() {
           )}
         </section>
 
-        )}
-
-        {/* ===== settings (その他 tab) ===== */}
-        {tab === "more" && (
-        <section aria-label="設定" className="mt-8 xl:col-start-2 xl:row-start-3">
+        <section aria-label="設定" className="mt-8">
           <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">設定</h2>
           {/* 表示テーマ (phase 5): a manual override for the page's
               light / dark tokens. Switching only flips the
@@ -7997,6 +8042,7 @@ export function App() {
             </div>
           </div>
         </section>
+        </div>
         )}
       </main>
 
