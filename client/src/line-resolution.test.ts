@@ -6,6 +6,7 @@
    Run with: bun test client/src/line-resolution.test.ts */
 import { describe, expect, test } from "bun:test";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
+import { serviceByLedgerName } from "../../shared/service-master";
 import {
   buildLineKeyByName,
   countRiddenByOperator,
@@ -21,7 +22,10 @@ const resolveKeys = (ledgerName: string): string[] =>
 
 /* The nine rows of the live ridden-lines ledger (listRiddenLines,
    ids 1, 3–10 — id 2 was deleted; 西武池袋線 is not a live row)
-   and the asset key each must resolve to. */
+   and the asset key each must resolve to. 山手線 has no single key
+   since stage 1's loop split (review finding 4): it spans 山手線・
+   東北線・東海道線, so it resolves like JR埼京線 — via its
+   expansion, not a single key. */
 const LEDGER_ROWS: [string, string | null][] = [
   ["JR武蔵野線", "武蔵野線|東日本旅客鉄道"],
   ["北総線", "北総線|北総鉄道"],
@@ -31,7 +35,7 @@ const LEDGER_ROWS: [string, string | null][] = [
   ["京王線", "京王線|京王電鉄"],
   ["JR埼京線", null],
   ["りんかい線", "臨海副都心線|東京臨海高速鉄道"],
-  ["山手線", "山手線|東日本旅客鉄道"],
+  ["山手線", null],
 ];
 
 describe("the nine ledger rows", () => {
@@ -41,11 +45,11 @@ describe("the nine ledger rows", () => {
     });
   }
 
-  test("resolve to seven distinct keys （総武快速・総武本線 share 総武線；埼京線 has none)", () => {
+  test("resolve to six distinct keys （総武快速・総武本線 share 総武線；埼京線・山手線 have none)", () => {
     const keys = new Set(
       LEDGER_ROWS.map(([name]) => resolve(name)).filter((k) => k !== null),
     );
-    expect(keys.size).toBe(7);
+    expect(keys.size).toBe(6);
   });
 });
 
@@ -65,7 +69,19 @@ describe("multi-line expansion (JR埼京線）", () => {
     expect(resolveKeys("りんかい線")).toEqual([
       "臨海副都心線|東京臨海高速鉄道",
     ]);
-    expect(resolveKeys("山手線")).toEqual(["山手線|東日本旅客鉄道"]);
+  });
+
+  test("山手線 expands to its three loop keys, in running order", () => {
+    // The loop split (review finding 4): 山手線 品川〜田端, 東北線
+    // 田端〜東京, 東海道線 東京〜品川. No single key stands for
+    // the whole loop, so the single-key resolution is null and the
+    // row is framed by its ridden section from stage 2.
+    expect(resolve("山手線")).toBeNull();
+    expect(resolveKeys("山手線")).toEqual([
+      "山手線|東日本旅客鉄道",
+      "東北線|東日本旅客鉄道",
+      "東海道線|東日本旅客鉄道",
+    ]);
   });
 
   test("山手線 resolves via the master (the name is ambiguous in the asset)", () => {
@@ -73,7 +89,11 @@ describe("multi-line expansion (JR埼京線）", () => {
     // buildLineKeyByName excludes it and only the master can
     // resolve it to JR East's loop.
     expect(keyByName.has("山手線")).toBe(false);
-    expect(resolve("山手線")).toBe("山手線|東日本旅客鉄道");
+    expect(resolveKeys("山手線")).toEqual([
+      "山手線|東日本旅客鉄道",
+      "東北線|東日本旅客鉄道",
+      "東海道線|東日本旅客鉄道",
+    ]);
   });
 
   test("りんかい線 resolves to its official name 臨海副都心線", () => {
@@ -90,29 +110,34 @@ describe("multi-line expansion (JR埼京線）", () => {
   });
 });
 
-/* The 事業者別 chart counts ledger ROWS, not distinct resolved
-   keys: JR総武快速線 and JR総武本線 are two rides on the one asset
-   line 「総武線」, and both must show. All nine live ledger rows. */
+/* The 事業者別 chart counts DISTINCT SERVICES, not ledger rows
+   and not distinct resolved keys: JR総武快速線 and JR総武本線 are
+   two rides on two services that share the one asset line 「総武線」,
+   and both must show — while two spellings of ONE service （「JR中央線」
+   and 「JR中央線（快速）」) count once. All nine live ledger rows. */
 describe("per-operator counts", () => {
-  const ALL_LEDGER_NAMES = LEDGER_ROWS.map(([name]) => name);
+  const ALL_LEDGER_ROWS = LEDGER_ROWS.map(([name]) => ({
+    name,
+    serviceId: serviceByLedgerName(name)?.id ?? null,
+  }));
   const counts = countRiddenByOperator(
-    ALL_LEDGER_NAMES,
+    ALL_LEDGER_ROWS,
     RIDDEN_LINE_GEOMETRIES,
     keyByName,
   );
 
   test("総武快速線 and 総武本線 count as two JR East rides", () => {
-    // 武蔵野線・中央線・総武快速線・総武本線・山手線・埼京線 = 6 rows.
+    // 武蔵野線・中央線・総武快速線・総武本線・山手線・埼京線 = 6 services.
     // Counting distinct resolved keys instead would give 4 — the
     // collapse this counting rule exists to prevent.
     expect(counts.get("東日本旅客鉄道")).toBe(6);
     const distinctKeys = new Set(
-      ALL_LEDGER_NAMES.map((n) => resolve(n)).filter((k) => k !== null),
+      ALL_LEDGER_ROWS.map((r) => resolve(r.name)).filter((k) => k !== null),
     );
-    expect(distinctKeys.size).toBe(7);
+    expect(distinctKeys.size).toBe(6);
   });
 
-  test("every operator with a ridden row appears once per ride", () => {
+  test("every operator with a ridden row appears once per service", () => {
     expect(counts.get("北総鉄道")).toBe(1);
     expect(counts.get("京王電鉄")).toBe(1);
     expect(counts.get("東京臨海高速鉄道")).toBe(1);
@@ -122,6 +147,44 @@ describe("per-operator counts", () => {
   test("all nine rows count for an operator now (埼京線 included)", () => {
     const total = [...counts.values()].reduce((a, b) => a + b, 0);
     expect(total).toBe(9);
+  });
+
+  test("two spellings of one service count once (review finding 5)", () => {
+    // 「JR中央線」 is the rapid service's alias: both rows are
+    // jr-chuo-rapid, so JR East gains one service, not two.
+    const aliasCounts = countRiddenByOperator(
+      [
+        { name: "JR中央線", serviceId: "jr-chuo-rapid" },
+        { name: "JR中央線（快速）", serviceId: "jr-chuo-rapid" },
+      ],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(aliasCounts.get("東日本旅客鉄道")).toBe(1);
+    // The same for りんかい線 under its formal name: both rows are
+    // rinkai, so 東京臨海高速鉄道 stays at one — the 2/1 the
+    // review reproduced is gone.
+    const rinkaiCounts = countRiddenByOperator(
+      [
+        { name: "りんかい線", serviceId: "rinkai" },
+        { name: "臨海副都心線", serviceId: "rinkai" },
+      ],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(rinkaiCounts.get("東京臨海高速鉄道")).toBe(1);
+  });
+
+  test("a saved service_id wins over the recorded name", () => {
+    // A row recorded as 「臨海副都心線」 with no saved id still
+    // resolves through the master's alias; with a saved id it
+    // resolves from the id even if the name were mistyped.
+    const byName = countRiddenByOperator(
+      [{ name: "臨海副都心線", serviceId: null }],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(byName.get("東京臨海高速鉄道")).toBe(1);
   });
 });
 

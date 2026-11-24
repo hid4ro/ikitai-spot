@@ -14,8 +14,8 @@ import {
 } from "./line-focus";
 
 const keyByName = buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
-const operatorOf = (name: string) =>
-  operatorOfLine(name, RIDDEN_LINE_GEOMETRIES, keyByName);
+const operatorOf = (name: string, serviceId?: string | null) =>
+  operatorOfLine(name, RIDDEN_LINE_GEOMETRIES, keyByName, serviceId);
 
 /* The nine rows of the live ridden-lines ledger (listRiddenLines,
    ids 1, 3–10), in ledger order. */
@@ -41,9 +41,19 @@ describe("operatorOfLine", () => {
     expect(operatorOf("山手線")).toBe("東日本旅客鉄道");
     /* りんかい線 resolves to its official name 臨海副都心線. */
     expect(operatorOf("りんかい線")).toBe("東京臨海高速鉄道");
+    /* The formal name is the same service's alias in the master. */
+    expect(operatorOf("臨海副都心線")).toBe("東京臨海高速鉄道");
     /* JR埼京線 belongs to JR East via the master, even though it
        has no single asset line. */
     expect(operatorOf("JR埼京線")).toBe("東日本旅客鉄道");
+  });
+
+  test("a saved service_id answers even when the name would not", () => {
+    // A row saved as rinkai but recorded under a spelling the
+    // master does not know still belongs to its saved service.
+    expect(operatorOf("りんかい線（仮）", "rinkai")).toBe(
+      "東京臨海高速鉄道",
+    );
   });
 
   test("an unknown name belongs to no operator", () => {
@@ -124,9 +134,10 @@ describe("lineGeometryBounds (the row-tap camera target)", () => {
 
   test("every single-key ledger line has a usable frame", () => {
     for (const row of LEDGER_ROWS) {
-      // JR埼京線 has no single key (it expands to four lines);
-      // stage 2 frames its ridden section instead.
-      if (row.name === "JR埼京線") continue;
+      // JR埼京線 has no single key (it expands to four lines) and
+      // 山手線 none either since the loop split (three keys);
+      // stage 2 frames their ridden sections instead.
+      if (row.name === "JR埼京線" || row.name === "山手線") continue;
       const key = resolveRiddenLineKey(row.name, RIDDEN_LINE_GEOMETRIES, keyByName);
       expect(key).not.toBeNull();
       const entry = key ? RIDDEN_LINE_GEOMETRIES[key] : undefined;

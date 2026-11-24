@@ -51,6 +51,10 @@ export type ServiceSegment = {
      than the line itself — any distance drawn from it is an
      approximation, and the segment must be recorded as such. */
   approximate?: boolean;
+  /* Which side of a loop line this segment runs on ("inner" =
+     内回り, "outer" = 外回り). Only loop services carry it; stage 2
+     uses it to tell which side of the loop a ride took. */
+  direction?: "inner" | "outer";
   note?: string;
 };
 
@@ -129,6 +133,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         formalLineName: "中央線",
         formalLineKey: "中央線|東日本旅客鉄道",
         from: { id: "003766", name: "東京" },
+        to: { id: "003677", name: "神田" },
+        approximate: true,
+        note:
+          "N02の中央線形状は神田で途切れる（形状の東端は神田付近で、東京駅から約1.1km）。東京〜神田は運行区間として明示するが、N02に形状が無いため描画・距離は神田以西の形状に限る（近似）。神田のグループコード003677はN02の（神田, 中央線）行で確認済み。",
+      },
+      {
+        formalLineName: "中央線",
+        formalLineKey: "中央線|東日本旅客鉄道",
+        from: { id: "003677", name: "神田" },
         to: { id: "004029", name: "高尾" },
         note:
           "快速の運行範囲は東京〜高尾。N02の中央線単位はさらに先（塩尻方面）まで延びるが、快速としてはここまで。なおN02の駅ポイントに（東京, 中央線）の行は無い（東京駅のグループコード003766は他のJR線の行で確認済み）。駅IDは物理駅のコードであり、中央線が東京駅に発着することに変わりはない。",
@@ -233,7 +246,11 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
   {
     id: "rinkai",
     displayName: "りんかい線",
-    ledgerNames: ["りんかい線"],
+    /* The formal name 臨海副都心線 is a ledger spelling too — a row
+       recorded under it is the same service, so it must link to
+       this entry (and count once with りんかい線) rather than
+       resolving as a separate line. */
+    ledgerNames: ["りんかい線", "臨海副都心線"],
     operator: "東京臨海高速鉄道",
     segments: [
       {
@@ -257,13 +274,31 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         formalLineName: "山手線",
         formalLineKey: "山手線|東日本旅客鉄道",
         from: { id: "004095", name: "品川" },
+        to: { id: "003335", name: "田端" },
+        direction: "outer",
+        note:
+          "環状線の外回り側（品川→大崎→渋谷→新宿→池袋→田端）。田端のグループコード003335はN02の（田端, 山手線）行で確認済み。",
+      },
+      {
+        formalLineName: "東北線",
+        formalLineKey: "東北線|東日本旅客鉄道",
+        from: { id: "003335", name: "田端" },
+        to: { id: "003766", name: "東京" },
+        direction: "outer",
+        note: "通称・東北本線。N02の路線単位名は東北線。",
+      },
+      {
+        formalLineName: "東海道線",
+        formalLineKey: "東海道線|東日本旅客鉄道",
+        from: { id: "003766", name: "東京" },
         to: { id: "004095", name: "品川" },
-        note: "環状線のため起点＝終点（品川を起点とする慣例）。",
+        direction: "outer",
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
     verifiedAt: null,
     verificationStatus: "draft",
+    note: "環状線のため3区間で一周を表す（品川→田端→東京→品川、外回り）。移行した乗車（大崎→目黒）は外回りの観測順で、端点はそのまま使える。",
   },
 ];
 
@@ -302,13 +337,30 @@ export function formalLineNames(serviceId: string): string[] {
 
 /* The asset keys a service expands to, in running order — the keys
    the map overlay paints (stage 2 paints only the ridden section of
-   these; stage 1 keeps painting whole single-key lines as before). */
+   these; stage 1 keeps painting whole single-key lines as before).
+   De-duplicated: a loop or a service whose segments share one
+   formal line （中央線（快速） runs 東京〜神田 and 神田〜高尾 on the
+   one 中央線 key) must still resolve as a single-key service. */
 export function assetKeysForService(serviceId: string): string[] {
-  return expandService(serviceId).map((segment) => segment.formalLineKey);
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const segment of expandService(serviceId)) {
+    if (!seen.has(segment.formalLineKey)) {
+      seen.add(segment.formalLineKey);
+      keys.push(segment.formalLineKey);
+    }
+  }
+  return keys;
 }
 
 /* ------------------------------------------------------------------ */
-/* The nine old ledger rows, migrated to the master.                  */
+/* The nine old ledger rows, migrated to the master — the mirror of
+   the SQL backfill in drizzle/0011 (SQL cannot import this table).
+   This table is the MIGRATION's reference only: new registrations
+   never restore a section from it (a fresh 「京王線」 row starts
+   unknown — see resolveRideFields in server/src/actions.ts). Only
+   the SQL migration, which identifies the nine live rows by name
+   AND first-ride date, applies these sections. */
 /*                                                                     */
 /* The restored section of each ride comes from the trip context and   */
 /* the delivery note recorded at the time (live ledger rows +          */
@@ -347,68 +399,75 @@ export type RestoredRide = {
   masterVersion: string;
 };
 
+/* The master version the nine migrated rides were cut at, frozen
+   as a literal: it must NOT track SERVICE_MASTER_VERSION. When the
+   master is next bumped, these rows keep the version they were
+   migrated at (a later extension must never silently claim a
+   stretch the rider never rode). */
+export const MIGRATED_MASTER_VERSION = "2026-11-24";
+
 export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
   "JR武蔵野線": {
     serviceId: "jr-musashino",
     rideState: "unknown",
     from: null,
     to: null,
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "北総線": {
     serviceId: "hokuso",
     rideState: "unknown",
     from: null,
     to: null,
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR中央線（快速）": {
     serviceId: "jr-chuo-rapid",
     rideState: "partial",
     from: { id: "003606", name: "国分寺" },
     to: { id: "003766", name: "東京" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR総武快速線": {
     serviceId: "jr-sobu-rapid",
     rideState: "partial",
     from: { id: "003766", name: "東京" },
     to: { id: "004173", name: "千葉" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR総武本線": {
     serviceId: "jr-sobu-local",
     rideState: "partial",
     from: { id: "003531", name: "佐倉" },
     to: { id: "004173", name: "千葉" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "京王線": {
     serviceId: "keio",
     rideState: "partial",
     from: { id: "003821", name: "府中" },
     to: { id: "003971", name: "聖蹟桜ヶ丘" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "JR埼京線": {
     serviceId: "jr-saikyo",
     rideState: "partial",
     from: { id: "003700", name: "新宿" },
     to: { id: "004135", name: "大崎" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "りんかい線": {
     serviceId: "rinkai",
     rideState: "partial",
     from: { id: "004135", name: "大崎" },
     to: { id: "004182", name: "品川シーサイド" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
   "山手線": {
     serviceId: "yamanote",
     rideState: "partial",
     from: { id: "004135", name: "大崎" },
     to: { id: "004072", name: "目黒" },
-    masterVersion: SERVICE_MASTER_VERSION,
+    masterVersion: MIGRATED_MASTER_VERSION,
   },
 };

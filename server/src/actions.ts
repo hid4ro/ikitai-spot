@@ -5,12 +5,12 @@
 // stored here verbatim), or from manual entry. Nothing is seeded.
 
 import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
-import { and, asc, count, desc, eq, inArray, isNotNull, like, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import {
-  MIGRATED_RIDES,
-  SERVICE_MASTER_VERSION,
+  serviceById,
   serviceByLedgerName,
+  SERVICE_MASTER_VERSION,
   type RideState,
 } from "../../shared/service-master";
 import * as schema from "./schema";
@@ -18,13 +18,14 @@ import * as schema from "./schema";
 const rideStateSchema = z.enum(["unknown", "partial", "full"]);
 
 /* The ridden-lines ride fields (stage 1, subtask 1420): which
-   service the row belongs to, the ride state, and the restored
+   service the row belongs to, the ride state, and the ridden
    section as N02 station group codes with names. Callers may pass
-   them explicitly; when they do not, resolveRideFields fills them
-   from the service master (migrated rows carry their restored
-   section; a known service without a migrated ride starts unknown).
-   Explicit values always win — the master never overwrites what a
-   caller recorded. */
+   them explicitly; when they do not, the row links to its service
+   and starts unknown (no section). The nine migrated rides are
+   NOT consulted here: restoring a section belongs to the SQL
+   migration (drizzle/0011), which identifies the legacy rows by
+   name and first-ride date — a fresh registration of the same
+   name must never inherit their section. */
 const rideFieldsSchema = z.object({
   serviceId: z.string().max(100).nullable().optional(),
   rideState: rideStateSchema.nullable().optional(),
@@ -45,58 +46,91 @@ type RideFields = {
   masterVersion: string | null;
 };
 
+/* Resolves the ride fields for a registration. State rules
+   (Codex review 1, findings 1–2):
+   - unknown: no section. Any supplied endpoints are dropped, never
+     stored — an unrecorded section must stay unrecorded.
+   - partial: both endpoint station IDs plus a known service (the
+     route) are required; a partial with an empty endpoint is
+     rejected, not stored.
+   - full: the service and a master version that reproduces its
+     range are required.
+   A known serviceId / version is resolved server-side when the
+   caller omits it; an unknown serviceId is rejected outright (a
+   caller typo must never silently attach a ride to the wrong
+   service). When the caller passes no ride state, both endpoints
+   present means partial, otherwise unknown. */
 function resolveRideFields(
   name: string,
   supplied: z.infer<typeof rideFieldsSchema>,
 ): RideFields {
-  if (
-    supplied.serviceId !== undefined ||
-    supplied.rideState !== undefined ||
-    supplied.fromStationId !== undefined ||
-    supplied.toStationId !== undefined
-  ) {
-    return {
-      serviceId: supplied.serviceId ?? null,
-      rideState: supplied.rideState ?? "unknown",
-      fromStationId: supplied.fromStationId ?? null,
-      fromStationName: supplied.fromStationName ?? null,
-      toStationId: supplied.toStationId ?? null,
-      toStationName: supplied.toStationName ?? null,
-      masterVersion: supplied.masterVersion ?? null,
-    };
+  const service = supplied.serviceId
+    ? serviceById(supplied.serviceId)
+    : serviceByLedgerName(name);
+  if (supplied.serviceId && !service) {
+    throw new Error(
+      `resolveRideFields: unknown serviceId "${supplied.serviceId}" for "${name}"`,
+    );
   }
-  const migrated = MIGRATED_RIDES[name];
-  if (migrated) {
+  const serviceId = service?.id ?? null;
+  const rideState =
+    supplied.rideState ??
+    (supplied.fromStationId?.trim() && supplied.toStationId?.trim()
+      ? "partial"
+      : "unknown");
+  const masterVersion =
+    supplied.masterVersion ?? (service ? SERVICE_MASTER_VERSION : null);
+  if (rideState === "unknown") {
     return {
-      serviceId: migrated.serviceId,
-      rideState: migrated.rideState,
-      fromStationId: migrated.from?.id ?? null,
-      fromStationName: migrated.from?.name ?? null,
-      toStationId: migrated.to?.id ?? null,
-      toStationName: migrated.to?.name ?? null,
-      masterVersion: migrated.masterVersion,
-    };
-  }
-  const service = serviceByLedgerName(name);
-  if (service) {
-    return {
-      serviceId: service.id,
+      serviceId,
       rideState: "unknown",
       fromStationId: null,
       fromStationName: null,
       toStationId: null,
       toStationName: null,
-      masterVersion: SERVICE_MASTER_VERSION,
+      masterVersion,
     };
   }
+  if (rideState === "partial") {
+    if (!service) {
+      throw new Error(
+        `resolveRideFields: partial ride for "${name}" needs a known service`,
+      );
+    }
+    if (!supplied.fromStationId?.trim() || !supplied.toStationId?.trim()) {
+      throw new Error(
+        `resolveRideFields: partial ride for "${name}" needs both endpoint station IDs`,
+      );
+    }
+    return {
+      serviceId,
+      rideState: "partial",
+      fromStationId: supplied.fromStationId.trim(),
+      fromStationName: supplied.fromStationName?.trim() || null,
+      toStationId: supplied.toStationId.trim(),
+      toStationName: supplied.toStationName?.trim() || null,
+      masterVersion,
+    };
+  }
+  // full: the whole service, at a version that reproduces its range.
+  if (!service) {
+    throw new Error(
+      `resolveRideFields: full ride for "${name}" needs a known service`,
+    );
+  }
+  if (!masterVersion) {
+    throw new Error(
+      `resolveRideFields: full ride for "${name}" needs a master version`,
+    );
+  }
   return {
-    serviceId: null,
-    rideState: "unknown",
+    serviceId,
+    rideState: "full",
     fromStationId: null,
     fromStationName: null,
     toStationId: null,
     toStationName: null,
-    masterVersion: null,
+    masterVersion,
   };
 }
 
@@ -1473,7 +1507,7 @@ export const Actions = {
 
   addRiddenLine: defineAction({
     description:
-      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite). The ride fields (serviceId, rideState, restored section) may be passed explicitly; otherwise they resolve from the service master — a migrated row restores its section, a known service starts unknown.",
+      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite). The ride fields (serviceId, rideState, ridden section) may be passed explicitly and are validated per state (unknown carries no section, partial needs both endpoint station IDs and a known service, full needs a known service and a master version); otherwise the row links to its service and starts unknown — a fresh registration never inherits a restored section.",
     request: z
       .object({
         name: z.string().min(1).max(100),
@@ -1498,19 +1532,36 @@ export const Actions = {
         .where(eq(schema.riddenLines.name, name));
       if (existing[0]) {
         const context = args.context?.trim() || null;
-        const updates: Partial<typeof schema.riddenLines.$inferInsert> = {};
-        if (context && !existing[0].context) updates.context = context;
-        // Backfill the master linkage onto a pre-master row only;
-        // never overwrite a row that already has one.
-        if (!existing[0].serviceId) {
-          Object.assign(updates, resolveRideFields(name, args));
-        }
-        if (Object.keys(updates).length > 0) {
+        if (context && !existing[0].context) {
           await db
             .update(schema.riddenLines)
-            .set(updates)
+            .set({ context })
             .where(eq(schema.riddenLines.id, existing[0].id));
           ctx.invalidateQueries();
+        }
+        // Link an unlinked row to its service only — never touch
+        // the ride state or the section a caller already recorded
+        // (review finding 3): the section restoration belongs to
+        // the SQL migration, not to a re-registration. The UPDATE
+        // itself re-checks that the row is still unlinked, so a
+        // concurrent link can never be overwritten.
+        if (!existing[0].serviceId) {
+          const link = resolveRideFields(name, {});
+          if (link.serviceId) {
+            await db
+              .update(schema.riddenLines)
+              .set({
+                serviceId: link.serviceId,
+                masterVersion: link.masterVersion,
+              })
+              .where(
+                and(
+                  eq(schema.riddenLines.id, existing[0].id),
+                  isNull(schema.riddenLines.serviceId),
+                ),
+              );
+            ctx.invalidateQueries();
+          }
         }
         return { created: false, id: existing[0].id };
       }
@@ -1550,7 +1601,7 @@ export const Actions = {
 
   importRiddenLines: defineAction({
     description:
-      "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet. Fresh rows also get their ride fields from the service master (migrated rows restore their section); already-recorded rows with no service linkage yet get the same backfill, never an overwrite.",
+      "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet. Fresh rows link to their service and start unknown (a fresh registration never inherits a restored section — that belongs to the SQL migration); already-recorded rows with no service linkage yet get the service link only, never an overwrite of their ride state or section.",
     request: z.object({
       entries: z
         .array(
@@ -1607,15 +1658,30 @@ export const Actions = {
           } else {
             skipped++;
           }
+          // Link an unlinked row to its service only — never touch
+          // its ride state or section (review finding 3): a
+          // re-import must not erase a section a caller recorded
+          // explicitly. The UPDATE itself re-checks that the row is
+          // still unlinked.
           if (!known.serviceId && known.id > 0) {
-            const ride = resolveRideFields(name, {});
-            rideUpdates.push(
-              db
-                .update(schema.riddenLines)
-                .set(ride)
-                .where(eq(schema.riddenLines.id, known.id)),
-            );
-            known.serviceId = ride.serviceId;
+            const link = resolveRideFields(name, {});
+            if (link.serviceId) {
+              rideUpdates.push(
+                db
+                  .update(schema.riddenLines)
+                  .set({
+                    serviceId: link.serviceId,
+                    masterVersion: link.masterVersion,
+                  })
+                  .where(
+                    and(
+                      eq(schema.riddenLines.id, known.id),
+                      isNull(schema.riddenLines.serviceId),
+                    ),
+                  ),
+              );
+              known.serviceId = link.serviceId;
+            }
           }
           continue;
         }

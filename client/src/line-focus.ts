@@ -15,7 +15,10 @@
 
 import type { GeoJsonLineGeometry } from "./geojson";
 import { resolveRiddenLineKey } from "./line-resolution";
-import { serviceByLedgerName } from "../../shared/service-master";
+import {
+  serviceById,
+  serviceByLedgerName,
+} from "../../shared/service-master";
 
 type LineGeometryMap = Readonly<
   Record<string, { operator: string; geometry: GeoJsonLineGeometry }>
@@ -24,17 +27,23 @@ type LineGeometryMap = Readonly<
 /* The operator a ledger line name belongs to, via the service
    master (multi-line services included) or, for names the master
    does not know, via its resolved asset line; null when the name
-   resolves to nothing. */
+   resolves to nothing. The row's saved service_id answers first
+   when given (review finding 5) — a recorded alias must not
+   re-resolve to a different service than the row was saved with. */
 export function operatorOfLine(
   ledgerName: string,
   geometries: LineGeometryMap,
   keyByName: ReadonlyMap<string, string>,
+  serviceId?: string | null,
 ): string | null {
-  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName);
+  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName, serviceId);
   if (!key) {
     // No single asset line: a multi-line service still has an
     // operator in the master (JR埼京線 → 東日本旅客鉄道).
-    return serviceByLedgerName(ledgerName)?.operator ?? null;
+    const service = serviceId
+      ? serviceById(serviceId) ?? serviceByLedgerName(ledgerName)
+      : serviceByLedgerName(ledgerName);
+    return service?.operator ?? null;
   }
   return geometries[key]?.operator ?? null;
 }
@@ -45,14 +54,16 @@ export function operatorOfLine(
    countRiddenByOperator skips them. Several rows can share one
    asset line (JR総武快速線 and JR総武本線 are both 「総武線」);
    the earlier row in the ledger wins, later ones never replace it. */
-export function firstLineByOperator<Row extends { id: number; name: string }>(
+export function firstLineByOperator<
+  Row extends { id: number; name: string; serviceId?: string | null },
+>(
   rows: readonly Row[],
   geometries: LineGeometryMap,
   keyByName: ReadonlyMap<string, string>,
 ): ReadonlyMap<string, Row> {
   const first = new Map<string, Row>();
   for (const row of rows) {
-    const operator = operatorOfLine(row.name, geometries, keyByName);
+    const operator = operatorOfLine(row.name, geometries, keyByName, row.serviceId ?? null);
     if (!operator) continue;
     if (!first.has(operator)) first.set(operator, row);
   }

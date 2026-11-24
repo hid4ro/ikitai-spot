@@ -5,10 +5,11 @@
    and the invariants the meeting agreed on (all draft, station
    segments chain, no guessed sections). */
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import {
+  MIGRATED_MASTER_VERSION,
   MIGRATED_RIDES,
   SERVICE_MASTER,
-  SERVICE_MASTER_VERSION,
   assetKeysForService,
   expandService,
   formalLineNames,
@@ -103,7 +104,22 @@ describe("service → formal line expansion", () => {
     expect(formalLineNames("jr-sobu-local")).toEqual(["総武線"]);
     expect(formalLineNames("keio")).toEqual(["京王線"]);
     expect(formalLineNames("rinkai")).toEqual(["臨海副都心線"]);
-    expect(formalLineNames("yamanote")).toEqual(["山手線"]);
+  });
+
+  test("山手線 is a loop of three formal lines in running order", () => {
+    // The N02 山手線 key only covers 品川〜田端, so the loop is
+    // held as three segments (review finding 4): 山手線 品川〜田端,
+    // 東北線 田端〜東京, 東海道線 東京〜品川 — all outer-loop.
+    expect(formalLineNames("yamanote")).toEqual([
+      "山手線",
+      "東北線",
+      "東海道線",
+    ]);
+    expect(assetKeysForService("yamanote")).toEqual([
+      "山手線|東日本旅客鉄道",
+      "東北線|東日本旅客鉄道",
+      "東海道線|東日本旅客鉄道",
+    ]);
   });
 
   test("りんかい線 resolves to its official name 臨海副都心線", () => {
@@ -112,10 +128,17 @@ describe("service → formal line expansion", () => {
     ]);
   });
 
-  test("山手線 is a loop: its segment starts and ends at 品川", () => {
-    const [segment] = expandService("yamanote");
-    expect(segment!.from.id).toBe(segment!.to.id);
-    expect(segment!.from.name).toBe("品川");
+  test("山手線 is a loop: its segments chain 品川→田端→東京→品川", () => {
+    const segments = expandService("yamanote");
+    expect(segments).toHaveLength(3);
+    expect(segments[0]!.from.name).toBe("品川");
+    expect(segments[0]!.to.name).toBe("田端");
+    expect(segments[1]!.to.name).toBe("東京");
+    expect(segments[2]!.to.name).toBe("品川");
+    // The whole loop is the outer side (the migrated ride
+    // 大崎→目黒 runs outer-loop order); stage 2 uses this to tell
+    // which side of the loop a ride took.
+    expect(segments.every((s) => s.direction === "outer")).toBe(true);
   });
 
   test("an unknown service id expands to nothing", () => {
@@ -215,41 +238,131 @@ describe("the nine migrated rides", () => {
   });
 
   test("every migrated ride records the master version it was cut at", () => {
+    // Frozen, NOT tracking SERVICE_MASTER_VERSION (review finding
+    // 6): the next master bump must leave these rows alone.
     for (const ride of Object.values(MIGRATED_RIDES)) {
-      expect(ride.masterVersion).toBe(SERVICE_MASTER_VERSION);
+      expect(ride.masterVersion).toBe(MIGRATED_MASTER_VERSION);
     }
+    expect(MIGRATED_MASTER_VERSION).toBe("2026-11-24");
   });
 
-  test("the SQL migration backfills exactly these rides", async () => {
+  test("the SQL migration backfills exactly these rides (applied to a real SQLite DB)", async () => {
     // drizzle/0011_ridden_lines_service_master.sql is the other copy
     // of this table (SQL cannot import it); the two must agree, or
-    // the live ledger and the app disagree about a ride.
-    const sql = await Bun.file(
+    // the live ledger and the app disagree about a ride. The SQL is
+    // verified by APPLYING it to a scratch database (review finding
+    // 6), not by parsing its text — so its WHERE clauses and
+    // statement order are exercised, not just its spelling.
+    const db = new Database(":memory:");
+    // The table as it stands just before 0011 (0008 + 0010).
+    db.exec(`
+      CREATE TABLE ridden_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+        name TEXT NOT NULL,
+        first_ridden_on TEXT NOT NULL,
+        note TEXT,
+        context TEXT,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    // The nine legacy rows, at their recorded first-ride dates
+    // (location-trivia/seen_lines.md), plus rows the migration must
+    // leave alone: a same-name row on a different date, and an
+    // unrelated line.
+    const seed: [string, string][] = [
+      ["JR武蔵野線", "2026-11-12"],
+      ["北総線", "2026-11-12"],
+      ["JR中央線（快速）", "2026-11-15"],
+      ["JR総武快速線", "2026-11-15"],
+      ["JR総武本線", "2026-11-16"],
+      ["京王線", "2026-11-22"],
+      ["JR埼京線", "2026-11-24"],
+      ["りんかい線", "2026-11-24"],
+      ["山手線", "2026-11-24"],
+      ["JR武蔵野線", "2026-11-13"],
+      ["西武池袋線", "2026-11-20"],
+    ];
+    const insert = db.prepare(
+      "INSERT INTO ridden_lines (name, first_ridden_on, created_at) VALUES (?, ?, 0)",
+    );
+    for (const [name, date] of seed) insert.run(name, date);
+    const sqlText = await Bun.file(
       new URL(
         "../drizzle/0011_ridden_lines_service_master.sql",
         import.meta.url,
       ),
     ).text();
-    const updateRe =
-      /UPDATE `ridden_lines` SET `service_id` = '([^']+)'(?:, `ride_state` = '([^']+)', `from_station_id` = '([^']+)', `from_station_name` = '([^']+)', `to_station_id` = '([^']+)', `to_station_name` = '([^']+)')?, `master_version` = '([^']+)' WHERE `name` = '([^']+)';/g;
-    const fromSql = new Map<string, RestoredRide>();
-    for (const m of sql.matchAll(updateRe)) {
-      const [, serviceId, rideState, fromId, fromName, toId, toName, version, name] =
-        m;
-      fromSql.set(name!, {
-        serviceId: serviceId!,
-        rideState: (rideState ?? "unknown") as RestoredRide["rideState"],
-        from:
-          fromId && fromName ? { id: fromId, name: fromName } : null,
-        to: toId && toName ? { id: toId, name: toName } : null,
-        masterVersion: version!,
-      });
-    }
-    expect([...fromSql.keys()].sort()).toEqual(
-      Object.keys(MIGRATED_RIDES).sort(),
-    );
+    db.exec(sqlText);
+    type Row = {
+      service_id: string | null;
+      ride_state: string;
+      from_station_id: string | null;
+      from_station_name: string | null;
+      to_station_id: string | null;
+      to_station_name: string | null;
+      master_version: string | null;
+    };
+    const read = (name: string, date: string): Row =>
+      db
+        .query(
+          "SELECT service_id, ride_state, from_station_id, from_station_name, to_station_id, to_station_name, master_version FROM ridden_lines WHERE name = ? AND first_ridden_on = ?",
+        )
+        .get(name, date) as Row;
+    const toRide = (row: Row): RestoredRide => ({
+      serviceId: row.service_id!,
+      rideState: row.ride_state as RestoredRide["rideState"],
+      from:
+        row.from_station_id && row.from_station_name
+          ? { id: row.from_station_id, name: row.from_station_name }
+          : null,
+      to:
+        row.to_station_id && row.to_station_name
+          ? { id: row.to_station_id, name: row.to_station_name }
+          : null,
+      masterVersion: row.master_version!,
+    });
+    // All seven columns of all nine rows match the TS table.
     for (const [name, ride] of Object.entries(MIGRATED_RIDES)) {
-      expect(fromSql.get(name)).toEqual(ride);
+      const date = seed.find(([n]) => n === name)![1]!;
+      expect(toRide(read(name, date))).toEqual(ride);
     }
+    // The rows outside the migration's scope stay untouched.
+    expect(read("JR武蔵野線", "2026-11-13")).toEqual({
+      service_id: null,
+      ride_state: "unknown",
+      from_station_id: null,
+      from_station_name: null,
+      to_station_id: null,
+      to_station_name: null,
+      master_version: null,
+    });
+    expect(read("西武池袋線", "2026-11-20").service_id).toBeNull();
+    // Re-running the migration changes nothing, and an explicitly
+    // recorded section survives it: give the out-of-scope 武蔵野線
+    // row a caller's own link + section, then apply the UPDATEs
+    // again (the ADD COLUMNs cannot run twice — only the backfill
+    // is re-runnable, which is exactly what the guards protect).
+    db.exec(
+      "UPDATE ridden_lines SET service_id = 'keio', ride_state = 'partial', from_station_id = '003700', from_station_name = '新宿', to_station_id = '003821', to_station_name = '府中', master_version = '2026-11-24' WHERE name = 'JR武蔵野線' AND first_ridden_on = '2026-11-13'",
+    );
+    const backfillOnly = sqlText
+      .split("--> statement-breakpoint")
+      .filter((part) => part.trimStart().startsWith("UPDATE"))
+      .join("\n");
+    db.exec(backfillOnly);
+    expect(read("JR武蔵野線", "2026-11-13")).toEqual({
+      service_id: "keio",
+      ride_state: "partial",
+      from_station_id: "003700",
+      from_station_name: "新宿",
+      to_station_id: "003821",
+      to_station_name: "府中",
+      master_version: "2026-11-24",
+    });
+    for (const [name, ride] of Object.entries(MIGRATED_RIDES)) {
+      const date = seed.find(([n]) => n === name)![1]!;
+      expect(toRide(read(name, date))).toEqual(ride);
+    }
+    db.close();
   });
 });

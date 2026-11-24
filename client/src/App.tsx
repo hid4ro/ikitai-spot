@@ -52,6 +52,7 @@ import {
   countRiddenByOperator,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
 } from "./line-resolution";
+import { serviceById } from "../../shared/service-master";
 import { firstLineByOperator, lineGeometryBounds } from "./line-focus";
 import { pollForMap, type PollForMapHandle } from "./map-attach";
 import {
@@ -889,23 +890,43 @@ const LINE_KEY_BY_NAME: ReadonlyMap<string, string> =
    RIDDEN_LINE_GEOMETRIES (「総武線|東日本旅客鉄道」). The rules live
    in line-resolution.ts (regression-tested against the real asset),
    backed by the service master (shared/service-master.ts); this
-   binds them to the bundled asset. Returns null when nothing
-   resolves — the line then simply has no track drawn and no color
-   chip. Multi-line services (JR埼京線) also return null here: no
-   single key stands for them, and stage 2 will paint their ridden
-   section instead of a whole line. */
-function resolveRiddenLineKey(ledgerName: string): string | null {
+   binds them to the bundled asset. The row's saved service_id
+   answers first when given (review finding 5) — the recorded name
+   may be an alias, and the saved id is the record of which service
+   was actually ridden. Returns null when nothing resolves — the
+   line then simply has no track drawn and no color chip. Multi-line
+   services (JR埼京線, and 山手線 since the loop split) also return
+   null here: no single key stands for them, and stage 2 will paint
+   their ridden section instead of a whole line. */
+function resolveRiddenLineKey(
+  ledgerName: string,
+  serviceId?: string | null,
+): string | null {
   return resolveRiddenLineKeyInAsset(
     ledgerName,
     RIDDEN_LINE_GEOMETRIES,
     LINE_KEY_BY_NAME,
+    serviceId ?? null,
+  );
+}
+
+/* The name a ledger row shows: the service's display name from its
+   saved service_id when the master knows it, otherwise the recorded
+   name. An alias spelling （「JR中央線」) therefore shows as the
+   service's canonical name (「JR中央線（快速）」) — the display
+   rule is service names everywhere, formal names stay in the
+   technical detail. */
+function riddenLineDisplayName(line: RiddenLine): string {
+  return (
+    (line.serviceId ? serviceById(line.serviceId)?.displayName : undefined) ??
+    line.name
   );
 }
 
 /* The official color of a ledger line, via the same resolution the map
    overlay uses; null when the line cannot be resolved. */
-function riddenLineColor(ledgerName: string): string | null {
-  const key = resolveRiddenLineKey(ledgerName);
+function riddenLineColor(line: RiddenLine): string | null {
+  const key = resolveRiddenLineKey(line.name, line.serviceId);
   return key ? (RIDDEN_LINE_GEOMETRIES[key]?.color ?? null) : null;
 }
 
@@ -1167,7 +1188,7 @@ function ConquestCharts({
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
   totalVisited: number;
-  riddenLines: { name: string; firstRiddenOn: string }[];
+  riddenLines: { name: string; firstRiddenOn: string; serviceId: string | null }[];
   riddenLineKeys: ReadonlySet<string>;
   municipalityProgressPct: string;
   lineProgressPct: string;
@@ -1184,13 +1205,15 @@ function ConquestCharts({
     (p) => !PREFECTURE_MUNICIPALITY_TOTALS.has(p.name),
   );
 
-  /* Per-operator counts are per LEDGER ROW (see countRiddenByOperator):
-     JR総武快速線 and JR総武本線 share the one asset key 「総武線」, so
-     counting the distinct-key set would show two rides as one. The
-     donut above keeps the distinct-key count — its denominator is the
-     597 distinct asset lines nationwide. */
+  /* Per-operator counts are per DISTINCT SERVICE (see
+     countRiddenByOperator): JR総武快速線 and JR総武本線 are two
+     services that share the one asset key 「総武線」, so both show;
+     two spellings of one service （「JR中央線」 and 「JR中央線
+     （快速）」) count once. The donut above keeps the distinct-key
+     count — its denominator is the 597 distinct asset lines
+     nationwide. */
   const operatorRidden = countRiddenByOperator(
-    riddenLines.map((l) => l.name),
+    riddenLines,
     RIDDEN_LINE_GEOMETRIES,
     LINE_KEY_BY_NAME,
   );
@@ -3029,7 +3052,7 @@ function VisitedMapSection({
   });
   const riddenLineKeys = new Set<string>();
   for (const line of riddenQuery.data?.lines ?? []) {
-    const key = resolveRiddenLineKey(line.name);
+    const key = resolveRiddenLineKey(line.name, line.serviceId);
     if (key) riddenLineKeys.add(key);
   }
   const riddenLineFeatures = [...riddenLineKeys].flatMap((key) => {
@@ -4584,11 +4607,28 @@ function VisitedMapSection({
     focusedLineIdRef.current = line.id;
     setFocusedLineId(line.id);
     pendingLineScrollRef.current = null;
-    const key = resolveRiddenLineKey(line.name);
+    const key = resolveRiddenLineKey(line.name, line.serviceId);
     focusedLineKeyRef.current = key;
     /* A line tap supersedes any row scroll still running. */
     rowScrollSeqRef.current += 1;
-    if (!key) return;
+    if (!key) {
+      /* No single track to paint (JR埼京線, and 山手線 since the
+         loop split): the previous row's orange highlight must not
+         linger. Clearing runs through the live map, guarded by the
+         current selection — a superseded tap must not clear a newer
+         row's highlight. */
+      if (!mapFailed) {
+        withLiveMap((map) => {
+          if (focusedLineIdRef.current !== line.id) return;
+          try {
+            clearFocusLineGeometry(map);
+          } catch {
+            /* the map may already be gone; the row emphasis is the cue */
+          }
+        });
+      }
+      return;
+    }
     const entry = RIDDEN_LINE_GEOMETRIES[key];
     if (!entry) return;
 
@@ -4603,6 +4643,10 @@ function VisitedMapSection({
       });
       const bounds = lineGeometryBounds(entry.geometry);
       withLiveMap((map) => {
+        /* A later tap supersedes this one: never paint a stale
+           highlight (or fly the camera) for a row the reader has
+           already left. */
+        if (focusedLineIdRef.current !== line.id) return;
         try {
           ensureFocusListeners(map);
           setFocusLine(map, key, entry);
@@ -4650,7 +4694,7 @@ function VisitedMapSection({
     }
     focusedLineIdRef.current = row.id;
     setFocusedLineId(row.id);
-    const key = resolveRiddenLineKey(row.name);
+    const key = resolveRiddenLineKey(row.name, row.serviceId);
     focusedLineKeyRef.current = key;
     setLinesExpanded(true);
     pendingLineScrollRef.current = row.id;
@@ -4669,6 +4713,9 @@ function VisitedMapSection({
       const entry = RIDDEN_LINE_GEOMETRIES[key];
       if (entry) {
         withLiveMap((map) => {
+          /* A later tap supersedes this one: never paint a stale
+             highlight for a row the reader has already left. */
+          if (focusedLineIdRef.current !== row.id) return;
           try {
             setFocusLine(map, key, entry);
           } catch {
@@ -4676,6 +4723,18 @@ function VisitedMapSection({
           }
         });
       }
+    } else {
+      /* No single track to paint (JR埼京線, and 山手線 since the
+         loop split): the previous row's orange highlight must not
+         linger — the bar tap still changes the focused row. */
+      withLiveMap((map) => {
+        if (focusedLineIdRef.current !== row.id) return;
+        try {
+          clearFocusLineGeometry(map);
+        } catch {
+          /* a failed clear leaves the row emphasis as the cue */
+        }
+      });
     }
   };
 
@@ -5035,7 +5094,7 @@ function VisitedMapSection({
               </span>
             </p>
             <p className="mt-1 text-xs text-[var(--dim)]">
-              路線数は国土数値情報の路線単位で、全国の全路線が分母です（総武快速線・総武本線は「総武線」として1路線に数えます）
+              路線数は国土数値情報の路線単位で、全国の全路線が分母です（総武快速線・総武本線は同じ路線単位として1路線に数えます）
             </p>
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
@@ -6180,11 +6239,11 @@ function RiddenLinesBlock({
               }`}
             >
               <div className="flex items-center gap-3">
-                {riddenLineColor(line.name) && (
+                {riddenLineColor(line) && (
                   <span
                     aria-hidden="true"
                     className="h-3 w-3 shrink-0 rounded-full"
-                    style={{ backgroundColor: riddenLineColor(line.name) ?? undefined }}
+                    style={{ backgroundColor: riddenLineColor(line) ?? undefined }}
                   />
                 )}
                 {/* Row tap: fly the map to this line and highlight
@@ -6195,10 +6254,10 @@ function RiddenLinesBlock({
                 <button
                   type="button"
                   onClick={() => onLineTap(line)}
-                  aria-label={`${line.name}を地図で見る`}
+                  aria-label={`${riddenLineDisplayName(line)}を地図で見る`}
                   className="min-w-0 flex-1 cursor-pointer text-left"
                 >
-                  <span className="block truncate text-sm font-medium">{line.name}</span>
+                  <span className="block truncate text-sm font-medium">{riddenLineDisplayName(line)}</span>
                   {rideLabel && (
                     <span className="block text-xs text-[var(--dim)]">{rideLabel}</span>
                   )}

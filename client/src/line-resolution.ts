@@ -9,13 +9,22 @@
    future ledger spelling still resolves when it names a real line.
    Kept dependency-light (the asset maps are passed in) so the rules
    can be regression-tested directly against the real asset — see
-   line-resolution.test.ts. */
+   line-resolution.test.ts.
+
+   Rows that carry a saved service_id resolve from that id, not
+   from their name (review finding 5): the recorded name may be an
+   alias （「JR中央線」 for the rapid service) or a spelling the
+   master maps differently, and the saved id is the record of which
+   service was actually ridden. The id is only trusted when the
+   master knows it; an unknown id falls back to name resolution. */
 
 /* Operator brand prefixes a ledger name may carry in front of the
    asset's line name （西武池袋線 → 池袋線）. */
 import {
   assetKeysForService,
+  serviceById,
   serviceByLedgerName,
+  type ServiceMasterEntry,
 } from "../../shared/service-master";
 
 export const LINE_OPERATOR_PREFIXES = [
@@ -51,10 +60,22 @@ export function buildLineKeyByName(
   return map;
 }
 
-/* Resolves a ledger line name to its single asset key. The service
-   master answers first; names it does not cover fall back to
-   normalization: strip a leading 「JR」, strip a trailing 「（…）」,
-   then —
+/* The service a ledger row belongs to: its saved service_id when
+   the master knows it, otherwise the service its name spells. */
+function serviceForRow(
+  ledgerName: string,
+  serviceId?: string | null,
+): ServiceMasterEntry | undefined {
+  return (
+    (serviceId ? serviceById(serviceId) : undefined) ??
+    serviceByLedgerName(ledgerName)
+  );
+}
+
+/* Resolves a ledger line name to its single asset key. The saved
+   service_id answers first when given; names the master does not
+   cover fall back to normalization: strip a leading 「JR」, strip a
+   trailing 「（…）」, then —
    (a) try the name exactly as it stands: a line whose name IS the
        brand plus 「線」 (京王線) must resolve here, before any brand
        is stripped off it;
@@ -69,8 +90,9 @@ export function resolveRiddenLineKey(
   ledgerName: string,
   geometries: Readonly<Record<string, unknown>>,
   keyByName: ReadonlyMap<string, string>,
+  serviceId?: string | null,
 ): string | null {
-  const service = serviceByLedgerName(ledgerName);
+  const service = serviceForRow(ledgerName, serviceId);
   if (service) {
     const keys = assetKeysForService(service.id);
     // Exactly one formal line: the service IS that line.
@@ -102,8 +124,9 @@ export function resolveRiddenLineKeys(
   ledgerName: string,
   geometries: Readonly<Record<string, unknown>>,
   keyByName: ReadonlyMap<string, string>,
+  serviceId?: string | null,
 ): string[] {
-  const service = serviceByLedgerName(ledgerName);
+  const service = serviceForRow(ledgerName, serviceId);
   if (service) {
     return assetKeysForService(service.id).filter((key) => geometries[key]);
   }
@@ -112,34 +135,59 @@ export function resolveRiddenLineKeys(
 }
 
 /* Ridden-line counts per operator for the 事業者別 chart, counted
-   per LEDGER ROW — not per distinct resolved key. JR総武快速線 and
-   JR総武本線 are two separate rides that share the one asset line
-   「総武線|東日本旅客鉄道」; counting distinct keys would collapse
-   them into one and understate 東日本旅客鉄道 by a ride. (The map
-   overlay and the headline 路線 count keep using the distinct-key
-   set: one painted track per asset line, and a numerator that stays
-   comparable to the 597-line national total.) A row's operator comes
-   from its service in the master — JR埼京線 counts for 東日本旅客鉄道
-   now that the master records it as a JR East service — and only
-   falls back to the resolved asset line's operator for names the
-   master does not know. Rows that resolve to nothing count for no
-   operator. */
+   per DISTINCT SERVICE — not per ledger row and not per distinct
+   resolved key. Two rows that name the same service （「JR中央線」
+   and 「JR中央線（快速）」 are both jr-chuo-rapid; 「りんかい線」
+   and 「臨海副都心線」 are both rinkai) count once: they are one
+   service recorded under two spellings, and counting both would
+   let one operator's bar exceed its line total (the 2/1 the
+   review reproduced). Two different services that share one asset
+   line (JR総武快速線 and JR総武本線 are both 「総武線」) still
+   count as two — they are two rides on two services. A row's
+   service comes from its saved service_id when the master knows
+   it, otherwise from its name; rows with no known service fall
+   back to their resolved asset line and count once per key. Rows
+   that resolve to nothing count for no operator. The denominator
+   (LINE_OPERATOR_TOTALS, N02 lines per operator) counts lines,
+   not services — the two coincide for single-service lines, and
+   the bar can no longer overflow it by double-counting one
+   service under two names. */
+export type RiddenLineRow = {
+  name: string;
+  serviceId?: string | null;
+};
+
 export function countRiddenByOperator(
-  ledgerNames: readonly string[],
+  rows: readonly RiddenLineRow[],
   geometries: Readonly<Record<string, { operator: string }>>,
   keyByName: ReadonlyMap<string, string>,
 ): ReadonlyMap<string, number> {
+  const tokensByOperator = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const service = serviceForRow(row.name, row.serviceId ?? null);
+    let operator: string | null = null;
+    let token: string | null = null;
+    if (service) {
+      operator = service.operator;
+      token = `service:${service.id}`;
+    } else {
+      const key = resolveRiddenLineKey(row.name, geometries, keyByName);
+      if (key) {
+        operator = geometries[key]?.operator ?? null;
+        token = `key:${key}`;
+      }
+    }
+    if (!operator || !token) continue;
+    let tokens = tokensByOperator.get(operator);
+    if (!tokens) {
+      tokens = new Set<string>();
+      tokensByOperator.set(operator, tokens);
+    }
+    tokens.add(token);
+  }
   const counts = new Map<string, number>();
-  for (const ledgerName of ledgerNames) {
-    const service = serviceByLedgerName(ledgerName);
-    const operator =
-      service?.operator ??
-      (() => {
-        const key = resolveRiddenLineKey(ledgerName, geometries, keyByName);
-        return key ? (geometries[key]?.operator ?? null) : null;
-      })();
-    if (!operator) continue;
-    counts.set(operator, (counts.get(operator) ?? 0) + 1);
+  for (const [operator, tokens] of tokensByOperator) {
+    counts.set(operator, tokens.size);
   }
   return counts;
 }
