@@ -550,7 +550,12 @@ function ProgressBar({ value, total, label }: { value: number; total: number; la
         aria-valuemax={100}
         aria-label={label}
       >
-        <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${pct}%` }} />
+        {/* Subtask 450 — the fill eases to its new width over 200ms
+            (design memo: 150–250ms, ease out) instead of jumping, so
+            a poll that moves a number reads as movement; the number
+            itself is always shown, and the bar only moves when the
+            value actually changes. */}
+        <div className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-200 ease-out" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -6515,6 +6520,22 @@ export function App() {
     placeholderData: (prev) => prev,
   });
 
+  /* Subtask 450 — first-render stagger for the spot list (design
+     memo: stagger only the first display's top rows, to lead the
+     eye). Fires once, the first time the スポット tab shows with
+     data; after 800ms the class is gone, so later polls, paging,
+     and filter changes render instantly with no replay. Reduced
+     motion removes the travel in theme.css. */
+  const [listStagger, setListStagger] = useState(false);
+  const listStaggerDoneRef = useRef(false);
+  useEffect(() => {
+    if (tab !== "spots" || !spotsQuery.data || listStaggerDoneRef.current) return;
+    listStaggerDoneRef.current = true;
+    setListStagger(true);
+    const t = window.setTimeout(() => setListStagger(false), 800);
+    return () => window.clearTimeout(t);
+  }, [tab, spotsQuery.data]);
+
   const invalidate = () => {
     /* Stamp the edit: fetches that started before this moment must
        not become the dashboard display anymore (see the snapshot
@@ -6953,11 +6974,21 @@ export function App() {
           placement classes, so below xl they stack in the exact
           previous reading order (dashboard → add/import → settings),
           with the tab's top padding moved onto <main> so the two
-          columns start at the same height. */}
-      <main className={`mx-auto w-full max-w-3xl px-4 pb-28 xl:max-w-5xl ${tab === "more" ? "pt-5 xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6" : ""}`}>
-        {/* ===== dashboard (その他 tab) ===== */}
+          columns start at the same height. Subtask 450: from 1536px
+          up the column widens again (2xl:max-w-7xl, 1280px of
+          content) so the dashboard's stats strip can span the full
+          width and the スポット tab can run its controls as a left
+          rail beside the list; below 2xl nothing changes. */}
+      <main className={`mx-auto w-full max-w-3xl px-4 pb-28 xl:max-w-5xl 2xl:max-w-7xl ${tab === "more" ? "pt-5 xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6" : ""}`}>
+        {/* ===== dashboard (その他 tab) =====
+            Subtask 450: the stats + progress strip spans the full
+            width at xl (col 1 / -1), so the five stat cells get
+            room instead of squeezing into the left column; the
+            リスト別 block below is its own section in the left
+            column. Below xl both sections stack in the previous
+            reading order (stats → progress → lists). */}
         {tab === "more" && (
-        <section aria-label="ダッシュボード" className="xl:col-start-1 xl:row-span-2 xl:row-start-1">
+        <section aria-label="ダッシュボード" className="xl:col-start-1 xl:col-end-3 xl:row-start-1">
           <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">ダッシュボード</h2>
           {/* 最終更新 lives in its own strip under the heading: a
               successful poll updates only this strip (and a failed
@@ -7027,7 +7058,19 @@ export function App() {
               </div>
             </>
           )}
+        </section>
+        )}
 
+        {/* Subtask 450 — the リスト別 block is its own section so
+            the stats + progress strip above can span the full width
+            at xl: the two sections stay adjacent in DOM order, so
+            below xl the reading order is unchanged (stats → progress
+            → lists → add/import → settings). Each section keeps its
+            own {tab === "more"} conditional, as the add/import and
+            settings sections do — two sibling sections cannot share
+            one parenthesised conditional. */}
+        {tab === "more" && (
+        <section aria-label="リスト別" className="xl:col-start-1 xl:row-start-2">
           {/* リスト別 loading: a plain 読み込み中… line (plus the
               rows' skeleton) on the first load only; polls with data
               on screen never swap back to it. */}
@@ -7150,6 +7193,14 @@ export function App() {
             </p>
           )}
 
+          {/* Subtask 450 — wide layout (2xl only): below the sticky
+              map, the controls become a left rail and the list (+ the
+              phase-3 detail pane) takes the right column. Below 2xl
+              this wrapper is a plain div and everything stacks
+              exactly as before; only classes arrange it, so the
+              inputs never remount and focus, text, filters, and page
+              survive resizes. */}
+          <div className="2xl:grid 2xl:grid-cols-[20rem_minmax(0,1fr)] 2xl:items-start 2xl:gap-x-6">
           {/* Management controls under the map, tidied into one
               compact stack (DOM order stays search → visit state →
               memo-only → sort → list → tags): the search box gets
@@ -7161,7 +7212,7 @@ export function App() {
               inline with its chips. Only classes arrange them — the
               inputs never remount, so focus, text, filters, and page
               survive resizes. */}
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 space-y-2 2xl:col-start-1 2xl:row-span-2 2xl:sticky 2xl:top-[calc(min(40dvh,20rem)_+_1.25rem)]">
             <div>
               <label htmlFor="spot-search" className="sr-only">スポットを検索</label>
               <input
@@ -7302,6 +7353,10 @@ export function App() {
           {/* Distance-sort status (subtask 680): while a distance
               order is on screen, name its basis next to the list.
               The standard order shows nothing here. */}
+          {/* Subtask 450: one wrapper so the (mutually exclusive)
+              status blocks share a single 2xl grid cell above the
+              list — the wrapper is a plain div below 2xl. */}
+          <div className="2xl:col-start-2 2xl:row-start-1">
           {distanceActive && originKind && (
             <p className="mt-2 flex flex-wrap items-center gap-2 text-sm">
               <span className="font-medium text-[var(--accent)]">
@@ -7355,13 +7410,17 @@ export function App() {
               </div>
             </div>
           )}
+          </div>
 
           {/* Phase 3 layout: at xl the list and the detail pane sit
               side by side; below xl this is a plain block and the
               detail element renders as a fixed bottom sheet instead.
               The grid is a class switch on wrapper divs — nothing
-              remounts on resize. */}
-          <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6">
+              remounts on resize. Subtask 450: at 2xl this grid nests
+              in the right column of the wide layout (see above), so
+              the list keeps its detail pane beside it while the
+              controls sit in the left rail. */}
+          <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6 2xl:col-start-2 2xl:row-start-2">
           <div className="min-w-0">
           {spotsQuery.isPending && <p className="mt-6 text-center text-sm text-[var(--dim)]">読み込み中…</p>}
           {spotsQuery.isError && (
@@ -7392,11 +7451,12 @@ export function App() {
               return (
                 <li
                   key={spot.id}
+                  style={listStagger && index < 6 ? { animationDelay: `${index * 30}ms` } : undefined}
                   className={`rounded-[var(--radius)] p-3 ${
                     isSelected
                       ? "bg-[var(--surface-alt)] shadow-[inset_3px_0_0_var(--accent)]"
                       : "bg-[var(--surface)]"
-                  }`}
+                  }${listStagger && index < 6 ? " row-stagger" : ""}`}
                 >
                   {/* Compact row: name, list chip, visit state, memo
                       excerpt, address, tags. The row itself is the
@@ -7671,13 +7731,14 @@ export function App() {
             )}
           </aside>
           </div>
+          </div>
         </section>
 
         )}
 
         {/* ===== add / import (その他 tab) ===== */}
         {tab === "more" && (
-        <section aria-label="スポットの追加と取り込み" className="mt-8 xl:col-start-2 xl:row-start-1 xl:mt-0">
+        <section aria-label="スポットの追加と取り込み" className="mt-8 xl:col-start-2 xl:row-start-2 xl:mt-0">
           <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">追加・取り込み</h2>
           <div className="mt-3 flex gap-2">
             <button
@@ -7791,7 +7852,7 @@ export function App() {
 
         {/* ===== settings (その他 tab) ===== */}
         {tab === "more" && (
-        <section aria-label="設定" className="mt-8 xl:col-start-2 xl:row-start-2">
+        <section aria-label="設定" className="mt-8 xl:col-start-2 xl:row-start-3">
           <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">設定</h2>
           {/* 表示テーマ (phase 5): a manual override for the page's
               light / dark tokens. Switching only flips the
@@ -7944,7 +8005,7 @@ export function App() {
         aria-label="画面の切り替え"
         className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border)] bg-[var(--surface)] pb-[env(safe-area-inset-bottom)]"
       >
-        <div className="mx-auto flex w-full max-w-3xl xl:max-w-5xl">
+        <div className="mx-auto flex w-full max-w-3xl xl:max-w-5xl 2xl:max-w-7xl">
           {(
             [
               {

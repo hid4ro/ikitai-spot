@@ -188,6 +188,22 @@
   .sheet-slide { animation: none; }
 }
 
+/* Spot list first-render stagger (subtask 450, design memo): the
+   top rows fade in 30ms apart on the first display only, to lead
+   the eye — the class is removed after 800ms, so polls, paging,
+   and filter changes never replay it. Reduced motion removes the
+   travel entirely; the rows land in place exactly as before. */
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.row-stagger {
+  animation: row-in 0.25s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .row-stagger { animation: none; }
+}
+
 /* Map fallback fade-in (subtask 1204): when the live map gives up
    and the stored static image takes its place, the image fades in
    instead of cutting. The reverse trip — the loading overlay over
