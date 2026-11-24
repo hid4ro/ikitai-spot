@@ -11,6 +11,7 @@ import {
   blockById,
   isKnownMasterVersion,
   isN02StationId,
+  isStaleAutoLink,
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
@@ -1639,6 +1640,9 @@ export const Actions = {
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
           masterVersion: schema.riddenLines.masterVersion,
+          rideState: schema.riddenLines.rideState,
+          fromStationId: schema.riddenLines.fromStationId,
+          toStationId: schema.riddenLines.toStationId,
         })
         .from(schema.riddenLines)
         .where(eq(schema.riddenLines.name, name));
@@ -1679,6 +1683,40 @@ export const Actions = {
               );
             ctx.invalidateQueries();
           }
+        } else if (
+          // Repair a link the old auto-link saved wrongly (review
+          // round 5): the recorded name linked to the saved service
+          // under the pre-round-4 rules but does not under the
+          // current ones, so the link can only have come from the
+          // old auto-link — re-resolve the row and store the
+          // current answer (null for every such name in this
+          // master: the distinguishing qualifier keeps it
+          // unlinked). Only unknown rows with no recorded section
+          // are repaired: a partial/full row's section and state
+          // are the recorded ride itself, and clearing the id
+          // would leave a section without a service — those rows
+          // need individual confirmation, and the display and the
+          // aggregates already distrust the stale id
+          // (serviceForRow). The UPDATE re-checks the saved id so
+          // a concurrent repair can never clear a fresh link. The
+          // recorded master version is kept: it is history, not
+          // part of the wrong link.
+          normalizeRideState(existing[0].rideState) === "unknown" &&
+          !existing[0].fromStationId &&
+          !existing[0].toStationId &&
+          isStaleAutoLink(name, existing[0].serviceId)
+        ) {
+          const fresh = resolveRideFields(name, {});
+          await db
+            .update(schema.riddenLines)
+            .set({ serviceId: fresh.serviceId })
+            .where(
+              and(
+                eq(schema.riddenLines.id, existing[0].id),
+                eq(schema.riddenLines.serviceId, existing[0].serviceId),
+              ),
+            );
+          ctx.invalidateQueries();
         }
         return { created: false, id: existing[0].id };
       }
@@ -1744,6 +1782,9 @@ export const Actions = {
           context: schema.riddenLines.context,
           serviceId: schema.riddenLines.serviceId,
           masterVersion: schema.riddenLines.masterVersion,
+          rideState: schema.riddenLines.rideState,
+          fromStationId: schema.riddenLines.fromStationId,
+          toStationId: schema.riddenLines.toStationId,
         })
         .from(schema.riddenLines);
       const seen = new Map(
@@ -1754,6 +1795,9 @@ export const Actions = {
             hasContext: !!r.context,
             serviceId: r.serviceId,
             masterVersion: r.masterVersion,
+            rideState: r.rideState,
+            fromStationId: r.fromStationId,
+            toStationId: r.toStationId,
           },
         ]),
       );
@@ -1812,6 +1856,37 @@ export const Actions = {
                 known.masterVersion = link.masterVersion;
               }
             }
+          } else if (
+            // Repair a link the old auto-link saved wrongly (review
+            // round 5) — the same rule as addRiddenLine's
+            // re-registration repair above: only unknown rows with
+            // no recorded section, so a recorded section and ride
+            // state are never touched; partial/full rows with a
+            // stale link need individual confirmation. The UPDATE
+            // re-checks the saved id, and the in-memory `seen`
+            // entry is updated so a later entry in the same import
+            // sees the repaired state.
+            known.serviceId &&
+            known.id > 0 &&
+            normalizeRideState(known.rideState) === "unknown" &&
+            !known.fromStationId &&
+            !known.toStationId &&
+            isStaleAutoLink(name, known.serviceId)
+          ) {
+            const staleId = known.serviceId;
+            const fresh = resolveRideFields(name, {});
+            rideUpdates.push(
+              db
+                .update(schema.riddenLines)
+                .set({ serviceId: fresh.serviceId })
+                .where(
+                  and(
+                    eq(schema.riddenLines.id, known.id),
+                    eq(schema.riddenLines.serviceId, staleId),
+                  ),
+                ),
+            );
+            known.serviceId = fresh.serviceId;
           }
           continue;
         }
@@ -1821,6 +1896,9 @@ export const Actions = {
           hasContext: !!(entry.context?.trim()),
           serviceId: ride.serviceId,
           masterVersion: ride.masterVersion,
+          rideState: ride.rideState,
+          fromStationId: ride.fromStationId,
+          toStationId: ride.toStationId,
         });
         fresh.push({
           name,

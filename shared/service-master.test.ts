@@ -18,6 +18,8 @@ import {
   formalLineNames,
   isKnownMasterVersion,
   isN02StationId,
+  isStaleAutoLink,
+  legacyServiceByLedgerName,
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
@@ -232,8 +234,7 @@ describe("ledger-name lookup", () => {
     expect(serviceByLedgerName("中央線（快速）")?.id).toBe("jr-chuo-rapid");
   });
 
-  test("a half-width parenthetical operator note resolves (review round 4)", () => {
-    // The reviewer's reproduction: 「武蔵野線 (JR東日本)」 was not
+  test("a half-width parenthetical operator note resolves (review round 4)", () => {    // The reviewer's reproduction: 「武蔵野線 (JR東日本)」 was not
     // recognized as the musashino service because the canonical
     // form only handled full-width （） — the half-width parens
     // and spaces are the same qualifier shape.
@@ -260,6 +261,110 @@ describe("ledger-name lookup", () => {
       expect(serviceById(entry.id)).toBe(entry);
     }
     expect(serviceById("does-not-exist")).toBeUndefined();
+  });
+});
+
+describe("review round 5: a parenthetical that names another service or operator never links (medium)", () => {
+  test("「総武本線（総武快速線）」 contradicts itself and stays unlinked", () => {
+    // The reviewer's reproduction: importing it into an empty
+    // ledger saved jr-sobu-local — the qualifier names a DIFFERENT
+    // service (the rapid), so dropping it attaches the row to the
+    // wrong service. A qualifier is redundant only when it names
+    // the candidate's own alias or the candidate's own operator.
+    expect(serviceByLedgerName("総武本線（総武快速線）")).toBeUndefined();
+    expect(canonicalLedgerName("総武本線（総武快速線）")).toBe(
+      "総武本線（総武快速線）",
+    );
+  });
+
+  test("「武蔵野線（京王電鉄）」 names another operator and stays unlinked", () => {
+    // The reviewer's reproduction: it saved jr-musashino, although
+    // the note says 京王電鉄 and the musashino service is JR East's.
+    // The old check accepted ANY operator in the master as the
+    // qualifier; only the candidate's own operator counts now.
+    expect(serviceByLedgerName("武蔵野線（京王電鉄）")).toBeUndefined();
+    expect(canonicalLedgerName("武蔵野線（京王電鉄）")).toBe(
+      "武蔵野線（京王電鉄）",
+    );
+  });
+
+  test("a qualifier naming the candidate's own alias or operator still links", () => {
+    // The teacher's own positive cases: both must keep linking.
+    expect(serviceByLedgerName("臨海副都心線（りんかい線）")?.id).toBe(
+      "rinkai",
+    );
+    expect(serviceByLedgerName("武蔵野線 (JR東日本)")?.id).toBe(
+      "jr-musashino",
+    );
+    expect(serviceByLedgerName("武蔵野線（JR東日本）")?.id).toBe(
+      "jr-musashino",
+    );
+    // And the distinguishing qualifier keeps the local service out.
+    expect(serviceByLedgerName("中央線（各駅停車）")).toBeUndefined();
+    expect(serviceByLedgerName("中央線（快速）")?.id).toBe("jr-chuo-rapid");
+  });
+});
+
+describe("review round 5: spaces inside the parentheses are the same qualifier shape (low)", () => {
+  test("「中央線 ( 快速 )」 links to the rapid service", () => {
+    // The reviewer's reproduction: it saved with serviceId null and
+    // counted 0 in the national donut, while 「中央線（快速）」
+    // counted 1. The spaces inside the parentheses are trimmed
+    // when the paren width is unified — the identifying word
+    // （快速） is kept, only its padding goes.
+    expect(canonicalLedgerName("中央線 ( 快速 )")).toBe("中央線（快速）");
+    expect(canonicalLedgerName("中央線 ( 快速)")).toBe("中央線（快速）");
+    expect(serviceByLedgerName("中央線 ( 快速 )")?.id).toBe("jr-chuo-rapid");
+    expect(serviceByLedgerName("中央線 ( 快速)")?.id).toBe("jr-chuo-rapid");
+  });
+});
+
+describe("review round 5: a saved link the old auto-link produced is stale (medium)", () => {
+  test("legacyServiceByLedgerName reproduces the pre-round-4 blanket strip", () => {
+    // The old canonical form dropped any trailing （…） and the
+    // leading JR, so 「中央線（各駅停車）」 attached to the rapid
+    // service — the bug round 4 fixed at save time. Half-width
+    // parens were not unified then, so they did not resolve.
+    expect(legacyServiceByLedgerName("中央線（各駅停車）")?.id).toBe(
+      "jr-chuo-rapid",
+    );
+    expect(legacyServiceByLedgerName("総武本線（総武快速線）")?.id).toBe(
+      "jr-sobu-local",
+    );
+    expect(legacyServiceByLedgerName("武蔵野線（京王電鉄）")?.id).toBe(
+      "jr-musashino",
+    );
+    expect(legacyServiceByLedgerName("武蔵野線 (JR東日本)")).toBeUndefined();
+    expect(legacyServiceByLedgerName("JR中央線（快速）")?.id).toBe(
+      "jr-chuo-rapid",
+    );
+  });
+
+  test("isStaleAutoLink spots exactly the links the old code could have made", () => {
+    // Stale: the old code linked the name to the saved id, but the
+    // current rules do not — the link can only have come from the
+    // old auto-link, so it is safe to clear on re-registration.
+    expect(isStaleAutoLink("中央線（各駅停車）", "jr-chuo-rapid")).toBe(true);
+    expect(isStaleAutoLink("総武本線（総武快速線）", "jr-sobu-local")).toBe(
+      true,
+    );
+    expect(isStaleAutoLink("武蔵野線（京王電鉄）", "jr-musashino")).toBe(true);
+    // Not stale: the current rules still agree with the saved id.
+    expect(isStaleAutoLink("JR中央線（快速）", "jr-chuo-rapid")).toBe(false);
+    expect(isStaleAutoLink("京王線", "keio")).toBe(false);
+    expect(isStaleAutoLink("武蔵野線 (JR東日本)", "jr-musashino")).toBe(
+      false,
+    );
+    // Not stale: the old code could not have produced this link
+    // (a different service, or an id the master never knew) — such
+    // rows are left for individual confirmation, never auto-cleared.
+    expect(isStaleAutoLink("中央線（各駅停車）", "jr-sobu-local")).toBe(
+      false,
+    );
+    expect(isStaleAutoLink("中央線（各駅停車）", "does-not-exist")).toBe(
+      false,
+    );
+    expect(isStaleAutoLink("京王線", null)).toBe(false);
   });
 });
 

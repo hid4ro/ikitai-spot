@@ -176,6 +176,42 @@ describe("resolveRideFields: a distinguishing qualifier never attaches to the wr
   });
 });
 
+describe("resolveRideFields: a parenthetical naming another service or operator never links (review round 5, medium)", () => {
+  test("「総武本線（総武快速線）」 and 「武蔵野線（京王電鉄）」 save unlinked", () => {
+    // The reviewer's reproduction: importing them into an empty
+    // ledger saved jr-sobu-local and jr-musashino. The qualifiers
+    // contradict the outer name — one names another service, the
+    // other another operator — so neither may be dropped.
+    for (const name of ["総武本線（総武快速線）", "武蔵野線（京王電鉄）"]) {
+      const fields = resolveRideFields(name, {});
+      expect(fields.serviceId).toBeNull();
+      expect(fields.rideState).toBe("unknown");
+    }
+  });
+
+  test("qualifiers naming the candidate's own alias or operator still link", () => {
+    expect(resolveRideFields("臨海副都心線（りんかい線）", {}).serviceId).toBe(
+      "rinkai",
+    );
+    expect(resolveRideFields("武蔵野線 (JR東日本)", {}).serviceId).toBe(
+      "jr-musashino",
+    );
+  });
+});
+
+describe("resolveRideFields: spaces inside the parentheses resolve (review round 5, low)", () => {
+  test("「中央線 ( 快速 )」 links to the rapid service", () => {
+    // The reviewer's reproduction: it saved with serviceId null and
+    // counted 0 nationally, while 「中央線（快速）」 counted 1.
+    const fields = resolveRideFields("中央線 ( 快速 )", {});
+    expect(fields.serviceId).toBe("jr-chuo-rapid");
+    expect(fields.rideState).toBe("unknown");
+    expect(resolveRideFields("中央線 ( 快速)", {}).serviceId).toBe(
+      "jr-chuo-rapid",
+    );
+  });
+});
+
 describe("resolveRideFields: unknown rides stay section-less", () => {
   test("endpoints supplied with unknown are dropped, never stored", () => {
     const fields = resolveRideFields("京王線", {

@@ -560,15 +560,23 @@ export function stationRefById(stationId: string): StationRef | undefined {
 /* Half-width parentheses and the spaces around them are the same
    qualifier shape as the full-width form: 「武蔵野線 (JR東日本)」
    is the same spelling as 「武蔵野線（JR東日本）」 (review round 4,
-   low). Only the shape is normalized here; whether the qualifier
-   itself is dropped is decided by isRedundantQualifier below. */
-function normalizeParentheses(name: string): string {
+   low). The spaces INSIDE the parentheses are the same shape too:
+   「中央線 ( 快速 )」 is 「中央線（快速）」 (review round 5, low)
+   — only the padding goes, the identifying word inside is kept.
+   Only the shape is normalized here; whether the qualifier itself
+   is dropped is decided by isRedundantQualifierFor below.
+   Exported so the map fallback (client/src/line-resolution.ts)
+   unifies the same shapes before it strips a note (review round
+   5, low). */
+export function normalizeParentheses(name: string): string {
   return name
     .trim()
     .replace(/\(/g, "（")
     .replace(/\)/g, "）")
     .replace(/[ 　]+（/g, "（")
-    .replace(/）[ 　]+/g, "）");
+    .replace(/）[ 　]+/g, "）")
+    .replace(/（[ 　]+/g, "（")
+    .replace(/[ 　]+）/g, "）");
 }
 
 /* A ledger name with no parenthetical handling — trim and a leading
@@ -578,39 +586,44 @@ function bareLedgerName(name: string): string {
   return name.trim().replace(/^(?:JR|ＪＲ)/, "");
 }
 
-/* Whether a trailing （…） qualifier is redundant — i.e. dropping
-   it cannot change which service the name means. Two shapes count:
-   (a) the qualifier names a service the master knows, by its
-       display name or a ledger spelling （「臨海副都心線
+/* Whether a trailing （…） qualifier is redundant FOR ONE
+   CANDIDATE entry — i.e. dropping it cannot change which service
+   the name means. Two shapes count, both scoped to the candidate
+   the rest of the name already names (review round 5, medium —
+   round 4 scoped the check to "the same service's name or an
+   operator name" but still asked ANY entry in the master, so
+   「総武本線（総武快速線）」 dropped its qualifier because
+   「総武快速線」 is a ledger spelling somewhere, and
+   「武蔵野線（京王電鉄）」 dropped it because 京王電鉄 is some
+   entry's operator):
+   (a) the qualifier names the candidate itself, by its display
+       name or one of its ledger spellings （「臨海副都心線
        （りんかい線）」 — 「りんかい線」 is rinkai's own name);
-   (b) the qualifier names an operator （「武蔵野線 (JR東日本)」 —
-       the company abbreviation counts: a leading JR is stripped
-       and the rest must start the operator's name, so 「東日本」
-       matches 東日本旅客鉄道).
-   Anything else — 「快速」, 「各駅停車」 — tells services apart
-   and is kept: 「中央線（各駅停車）」 is the local service, not
-   the rapid, so it must never attach to jr-chuo-rapid (review
-   round 4, medium). */
-function isRedundantQualifier(content: string): boolean {
+   (b) the qualifier names the candidate's operator （「武蔵野線
+       (JR東日本)」 — the company abbreviation counts: a leading
+       JR is stripped and the rest must start the operator's name,
+       so 「東日本」 matches 東日本旅客鉄道).
+   Anything else — 「快速」, 「各駅停車」, another service's name,
+   another operator's name — tells services apart (or contradicts
+   the candidate) and is kept: 「総武本線（総武快速線）」 and
+   「武蔵野線（京王電鉄）」 stay unlinked rather than attaching
+   to the wrong service. */
+function isRedundantQualifierFor(
+  content: string,
+  candidate: ServiceMasterEntry,
+): boolean {
   const q = content.trim();
   if (!q) return false;
-  for (const entry of SERVICE_MASTER) {
-    const names = [entry.displayName, ...entry.ledgerNames];
-    if (names.some((n) => bareLedgerName(n) === bareLedgerName(q))) {
-      return true;
-    }
+  const names = [candidate.displayName, ...candidate.ledgerNames];
+  if (names.some((n) => bareLedgerName(n) === bareLedgerName(q))) {
+    return true;
   }
   const company = q.replace(/^(?:JR|ＪＲ)/, "");
   if (!company) return false;
-  for (const entry of SERVICE_MASTER) {
-    if (
-      entry.operator.startsWith(company) ||
-      company.startsWith(entry.operator)
-    ) {
-      return true;
-    }
-  }
-  return false;
+  return (
+    candidate.operator.startsWith(company) ||
+    company.startsWith(candidate.operator)
+  );
 }
 
 /* Canonical form for ledger-name lookup: trims, unifies half-width
@@ -621,20 +634,95 @@ function isRedundantQualifier(content: string): boolean {
    operator 2/1, because the map side already strips the JR prefix
    while the master lookup did not). Only the lookup is normalized;
    the recorded name itself is untouched.
-   The qualifier is dropped only when it is redundant (see
-   isRedundantQualifier): round 2's blanket strip turned
-   「中央線（各駅停車）」 into the rapid service — the qualifier
-   that tells the local service apart must survive. Exported for
-   the uniqueness test: two entries must never canonicalize to the
-   same key, or a JR-less spelling could attach to the wrong
-   service. */
+   The qualifier is dropped only when it is redundant FOR THE
+   CANDIDATE the outer part already names (see
+   isRedundantQualifierFor): the candidate is found from the part
+   before the qualifier, and the qualifier must name that
+   candidate's own alias or its own operator. Round 4's version
+   asked whether the qualifier named ANY service or ANY operator in
+   the master, which let a contradicting qualifier through
+   (review round 5): 「総武本線（総武快速線）」 dropped
+   「総武快速線」 because it is a ledger spelling somewhere, and
+   「武蔵野線（京王電鉄）」 dropped 「京王電鉄」 because it is
+   some entry's operator — both attached to the wrong service.
+   Exported for the uniqueness test: two entries must never
+   canonicalize to the same key, or a JR-less spelling could attach
+   to the wrong service. */
 export function canonicalLedgerName(name: string): string {
   const unified = normalizeParentheses(name).replace(/^(?:JR|ＪＲ)/, "");
   const m = unified.match(/（([^）]*)）$/);
-  if (m && isRedundantQualifier(m[1]!)) {
-    return unified.slice(0, m.index);
+  if (!m) return unified;
+  const outer = unified.slice(0, m.index);
+  const candidate = SERVICE_MASTER.find((entry) =>
+    [entry.displayName, ...entry.ledgerNames].some(
+      (n) => bareLedgerName(n) === bareLedgerName(outer),
+    ),
+  );
+  if (candidate && isRedundantQualifierFor(m[1]!, candidate)) {
+    return outer;
   }
   return unified;
+}
+
+/* The pre-round-4 lookup (commits 141eacb–6ab413a), kept to
+   recognize the links it produced: the trailing （…） was dropped
+   unconditionally and the leading JR stripped, so
+   「中央線（各駅停車）」 attached to jr-chuo-rapid and
+   「総武本線（総武快速線）」 to jr-sobu-local. Half-width
+   parentheses were not unified then, so a half-width spelling
+   resolved to nothing. The structure mirrors the old
+   serviceByLedgerName exactly (exact match, stripped match,
+   canonical match) so the reproduction is faithful, not a guess. */
+function legacyCanonicalLedgerName(name: string): string {
+  return name
+    .trim()
+    .replace(/（[^）]*）$/, "")
+    .replace(/^(?:JR|ＪＲ)/, "");
+}
+
+export function legacyServiceByLedgerName(
+  ledgerName: string,
+): ServiceMasterEntry | undefined {
+  const name = ledgerName.trim();
+  const exact = SERVICE_MASTER.find((entry) =>
+    entry.ledgerNames.includes(name),
+  );
+  if (exact) return exact;
+  const stripped = name.replace(/（[^）]*）$/, "");
+  if (stripped !== name) {
+    const byStripped = SERVICE_MASTER.find((entry) =>
+      entry.ledgerNames.includes(stripped),
+    );
+    if (byStripped) return byStripped;
+  }
+  const canonical = legacyCanonicalLedgerName(name);
+  return SERVICE_MASTER.find((entry) =>
+    entry.ledgerNames.some(
+      (ledgerName) => legacyCanonicalLedgerName(ledgerName) === canonical,
+    ),
+  );
+}
+
+/* Whether a saved service_id is a stale link the old auto-link
+   produced (review round 5, medium): the pre-round-4 lookup linked
+   the recorded name to the saved id, but the current rules do not
+   — so the link can only have come from the old auto-link, and it
+   is safe to clear on re-registration / re-import. A link the
+   current rules still agree with is not stale, and a link the old
+   code could not have produced either (a different service, or an
+   id the master never knew) is left for individual confirmation —
+   never auto-cleared, because the row may carry an explicit link
+   a caller chose. A null / missing id is never stale. */
+export function isStaleAutoLink(
+  ledgerName: string,
+  savedServiceId: string | null | undefined,
+): boolean {
+  if (!savedServiceId) return false;
+  if (!serviceById(savedServiceId)) return false;
+  return (
+    legacyServiceByLedgerName(ledgerName)?.id === savedServiceId &&
+    serviceByLedgerName(ledgerName)?.id !== savedServiceId
+  );
 }
 
 export function serviceByLedgerName(

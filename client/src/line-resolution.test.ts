@@ -287,6 +287,37 @@ describe("row display name agrees with the aggregation identity (review round 4)
     expect(serviceForRow("中央線（各駅停車）", null)).toBeUndefined();
     expect(serviceForRow("西武池袋線", null)).toBeUndefined();
   });
+
+  test("a stale saved link is not trusted: the row shows its recorded name (review round 5)", () => {
+    // The reviewer's reproduction: a 「中央線（各駅停車）」 row
+    // saved by the old auto-link as jr-chuo-rapid was still shown
+    // as 「JR中央線（快速）」 and counted as a rapid ride. The
+    // saved id is only trusted while the recorded name still
+    // resolves to it — a link the old code could have made but the
+    // current rules disagree with is stale, so the row falls back
+    // to its name (which resolves to no service) and keeps its
+    // recorded name until the stored id is cleared on
+    // re-registration.
+    expect(serviceForRow("中央線（各駅停車）", "jr-chuo-rapid")).toBeUndefined();
+    const counts = countRiddenByOperator(
+      [{ name: "中央線（各駅停車）", serviceId: "jr-chuo-rapid" }],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(counts.get("東日本旅客鉄道")).toBeUndefined();
+    expect(
+      countRiddenServices(
+        [{ name: "中央線（各駅停車）", serviceId: "jr-chuo-rapid" }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(0);
+    // A saved id the current rules still agree with keeps winning.
+    expect(serviceForRow("JR中央線", "jr-chuo-rapid")?.id).toBe(
+      "jr-chuo-rapid",
+    );
+    expect(serviceForRow("臨海副都心線", "rinkai")?.id).toBe("rinkai");
+  });
 });
 
 describe("normalization fallback", () => {
@@ -313,6 +344,60 @@ describe("normalization fallback", () => {
     // spelling still names a real line, so the fallback resolves it.
     expect(resolve("西武池袋線")).toBe("池袋線|西武鉄道");
     expect(resolveKeys("西武池袋線")).toEqual(["池袋線|西武鉄道"]);
+  });
+
+  test("a half-width parenthetical operator note resolves the same as the full-width one (review round 5)", () => {
+    // The reviewer's reproduction: 「西武池袋線（西武鉄道）」
+    // counted 1, but 「西武池袋線 (西武鉄道)」 counted 0 — the
+    // fallback only stripped full-width （）. The paren width and
+    // the spaces around and inside the parentheses are unified
+    // before the fallback strips the note, so both spellings behave
+    // the same.
+    expect(resolve("西武池袋線（西武鉄道）")).toBe("池袋線|西武鉄道");
+    expect(resolve("西武池袋線 (西武鉄道)")).toBe("池袋線|西武鉄道");
+    expect(resolveKeys("西武池袋線 (西武鉄道)")).toEqual([
+      "池袋線|西武鉄道",
+    ]);
+    expect(
+      countRiddenServices(
+        [{ name: "西武池袋線 (西武鉄道)", serviceId: null }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(1);
+    expect(
+      countRiddenServices(
+        [{ name: "西武池袋線（西武鉄道）", serviceId: null }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(1);
+  });
+
+  test("a note naming a different operator does not resolve (review round 5)", () => {
+    // The note is only redundant when it names the candidate line's
+    // own operator: 「東武鉄道」 on the Seibu line contradicts the
+    // candidate, so the fallback must not paint Seibu's track.
+    expect(resolve("西武池袋線（東武鉄道）")).toBeNull();
+    expect(resolve("西武池袋線 (東武鉄道)")).toBeNull();
+    // A note that is not an operator name at all is still stripped
+    // as before — only a contradicting operator blocks the link.
+    expect(resolve("西武池袋線（快速）")).toBe("池袋線|西武鉄道");
+  });
+
+  test("「中央線 ( 快速 )」 counts once in the national donut (review round 5)", () => {
+    // The reviewer's reproduction: it saved with serviceId null
+    // (round-4 code) and counted 0, while 「中央線（快速）」
+    // counted 1. The spaces inside the parentheses are unified at
+    // save time now, so the row links to the rapid service.
+    expect(resolve("中央線 ( 快速 )")).toBe("中央線|東日本旅客鉄道");
+    expect(
+      countRiddenServices(
+        [{ name: "中央線 ( 快速 )", serviceId: null }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBe(1);
   });
 
   test("JR中央線 without the （快速）suffix resolves via the master alias", () => {

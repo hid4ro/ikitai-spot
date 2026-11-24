@@ -22,6 +22,8 @@
    asset's line name （西武池袋線 → 池袋線）. */
 import {
   assetKeysForService,
+  isStaleAutoLink,
+  normalizeParentheses,
   serviceById,
   serviceByLedgerName,
   type ServiceMasterEntry,
@@ -65,20 +67,60 @@ export function buildLineKeyByName(
    Exported so the ledger list shows the same service the
    aggregates count (review round 4, low): a row that resolves to a
    service shows that service's display name, whether or not a
-   service_id was saved with it. */
+   service_id was saved with it.
+   A saved id is trusted only while the recorded name still
+   resolves to it (review round 5, medium): a link the old
+   auto-link produced but the current rules disagree with is stale
+   — the row falls back to its name, which resolves to no service,
+   so it keeps its recorded name and counts for nothing until the
+   stored id is cleared on re-registration / re-import. A link the
+   old code could not have produced is still trusted: it may be an
+   explicit link a caller chose. */
 export function serviceForRow(
   ledgerName: string,
   serviceId?: string | null,
 ): ServiceMasterEntry | undefined {
-  return (
-    (serviceId ? serviceById(serviceId) : undefined) ??
-    serviceByLedgerName(ledgerName)
-  );
+  if (serviceId) {
+    const saved = serviceById(serviceId);
+    if (saved && !isStaleAutoLink(ledgerName, serviceId)) return saved;
+  }
+  return serviceByLedgerName(ledgerName);
+}
+
+/* The operator a geometry entry belongs to, for the fallback's
+   note check below — null when the entry carries none. */
+function operatorOfGeometry(
+  entry: unknown,
+): string | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const operator = (entry as Record<string, unknown>).operator;
+  return typeof operator === "string" ? operator : null;
+}
+
+/* The operator a parenthetical note names, if it names one: the
+   note (JR prefix stripped) must start an operator's name or be
+   started by it — the same abbreviation rule the master uses.
+   Null when the note names no operator in the data (a service
+   name, 「快速」, …), in which case the note is not an operator
+   claim at all and the fallback strips it as before. */
+function operatorNamedByNote(
+  note: string,
+  operators: ReadonlySet<string>,
+): string | null {
+  const q = note.trim().replace(/^(?:JR|ＪＲ)/, "");
+  if (!q) return null;
+  for (const operator of operators) {
+    if (operator.startsWith(q) || q.startsWith(operator)) return operator;
+  }
+  return null;
 }
 
 /* Resolves a ledger line name to its single asset key. The saved
    service_id answers first when given; names the master does not
-   cover fall back to normalization: strip a leading 「JR」, strip a
+   cover fall back to normalization: unify the paren width and the
+   spaces around and inside the parentheses (review round 5, low —
+   「西武池袋線 (西武鉄道)」 is the same spelling as
+   「西武池袋線（西武鉄道）」), strip a leading 「JR」, strip a
    trailing 「（…）」, then —
    (a) try the name exactly as it stands: a line whose name IS the
        brand plus 「線」 (京王線) must resolve here, before any brand
@@ -86,6 +128,10 @@ export function serviceForRow(
    (b) strip a leading operator brand ONLY when the remainder is
        itself a real line name in the asset — stripping 京王 off
        京王線 would leave just 「線」, which names nothing.
+   A trailing note that names an operator must name the candidate
+   line's own operator: 「西武池袋線（東武鉄道）」 contradicts its
+   candidate and resolves to nothing, while a note that names no
+   operator （「快速」) is stripped as before.
    Returns null when nothing resolves — the line then simply has no
    track drawn and no color chip. Multi-line services also return
    null here (no single key exists); their expansion is
@@ -103,18 +149,35 @@ export function resolveRiddenLineKey(
     if (keys.length === 1 && geometries[keys[0]!]) return keys[0]!;
     return null;
   }
-  let name = ledgerName.trim();
+  let name = normalizeParentheses(ledgerName);
   if (name.startsWith("JR")) name = name.slice(2);
-  name = name.replace(/（[^）]*）$/, "");
+  const noteMatch = name.match(/（([^）]*)）$/);
+  const note = noteMatch?.[1] ?? null;
+  if (noteMatch) name = name.slice(0, noteMatch.index);
   const exact = keyByName.get(name);
-  if (exact) return exact;
-  for (const prefix of LINE_OPERATOR_PREFIXES) {
-    if (name.startsWith(prefix)) {
-      const stripped = keyByName.get(name.slice(prefix.length));
-      if (stripped) return stripped;
+  let key: string | null = exact ?? null;
+  if (!key) {
+    for (const prefix of LINE_OPERATOR_PREFIXES) {
+      if (name.startsWith(prefix)) {
+        const stripped = keyByName.get(name.slice(prefix.length));
+        if (stripped) {
+          key = stripped;
+          break;
+        }
+      }
     }
   }
-  return null;
+  if (!key || !note) return key;
+  const operators = new Set<string>();
+  for (const entry of Object.values(geometries)) {
+    const operator = operatorOfGeometry(entry);
+    if (operator) operators.add(operator);
+  }
+  const namedOperator = operatorNamedByNote(note, operators);
+  if (namedOperator && operatorOfGeometry(geometries[key]) !== namedOperator) {
+    return null;
+  }
+  return key;
 }
 
 /* All asset keys a ledger line expands to, in running order — the
