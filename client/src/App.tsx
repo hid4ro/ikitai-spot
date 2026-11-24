@@ -6482,24 +6482,30 @@ export function App() {
   const settings = useQuery({ queryKey: ["settings"], queryFn: () => api.getSettings({}) });
   const radiusM = settings.data?.radiusM ?? 500;
 
+  /* The listSpots query key, shared with the stagger key below: the
+     stagger's notion of "the same display" must always match the
+     query's — sort order included, and null kept apart from "null"
+     by JSON (a template string would collapse both to "null"). */
+  const spotsQueryKey = [
+    "spots",
+    {
+      filter,
+      search,
+      listFilter,
+      tagFilter,
+      memoOnly,
+      page,
+      /* The origin is part of the key so a re-taken position starts
+         a fresh distance order, while page turns and filter changes
+         reuse the SAME fixed origin. */
+      sort: distanceActive && sortOrigin
+        ? `distance:${originKind}:${sortOrigin.lat},${sortOrigin.lng}`
+        : "default",
+    },
+  ];
+
   const spotsQuery = useQuery({
-    queryKey: [
-      "spots",
-      {
-        filter,
-        search,
-        listFilter,
-        tagFilter,
-        memoOnly,
-        page,
-        /* The origin is part of the key so a re-taken position starts
-           a fresh distance order, while page turns and filter changes
-           reuse the SAME fixed origin. */
-        sort: distanceActive && sortOrigin
-          ? `distance:${originKind}:${sortOrigin.lat},${sortOrigin.lng}`
-          : "default",
-      },
-    ],
+    queryKey: spotsQueryKey,
     queryFn: () =>
       api.listSpots({
         filter,
@@ -6532,7 +6538,13 @@ export function App() {
      display. Reduced motion removes the travel in theme.css. */
   const [staggerIds, setStaggerIds] = useState<number[] | null>(null);
   const staggerArmedRef = useRef(false);
-  const staggerKey = `${tab}|${page}|${filter}|${listFilter}|${tagFilter}|${search}|${memoOnly}`;
+  /* Round-2 re-review fix: the display key is the shared query key
+     (tab + every listSpots parameter, sort order included) via JSON,
+     so switching to distance order ends the stagger at once, and a
+     list literally named "null" no longer collides with no list
+     selected — JSON keeps null and "null" apart, where a template
+     string collapsed both to "null". */
+  const staggerKey = JSON.stringify([tab, spotsQueryKey]);
   const staggerKeyRef = useRef(staggerKey);
   /* Arm once: the first non-empty スポット list pins its top six
      ids. Later data updates (polls, edits) never re-arm it. */
@@ -7486,8 +7498,16 @@ export function App() {
               /* Round-1 re-review fix: animate only the pinned
                  first-display ids, at their pinned position — a
                  row keeps its delay even if its page index shifts,
-                 and rows outside the pinned set never animate. */
-              const staggerIndex = staggerIds === null ? -1 : staggerIds.indexOf(spot.id);
+                 and rows outside the pinned set never animate.
+                 Round-2: the class applies only while the current
+                 display still matches the pinned first display — a
+                 sort switch drops it synchronously, in the same
+                 render, instead of waiting for the end effect to
+                 clear the pinned ids. */
+              const staggerIndex =
+                staggerIds === null || staggerKey !== staggerKeyRef.current
+                  ? -1
+                  : staggerIds.indexOf(spot.id);
               return (
                 <li
                   key={spot.id}
