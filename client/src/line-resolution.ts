@@ -72,3 +72,30 @@ export function resolveRiddenLineKey(
   }
   return null;
 }
+
+/* Ridden-line counts per operator for the 事業者別 chart, counted
+   per LEDGER ROW — not per distinct resolved key. JR総武快速線 and
+   JR総武本線 are two separate rides that share the one asset line
+   「総武線|東日本旅客鉄道」; counting distinct keys would collapse
+   them into one and understate 東日本旅客鉄道 by a ride. (The map
+   overlay and the headline 路線 count keep using the distinct-key
+   set: one painted track per asset line, and a numerator that stays
+   comparable to the 597-line national total.) Rows that do not
+   resolve (e.g. JR埼京線, absent from the N02 master) count for no
+   operator. */
+export function countRiddenByOperator(
+  ledgerNames: readonly string[],
+  geometries: Readonly<Record<string, { operator: string }>>,
+  keyByName: ReadonlyMap<string, string>,
+  ledgerMap: Readonly<Record<string, string | null>>,
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const ledgerName of ledgerNames) {
+    const key = resolveRiddenLineKey(ledgerName, geometries, keyByName, ledgerMap);
+    if (!key) continue;
+    const entry = geometries[key];
+    if (!entry) continue;
+    counts.set(entry.operator, (counts.get(entry.operator) ?? 0) + 1);
+  }
+  return counts;
+}

@@ -50,8 +50,10 @@ import {
 } from "./assets/visited-lines";
 import {
   buildLineKeyByName,
+  countRiddenByOperator,
   resolveRiddenLineKey as resolveRiddenLineKeyInAsset,
 } from "./line-resolution";
+import { firstLineByOperator, lineGeometryBounds } from "./line-focus";
 import { pollForMap, type PollForMapHandle } from "./map-attach";
 import {
   createSelectionSequencer,
@@ -86,6 +88,8 @@ type Spot = ApiResponse<typeof api, "listSpots">["spots"][number];
    coordinates plus its detail fields (memo capped at 200 chars by
    the server). */
 type SpotMapPoint = ApiResponse<typeof api, "listSpotPoints">["points"][number];
+/* One row of the ridden-lines ledger (乗った路線). */
+type RiddenLine = ApiResponse<typeof api, "listRiddenLines">["lines"][number];
 type ImportRow = {
   name: string;
   note?: string | null;
@@ -1012,10 +1016,17 @@ function StackedProgressBars({
   rows,
   doneName,
   color,
+  onSelect,
 }: {
   rows: ProgressRow[];
   doneName: string;
   color: string;
+  /* When given (the 事業者別（路線）chart), a tap on either stacked
+     segment of a row reports that row's name — the bar itself is
+     the jump control. The chart stays aria-hidden (its numbers are
+     in the axis ticks and the caller's accessible button list), so
+     this is the pointer path only. */
+  onSelect?: (name: string) => void;
 }) {
   const byName = new Map(rows.map((r) => [r.name, r]));
   return (
@@ -1041,8 +1052,26 @@ function StackedProgressBars({
             formatter={(value, name) => [Number(value).toLocaleString(), name]}
           />
           <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-          <Bar dataKey="done" name={doneName} stackId="total" fill={color} barSize={16} isAnimationActive={false} />
-          <Bar dataKey="rest" name="残り" stackId="total" fill={CHART_REST_COLOR} fillOpacity={0.3} radius={[0, 4, 4, 0]} barSize={16} isAnimationActive={false} />
+          <Bar dataKey="done" name={doneName} stackId="total" fill={color} barSize={16} isAnimationActive={false}>
+            {onSelect &&
+              rows.map((row) => (
+                <Cell
+                  key={row.name}
+                  onClick={() => onSelect(row.name)}
+                  style={{ cursor: "pointer" }}
+                />
+              ))}
+          </Bar>
+          <Bar dataKey="rest" name="残り" stackId="total" fill={CHART_REST_COLOR} fillOpacity={0.3} radius={[0, 4, 4, 0]} barSize={16} isAnimationActive={false}>
+            {onSelect &&
+              rows.map((row) => (
+                <Cell
+                  key={row.name}
+                  onClick={() => onSelect(row.name)}
+                  style={{ cursor: "pointer" }}
+                />
+              ))}
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -1114,6 +1143,7 @@ function ConquestCharts({
   riddenLineKeys,
   municipalityProgressPct,
   lineProgressPct,
+  onOperatorSelect,
 }: {
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
@@ -1122,6 +1152,9 @@ function ConquestCharts({
   riddenLineKeys: ReadonlySet<string>;
   municipalityProgressPct: string;
   lineProgressPct: string;
+  /* 事業者別（路線）bar tap (and its accessible button twin):
+     jump the ridden-lines ledger to that operator's first row. */
+  onOperatorSelect?: (operator: string) => void;
 }) {
   const prefRows: ProgressRow[] = prefectures.flatMap((p) => {
     const total = PREFECTURE_MUNICIPALITY_TOTALS.get(p.name);
@@ -1132,12 +1165,17 @@ function ConquestCharts({
     (p) => !PREFECTURE_MUNICIPALITY_TOTALS.has(p.name),
   );
 
-  const operatorRidden = new Map<string, number>();
-  for (const key of riddenLineKeys) {
-    const entry = RIDDEN_LINE_GEOMETRIES[key];
-    if (!entry) continue;
-    operatorRidden.set(entry.operator, (operatorRidden.get(entry.operator) ?? 0) + 1);
-  }
+  /* Per-operator counts are per LEDGER ROW (see countRiddenByOperator):
+     JR総武快速線 and JR総武本線 share the one asset key 「総武線」, so
+     counting the distinct-key set would show two rides as one. The
+     donut above keeps the distinct-key count — its denominator is the
+     597 distinct asset lines nationwide. */
+  const operatorRidden = countRiddenByOperator(
+    riddenLines.map((l) => l.name),
+    RIDDEN_LINE_GEOMETRIES,
+    LINE_KEY_BY_NAME,
+    LEDGER_LINE_NAME_MAP,
+  );
   const operatorRows: ProgressRow[] = [...operatorRidden.entries()]
     .map(([name, done]) => {
       const total = LINE_OPERATOR_TOTALS.get(name) ?? done;
@@ -1199,8 +1237,32 @@ function ConquestCharts({
         {operatorRows.length > 0 ? (
           <>
             <div className="mt-1">
-              <StackedProgressBars rows={operatorRows} doneName="乗車済み" color={CHART_LINE_COLOR} />
+              <StackedProgressBars
+                rows={operatorRows}
+                doneName="乗車済み"
+                color={CHART_LINE_COLOR}
+                onSelect={onOperatorSelect}
+              />
             </div>
+            {/* The chart above is aria-hidden and pointer-only, so
+                the same jump lives here as real buttons: keyboard
+                and screen-reader users get the identical target
+                (the operator's first row in the 乗った路線 list). */}
+            {onOperatorSelect && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {operatorRows.map((row) => (
+                  <button
+                    key={row.name}
+                    type="button"
+                    onClick={() => onOperatorSelect(row.name)}
+                    aria-label={`${row.name}の乗った路線へ移動`}
+                    className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium"
+                  >
+                    {row.name} {row.done}路線
+                  </button>
+                ))}
+              </div>
+            )}
             <p className="mt-1 text-xs text-[var(--dim)]">
               乗った路線がある事業者だけを表示しています（全{LINE_OPERATOR_TOTALS.size}事業者のうち{operatorRows.length}事業者）
             </p>
@@ -2723,6 +2785,104 @@ function clearFocusGeometry(map: MapLibreLike) {
   map.getSource(FOCUS_OUTLINE_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
 }
 
+/* ---------------- ridden-line focus highlight ----------------
+   The 路線 counterpart of the municipality focus above: while a
+   line is focused, its NORMAL layers (visited-lines casing +
+   color) filter it out and the focus layers below replace it —
+   a pale-orange halo, a white casing, and a thick #ea580c core,
+   the same signal orange as the municipality focus fill, drawn
+   wider than any normal line so the focused line reads at a
+   glance. The line layers are never in the tap hit-test set, so
+   the highlight cannot intercept a municipality tap (and map taps
+   on lines stay out of scope, as before). */
+
+const LINE_FOCUS_SOURCE_ID = "visited-line-focus";
+
+function ensureLineFocusLayers(map: MapLibreLike) {
+  if (!map.getSource(LINE_FOCUS_SOURCE_ID)) {
+    map.addSource(LINE_FOCUS_SOURCE_ID, {
+      type: "geojson",
+      data: EMPTY_FOCUS_DATA,
+    });
+  }
+  if (!map.getLayer("visited-line-focus-halo")) {
+    map.addLayer({
+      id: "visited-line-focus-halo",
+      type: "line",
+      source: LINE_FOCUS_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#ea580c",
+        "line-opacity": 0.3,
+        "line-width": 13,
+      },
+    });
+  }
+  if (!map.getLayer("visited-line-focus-casing")) {
+    map.addLayer({
+      id: "visited-line-focus-casing",
+      type: "line",
+      source: LINE_FOCUS_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#ffffff",
+        "line-opacity": 0.95,
+        "line-width": 8,
+      },
+    });
+  }
+  if (!map.getLayer("visited-line-focus-color")) {
+    map.addLayer({
+      id: "visited-line-focus-color",
+      type: "line",
+      source: LINE_FOCUS_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-color": "#ea580c",
+        "line-opacity": 1,
+        "line-width": 5,
+      },
+    });
+  }
+}
+
+/* Line-focus switching, mirroring setNormalFillExclusion: while a
+   line is focused its normal paint is filtered out of the
+   visited-lines layers and the focus layers replace it, so the
+   line is never double-painted. `key` is the asset line key the
+   overlay features carry as a property; null restores every line. */
+function setNormalLineExclusion(map: MapLibreLike, key: string | null) {
+  const filter = key ? ["!=", ["get", "key"], key] : null;
+  if (map.getLayer("visited-lines-casing")) {
+    map.setFilter("visited-lines-casing", filter);
+  }
+  if (map.getLayer("visited-lines-color")) {
+    map.setFilter("visited-lines-color", filter);
+  }
+}
+
+/* Paints one asset line as the orange focus highlight, swapping it
+   out of the normal line layers (see setNormalLineExclusion). */
+function setFocusLine(
+  map: MapLibreLike,
+  key: string,
+  entry: (typeof RIDDEN_LINE_GEOMETRIES)[string],
+) {
+  ensureLineFocusLayers(map);
+  setNormalLineExclusion(map, key);
+  map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
+    type: "FeatureCollection",
+    features: [
+      { type: "Feature", properties: { key }, geometry: entry.geometry },
+    ],
+  });
+}
+
+function clearFocusLineGeometry(map: MapLibreLike) {
+  setNormalLineExclusion(map, null);
+  map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
+}
+
 function VisitedMapSection({
   active,
   deviceLoc,
@@ -2858,7 +3018,10 @@ function VisitedMapSection({
     return [
       {
         type: "Feature",
-        properties: { color: entry.color },
+        /* `key` rides along so a line focus can filter this line
+           OUT of the normal line layers while its focus highlight
+           replaces it (see setNormalLineExclusion). */
+        properties: { color: entry.color, key },
         geometry: entry.geometry,
       },
     ];
@@ -3187,6 +3350,41 @@ function VisitedMapSection({
      stale closure. */
   const [focusedId, setFocusedId] = useState<number | null>(null);
   const focusedIdRef = useRef<number | null>(null);
+  /* The 路線 counterpart of the municipality focus above: the
+     ridden-line row the reader picked (from its ledger row, or from
+     a 事業者別 bar via the operator's first row). Its row carries
+     the same map-focused emphasis and its track gets the orange
+     focus highlight on the map. The two focuses are mutually
+     exclusive — picking a line clears the municipality focus and
+     vice versa — and a line focus is cleared the same ways a
+     municipality one is (another pick, a blank map tap, deleting
+     the row). focusedLineKeyRef holds the row's resolved asset key
+     (null for an unresolved row like JR埼京線: the row still
+     highlights, there is just no track to paint). */
+  const [focusedLineId, setFocusedLineId] = useState<number | null>(null);
+  const focusedLineIdRef = useRef<number | null>(null);
+  const focusedLineKeyRef = useRef<string | null>(null);
+  /* The 乗った路線 list's expansion, lifted out of RiddenLinesBlock:
+     a 事業者別 bar tap must open the list before its target row can
+     be scrolled to. */
+  const [linesExpanded, setLinesExpanded] = useState(false);
+  /* Ridden-line row elements by ledger id, registered by
+     RiddenLinesBlock — the scroll target for a bar tap. */
+  const lineRowRefs = useRef(new Map<number, HTMLElement | null>());
+  /* Set when a line was focused from a 事業者別 bar: once the list
+     has expanded and the row is actually rendered, an effect below
+     scrolls it into view (the reverse direction — a row tap —
+     flies the map instead and never sets this). */
+  const pendingLineScrollRef = useRef<number | null>(null);
+  /* Each operator's first ledger row (see firstLineByOperator in
+     line-focus.ts): the bar tap's jump target. Unresolved rows
+     belong to no operator and are never a target. */
+  const firstLineRowByOperator = firstLineByOperator(
+    riddenQuery.data?.lines ?? [],
+    RIDDEN_LINE_GEOMETRIES,
+    LINE_KEY_BY_NAME,
+    LEDGER_LINE_NAME_MAP,
+  );
   /* A municipality the reader tapped on the map that is NOT in the
      ledger yet: its name is shown under the map and its boundary gets
      the same orange highlight as a visited focus — but no ledger row
@@ -3892,13 +4090,37 @@ function VisitedMapSection({
   const cancelMapWaitersRef = useRef(cancelMapWaiters);
   cancelMapWaitersRef.current = cancelMapWaiters;
 
+  /* Clears the LINE focus only: the ridden-line row emphasis and
+     the orange track highlight. Used wherever a municipality focus
+     takes over, and when the focused line's row is deleted. */
+  const clearLineFocus = () => {
+    focusedLineIdRef.current = null;
+    focusedLineKeyRef.current = null;
+    setFocusedLineId(null);
+    pendingLineScrollRef.current = null;
+    const map = mapHandleRef.current?.getMap() ?? null;
+    if (map) {
+      try {
+        clearFocusLineGeometry(map);
+      } catch {
+        /* the map may already be gone; the row emphasis is cleared */
+      }
+    }
+  };
+  /* Kept in a ref so callbacks defined earlier (the municipality
+     focus paths) always call the latest version. */
+  const clearLineFocusRef = useRef(clearLineFocus);
+  clearLineFocusRef.current = clearLineFocus;
+
   /* Clears the focus highlight everywhere: the ledger row emphasis and
-     the orange geometry on the map. Used by the map blank-tap listener
+     the orange geometry on the map — for BOTH focuses (municipality
+     and line). Used by the map blank-tap listener
      and when the focused row is deleted. */
   const clearFocus = () => {
     focusedIdRef.current = null;
     setFocusedId(null);
     setTappedMunicipality(null);
+    clearLineFocus();
     /* A row scroll still heading for the cleared row stops too. */
     rowScrollSeqRef.current += 1;
     const map = mapHandleRef.current?.getMap() ?? null;
@@ -3924,6 +4146,8 @@ function VisitedMapSection({
     focusedIdRef.current = m.id;
     setFocusedId(m.id);
     setTappedMunicipality(null);
+    /* The two focuses are mutually exclusive (see the state note). */
+    clearLineFocusRef.current();
     setExpandedPrefectures((prev) =>
       prev.has(m.prefecture) ? prev : new Set(prev).add(m.prefecture),
     );
@@ -3954,6 +4178,7 @@ function VisitedMapSection({
   }) => {
     focusedIdRef.current = null;
     setFocusedId(null);
+    clearLineFocusRef.current();
     /* A row scroll still heading for a cleared row stops too. */
     rowScrollSeqRef.current += 1;
     setTappedMunicipality({ kind: "unvisited", name: hit.name, prefecture: hit.prefecture });
@@ -4264,6 +4489,8 @@ function VisitedMapSection({
     focusedIdRef.current = m.id;
     setFocusedId(m.id);
     setTappedMunicipality(null);
+    /* The two focuses are mutually exclusive (see the state note). */
+    clearLineFocusRef.current();
     /* A row tap supersedes any map-tap row scroll still running. */
     rowScrollSeqRef.current += 1;
 
@@ -4307,6 +4534,146 @@ function VisitedMapSection({
       });
     }
   };
+
+  /* Ridden-line row tap: fly the map to that line's track and
+     emphasize it (orange focus highlight on the map, highlighted
+     row in the list) — the 路線 counterpart of focusMunicipality
+     above, with the same contract: the highlight stays until
+     another row is tapped, the map's empty area is tapped, or the
+     row is deleted; when the interactive map cannot run, the
+     static map image is scrolled into view instead and only the
+     row emphasis applies. A row whose name resolves to no asset
+     line (JR埼京線) has no track to frame, so only its row
+     highlights. Delete / context-edit controls carry
+     data-map-no-fly and never reach here (they are separate
+     buttons, checked in RiddenLinesBlock). */
+  const focusRiddenLine = (line: RiddenLine) => {
+    /* The two focuses are mutually exclusive: clear the
+       municipality focus (state + geometry) without going through
+       clearFocus, which would clear this line focus too. */
+    focusedIdRef.current = null;
+    setFocusedId(null);
+    setTappedMunicipality(null);
+    const currentMap = mapHandleRef.current?.getMap() ?? null;
+    if (currentMap) {
+      try {
+        clearFocusGeometry(currentMap);
+      } catch {
+        /* the map may already be gone; the row emphasis is the cue */
+      }
+    }
+    focusedLineIdRef.current = line.id;
+    setFocusedLineId(line.id);
+    pendingLineScrollRef.current = null;
+    const key = resolveRiddenLineKey(line.name);
+    focusedLineKeyRef.current = key;
+    /* A line tap supersedes any row scroll still running. */
+    rowScrollSeqRef.current += 1;
+    if (!key) return;
+    const entry = RIDDEN_LINE_GEOMETRIES[key];
+    if (!entry) return;
+
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (!mapFailed && mappable.length > 0) {
+      mapContainerRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+      const bounds = lineGeometryBounds(entry.geometry);
+      withLiveMap((map) => {
+        try {
+          ensureFocusListeners(map);
+          setFocusLine(map, key, entry);
+          if (bounds) {
+            map.fitBounds(bounds, {
+              padding: 36,
+              maxZoom: 15,
+              duration: reduceMotion ? 0 : 1200,
+            });
+          }
+        } catch {
+          /* a failed camera move leaves the row emphasis as the cue */
+        }
+      });
+    } else {
+      fallbackMapRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }
+  };
+
+  /* 事業者別（路線）bar tap: the reverse direction. The operator's
+     first ledger row is emphasized, its track gets the same orange
+     highlight on the map (no camera move — the reader is looking
+     at the chart and the list, exactly as a map tap on a
+     municipality does not move the camera), the list opens if it
+     was folded, and the ledger scrolls to the row once it is
+     rendered (see the pending-scroll effect below). An operator
+     with no resolved row never reaches here: its bar is not
+     rendered (operatorRows only counts resolved rows). */
+  const focusLineFromOperator = (operator: string) => {
+    const row = firstLineRowByOperator.get(operator);
+    if (!row) return;
+    focusedIdRef.current = null;
+    setFocusedId(null);
+    setTappedMunicipality(null);
+    const currentMap = mapHandleRef.current?.getMap() ?? null;
+    if (currentMap) {
+      try {
+        clearFocusGeometry(currentMap);
+      } catch {
+        /* the map may already be gone; the row emphasis is the cue */
+      }
+    }
+    focusedLineIdRef.current = row.id;
+    setFocusedLineId(row.id);
+    const key = resolveRiddenLineKey(row.name);
+    focusedLineKeyRef.current = key;
+    setLinesExpanded(true);
+    pendingLineScrollRef.current = row.id;
+    /* If the list was already open and the row is already laid
+       out, scroll right away: a repeat tap on the same operator
+       changes no state, so no re-render would ever run the
+       pending-scroll effect. When the row is not laid out yet
+       (the list was folded), the effect takes over after the
+       expansion renders. */
+    const rowEl = lineRowRefs.current.get(row.id) ?? null;
+    if (rowEl && rowEl.getClientRects().length > 0) {
+      pendingLineScrollRef.current = null;
+      scrollRowFullyIntoView(rowEl);
+    }
+    if (key) {
+      const entry = RIDDEN_LINE_GEOMETRIES[key];
+      if (entry) {
+        withLiveMap((map) => {
+          try {
+            setFocusLine(map, key, entry);
+          } catch {
+            /* a failed highlight leaves the row emphasis as the cue */
+          }
+        });
+      }
+    }
+  };
+
+  /* When a bar tap focused a line whose list was folded, the row
+     only becomes scrollable once the list has expanded and
+     re-rendered. This effect runs after every render and starts
+     the pending scroll as soon as the row is actually laid out —
+     the same pattern as the municipality pending-row-scroll effect
+     above, reusing its verify-and-correct scroll loop. */
+  useEffect(() => {
+    const id = pendingLineScrollRef.current;
+    if (id === null || id !== focusedLineId) return;
+    const row = lineRowRefs.current.get(id) ?? null;
+    if (!row || row.getClientRects().length === 0) return;
+    pendingLineScrollRef.current = null;
+    scrollRowFullyIntoView(row);
+  });
 
   const invalidateVisited = () =>
     void queryClient.invalidateQueries({ queryKey: ["visitedMunicipalities"] });
@@ -4689,6 +5056,7 @@ function VisitedMapSection({
               riddenLineKeys={riddenLineKeys}
               municipalityProgressPct={municipalityProgressPct}
               lineProgressPct={lineProgressPct}
+              onOperatorSelect={focusLineFromOperator}
             />
           </div>
 
@@ -4999,7 +5367,20 @@ function VisitedMapSection({
       )}
 
       <div className="xl:col-start-2 xl:row-start-6">
-        <RiddenLinesBlock />
+        <RiddenLinesBlock
+          focusedLineId={focusedLineId}
+          linesExpanded={linesExpanded}
+          onToggleLines={() => setLinesExpanded((v) => !v)}
+          onLineTap={focusRiddenLine}
+          onLineDeleted={(id) => {
+            /* Deleting the highlighted row clears the line focus
+               too — its track would otherwise linger highlighted. */
+            if (focusedLineIdRef.current === id) clearLineFocusRef.current();
+          }}
+          registerLineRow={(id, el) => {
+            lineRowRefs.current.set(id, el);
+          }}
+        />
       </div>
       </div>
     </section>
@@ -5627,7 +6008,36 @@ function SpotListMap({
 
 /* The ridden-lines collection shown under the fill map: lines the user
    rode and got a line-trivia delivery for, with the first-ride date. */
-function RiddenLinesBlock() {
+function RiddenLinesBlock({
+  focusedLineId,
+  linesExpanded,
+  onToggleLines,
+  onLineTap,
+  onLineDeleted,
+  registerLineRow,
+}: {
+  /* The focused line's ledger id (row emphasis), owned by
+     VisitedMapSection — the same focus the map highlight and the
+     事業者別 bar jumps share. */
+  focusedLineId: number | null;
+  /* The list starts collapsed so the section stays short as the
+     collection grows; the header shows the count and toggles it
+     open. The state lives in VisitedMapSection because a
+     事業者別 bar tap must open the list before scrolling to its
+     target row. */
+  linesExpanded: boolean;
+  onToggleLines: () => void;
+  /* Row tap: fly the map to the line and highlight it (the delete
+     and context-edit controls below are separate buttons carrying
+     data-map-no-fly, so they never trigger this). */
+  onLineTap: (line: RiddenLine) => void;
+  /* A row was deleted; the owner clears the focus if it was the
+     focused row. */
+  onLineDeleted: (id: number) => void;
+  /* Registers each rendered row element by ledger id, so the
+     owner can scroll a bar tap's target row into view. */
+  registerLineRow: (id: number, el: HTMLElement | null) => void;
+}) {
   const queryClient = useQueryClient();
   const linesQuery = useQuery({
     queryKey: ["riddenLines"],
@@ -5642,16 +6052,14 @@ function RiddenLinesBlock() {
   const [lineDeleteError, setLineDeleteError] = useState<string | null>(null);
   const deleteLineMutation = useMutation({
     mutationFn: async (id: number) => await api.deleteRiddenLine({ id }),
-    onSuccess: () => {
+    onSuccess: (_res, id) => {
       setLineDeleteError(null);
+      onLineDeleted(id);
       invalidateLines();
     },
     onError: () => setLineDeleteError("削除に失敗しました"),
   });
   const [confirmDeleteLine, setConfirmDeleteLine] = useState<number | null>(null);
-  /* The lines list starts collapsed so the section stays short as the
-     collection grows; the header shows the count and toggles it open. */
-  const [linesExpanded, setLinesExpanded] = useState(false);
 
   const todayLocal = new Date().toLocaleDateString("en-CA");
   const [showLineForm, setShowLineForm] = useState(false);
@@ -5703,7 +6111,7 @@ function RiddenLinesBlock() {
     <div className="mt-8">
       <button
         type="button"
-        onClick={() => setLinesExpanded((v) => !v)}
+        onClick={onToggleLines}
         aria-expanded={linesExpanded}
         aria-label={`乗った路線の一覧を${linesExpanded ? "閉じる" : "開く"}`}
         className="flex w-full items-baseline justify-between gap-3 text-left"
@@ -5742,7 +6150,15 @@ function RiddenLinesBlock() {
           {lines.map((line) => {
             const editingLineContext = lineContextEditId === line.id;
             return (
-            <li key={line.id} className="px-3 py-2.5">
+            <li
+              key={line.id}
+              ref={(el) => {
+                registerLineRow(line.id, el);
+              }}
+              className={`px-3 py-2.5 ${
+                focusedLineId === line.id ? "map-focused" : ""
+              }`}
+            >
               <div className="flex items-center gap-3">
                 {riddenLineColor(line.name) && (
                   <span
@@ -5751,17 +6167,27 @@ function RiddenLinesBlock() {
                     style={{ backgroundColor: riddenLineColor(line.name) ?? undefined }}
                   />
                 )}
-                <span className="min-w-0 flex-1">
+                {/* Row tap: fly the map to this line and highlight
+                    it — the same shape as a municipality ledger row
+                    (the name block is the button; delete and
+                    context-edit controls sit outside it and carry
+                    data-map-no-fly). */}
+                <button
+                  type="button"
+                  onClick={() => onLineTap(line)}
+                  aria-label={`${line.name}を地図で見る`}
+                  className="min-w-0 flex-1 cursor-pointer text-left"
+                >
                   <span className="block truncate text-sm font-medium">{line.name}</span>
                   {line.note && (
                     <span className="block text-xs text-[var(--dim)]">{line.note}</span>
                   )}
-                </span>
+                </button>
                 <span className="shrink-0 text-xs text-[var(--dim)]">
                   {line.firstRiddenOn.replaceAll("-", "/")}
                 </span>
                 {confirmDeleteLine === line.id ? (
-                  <span className="flex shrink-0 gap-1.5">
+                  <span data-map-no-fly="" className="flex shrink-0 gap-1.5">
                     <button
                       type="button"
                       onClick={() => deleteLineMutation.mutate(line.id)}
@@ -5781,6 +6207,7 @@ function RiddenLinesBlock() {
                 ) : (
                   <button
                     type="button"
+                    data-map-no-fly=""
                     onClick={() => setConfirmDeleteLine(line.id)}
                     aria-label={`${line.name}の記録を削除`}
                     className="shrink-0 rounded-lg px-2 py-1.5 text-xs text-[var(--dim)]"
@@ -5802,6 +6229,7 @@ function RiddenLinesBlock() {
                   )}
                   <button
                     type="button"
+                    data-map-no-fly=""
                     onClick={() => {
                       setLineContextMsg(null);
                       setLineContextDraft(line.context ?? "");
@@ -5815,7 +6243,7 @@ function RiddenLinesBlock() {
                 </div>
               )}
               {editingLineContext && (
-                <div className="mt-1.5">
+                <div data-map-no-fly="" className="mt-1.5">
                   <label htmlFor={`line-context-${line.id}`} className="sr-only">
                     {line.name}の行程
                   </label>
