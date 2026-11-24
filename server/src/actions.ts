@@ -61,7 +61,11 @@ type RideFields = {
      range are required — and the version must be one the master
      actually knows (the current version or the frozen migration
      version); a blank or made-up version ("bogus") is rejected,
-     not stored.
+     not stored. The supplied version is trimmed before both the
+     check and the save, so a padded version (" 2026-11-24 ") is
+     stored as the version it validated as, never with its spaces
+     (review round 3, low) — and a whitespace-only version still
+     rejects, because trimming it leaves an empty string.
    A known serviceId / version is resolved server-side when the
    caller omits it; an unknown serviceId is rejected outright (a
    caller typo must never silently attach a ride to the wrong
@@ -88,7 +92,11 @@ export function resolveRideFields(
       ? "partial"
       : "unknown");
   const masterVersion =
-    supplied.masterVersion ?? (service ? SERVICE_MASTER_VERSION : null);
+    supplied.masterVersion != null
+      ? supplied.masterVersion.trim()
+      : service
+        ? SERVICE_MASTER_VERSION
+        : null;
   if (rideState === "unknown") {
     return {
       serviceId,

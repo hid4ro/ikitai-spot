@@ -54,6 +54,17 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
     const fields = resolveRideFields("京王線", { rideState: "full" });
     expect(fields.masterVersion).toBe(SERVICE_MASTER_VERSION);
   });
+
+  test("a full ride with a padded version stores the trimmed version (review round 3, low)", () => {
+    // The reviewer passed " 2026-11-24 " and it validated but was
+    // saved with its spaces, so it no longer matched the known
+    // version constants. The validated string is what gets saved.
+    const fields = resolveRideFields("京王線", {
+      rideState: "full",
+      masterVersion: " 2026-11-24 ",
+    });
+    expect(fields.masterVersion).toBe(SERVICE_MASTER_VERSION);
+  });
 });
 
 describe("resolveRideFields: partial rides (review round 2, high)", () => {

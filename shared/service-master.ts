@@ -319,6 +319,23 @@ export function serviceById(id: string): ServiceMasterEntry | undefined {
   return SERVICE_MASTER.find((entry) => entry.id === id);
 }
 
+/* Canonical form for ledger-name lookup: trims, drops a trailing
+   （…） qualifier, and drops a leading JR / ＪＲ operator prefix.
+   "JR武蔵野線" and "武蔵野線" are the same service (review round 3:
+   the JR-less spelling registered with serviceId null and
+   double-counted its operator 2/1, because the map side already
+   strips the JR prefix while the master lookup did not). Only the
+   lookup is normalized; the recorded name itself is untouched.
+   Exported for the uniqueness test: two entries must never
+   canonicalize to the same key, or a JR-less spelling could attach
+   to the wrong service. */
+export function canonicalLedgerName(name: string): string {
+  return name
+    .trim()
+    .replace(/（[^）]*）$/, "")
+    .replace(/^(?:JR|ＪＲ)/, "");
+}
+
 export function serviceByLedgerName(
   ledgerName: string,
 ): ServiceMasterEntry | undefined {
@@ -335,11 +352,22 @@ export function serviceByLedgerName(
   // recorded name itself is untouched.
   const stripped = name.replace(/（[^）]*）$/, "");
   if (stripped !== name) {
-    return SERVICE_MASTER.find((entry) =>
+    const byStripped = SERVICE_MASTER.find((entry) =>
       entry.ledgerNames.includes(stripped),
     );
+    if (byStripped) return byStripped;
   }
-  return undefined;
+  // A leading JR operator prefix does not make a different service
+  // either (review round 3): 「武蔵野線」 is the jr-musashino
+  // service, same as 「JR武蔵野線」. The canonical form also drops
+  // a trailing qualifier, so a JR-prefixed parenthetical spelling
+  // resolves here too.
+  const canonical = canonicalLedgerName(name);
+  return SERVICE_MASTER.find((entry) =>
+    entry.ledgerNames.some(
+      (ledgerName) => canonicalLedgerName(ledgerName) === canonical,
+    ),
+  );
 }
 
 /* Expands a service into its formal lines, in running order —

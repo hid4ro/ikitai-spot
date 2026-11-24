@@ -194,6 +194,27 @@ describe("per-operator counts", () => {
     expect(counts.get("東京臨海高速鉄道")).toBe(1);
   });
 
+  test("武蔵野線 under both spellings counts once even with no saved service_id (review round 3)", () => {
+    // The reviewer's exact reproduction: both rows registered by
+    // name only, so neither carries a saved service_id — the JR-less
+    // spelling （「武蔵野線」) matched no ledger name and fell back
+    // to its map key, double-counting the operator 2/1 and the
+    // national donut 2/597. The JR prefix is stripped for the
+    // lookup now, so both rows are one service.
+    const rows = [
+      { name: "JR武蔵野線", serviceId: null },
+      { name: "武蔵野線", serviceId: null },
+    ];
+    expect(
+      countRiddenByOperator(rows, RIDDEN_LINE_GEOMETRIES, keyByName).get(
+        "東日本旅客鉄道",
+      ),
+    ).toBe(1);
+    expect(countRiddenServices(rows, RIDDEN_LINE_GEOMETRIES, keyByName)).toBe(
+      1,
+    );
+  });
+
   test("a saved service_id wins over the recorded name", () => {
     // A row recorded as 「臨海副都心線」 with no saved id still
     // resolves through the master's alias; with a saved id it

@@ -12,6 +12,7 @@ import {
   SERVICE_MASTER,
   SERVICE_MASTER_VERSION,
   assetKeysForService,
+  canonicalLedgerName,
   expandService,
   formalLineNames,
   isKnownMasterVersion,
@@ -41,6 +42,25 @@ describe("master shape", () => {
     expect(new Set(ids).size).toBe(ids.length);
     const names = SERVICE_MASTER.flatMap((e) => e.ledgerNames);
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("canonical ledger names are unique across the master (review round 3)", () => {
+    // The JR-prefix lookup matches on canonical names, so two
+    // different entries must never canonicalize to the same key —
+    // otherwise a JR-less spelling could attach to the wrong
+    // service. Two spellings of the SAME entry sharing a canonical
+    // key are fine (「JR中央線（快速）」 and 「JR中央線」 are both
+    // the rapid service).
+    const keysByEntry = SERVICE_MASTER.map(
+      (e) => new Set(e.ledgerNames.map((name) => canonicalLedgerName(name))),
+    );
+    for (let i = 0; i < keysByEntry.length; i++) {
+      for (let j = i + 1; j < keysByEntry.length; j++) {
+        for (const key of keysByEntry[i]!) {
+          expect(keysByEntry[j]!.has(key)).toBe(false);
+        }
+      }
+    }
   });
 
   test("segments chain: each segment starts where the last ended", () => {
@@ -175,6 +195,19 @@ describe("ledger-name lookup", () => {
     // The qualifier is stripped only for the lookup: a base name
     // the master does not know still finds nothing.
     expect(serviceByLedgerName("存在しない線（快速）")).toBeUndefined();
+  });
+
+  test("「武蔵野線」 without the JR prefix is the jr-musashino service (review round 3)", () => {
+    // The reviewer registered 「JR武蔵野線」 and 「武蔵野線」 and got
+    // 2/597 nationally and 2 for JR東日本: the JR-less spelling
+    // matched no ledger name, so its row stayed unlinked and counted
+    // by map key instead of by service. A leading JR operator prefix
+    // does not make a different service.
+    expect(serviceByLedgerName("武蔵野線")?.id).toBe("jr-musashino");
+    expect(serviceByLedgerName("JR武蔵野線")?.id).toBe("jr-musashino");
+    // The prefix is stripped only for the lookup: a name the master
+    // does not know still finds nothing.
+    expect(serviceByLedgerName("JR存在しない線")).toBeUndefined();
   });
 
   test("an unregistered name finds no service", () => {
