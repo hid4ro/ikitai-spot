@@ -7,7 +7,105 @@
 import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
 import { and, asc, count, desc, eq, inArray, isNotNull, like, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
+import {
+  MIGRATED_RIDES,
+  SERVICE_MASTER_VERSION,
+  serviceByLedgerName,
+  type RideState,
+} from "../../shared/service-master";
 import * as schema from "./schema";
+
+const rideStateSchema = z.enum(["unknown", "partial", "full"]);
+
+/* The ridden-lines ride fields (stage 1, subtask 1420): which
+   service the row belongs to, the ride state, and the restored
+   section as N02 station group codes with names. Callers may pass
+   them explicitly; when they do not, resolveRideFields fills them
+   from the service master (migrated rows carry their restored
+   section; a known service without a migrated ride starts unknown).
+   Explicit values always win — the master never overwrites what a
+   caller recorded. */
+const rideFieldsSchema = z.object({
+  serviceId: z.string().max(100).nullable().optional(),
+  rideState: rideStateSchema.nullable().optional(),
+  fromStationId: z.string().max(20).nullable().optional(),
+  fromStationName: z.string().max(100).nullable().optional(),
+  toStationId: z.string().max(20).nullable().optional(),
+  toStationName: z.string().max(100).nullable().optional(),
+  masterVersion: z.string().max(50).nullable().optional(),
+});
+
+type RideFields = {
+  serviceId: string | null;
+  rideState: RideState;
+  fromStationId: string | null;
+  fromStationName: string | null;
+  toStationId: string | null;
+  toStationName: string | null;
+  masterVersion: string | null;
+};
+
+function resolveRideFields(
+  name: string,
+  supplied: z.infer<typeof rideFieldsSchema>,
+): RideFields {
+  if (
+    supplied.serviceId !== undefined ||
+    supplied.rideState !== undefined ||
+    supplied.fromStationId !== undefined ||
+    supplied.toStationId !== undefined
+  ) {
+    return {
+      serviceId: supplied.serviceId ?? null,
+      rideState: supplied.rideState ?? "unknown",
+      fromStationId: supplied.fromStationId ?? null,
+      fromStationName: supplied.fromStationName ?? null,
+      toStationId: supplied.toStationId ?? null,
+      toStationName: supplied.toStationName ?? null,
+      masterVersion: supplied.masterVersion ?? null,
+    };
+  }
+  const migrated = MIGRATED_RIDES[name];
+  if (migrated) {
+    return {
+      serviceId: migrated.serviceId,
+      rideState: migrated.rideState,
+      fromStationId: migrated.from?.id ?? null,
+      fromStationName: migrated.from?.name ?? null,
+      toStationId: migrated.to?.id ?? null,
+      toStationName: migrated.to?.name ?? null,
+      masterVersion: migrated.masterVersion,
+    };
+  }
+  const service = serviceByLedgerName(name);
+  if (service) {
+    return {
+      serviceId: service.id,
+      rideState: "unknown",
+      fromStationId: null,
+      fromStationName: null,
+      toStationId: null,
+      toStationName: null,
+      masterVersion: SERVICE_MASTER_VERSION,
+    };
+  }
+  return {
+    serviceId: null,
+    rideState: "unknown",
+    fromStationId: null,
+    fromStationName: null,
+    toStationId: null,
+    toStationName: null,
+    masterVersion: null,
+  };
+}
+
+/* Defensive read-back: the column is NOT NULL DEFAULT 'unknown', but
+   a stray value must never reach the client as a state it cannot show. */
+function normalizeRideState(raw: string | null): RideState {
+  if (raw === "partial" || raw === "full") return raw;
+  return "unknown";
+}
 
 const spotSchema = z.object({
   id: z.number(),
@@ -1323,7 +1421,7 @@ export const Actions = {
 
   listRiddenLines: defineAction({
     description:
-      "Lists the ridden-railway-line ledger (路線 the user rode and got a line-trivia delivery for), oldest first-ride date first. Shown alongside the 市区町村・路線 as its companion collection.",
+      "Lists the ridden-railway-line ledger (路線 the user rode and got a line-trivia delivery for), oldest first-ride date first. Shown alongside the 市区町村・路線 as its companion collection. Each row also carries its service-master linkage (serviceId, rideState, restored from/to stations) — stage 1, subtask 1420.",
     request: z.object({}),
     response: z.object({
       lines: z.array(
@@ -1333,6 +1431,13 @@ export const Actions = {
           firstRiddenOn: z.string(),
           note: z.string().nullable(),
           context: z.string().nullable(),
+          serviceId: z.string().nullable(),
+          rideState: rideStateSchema,
+          fromStationId: z.string().nullable(),
+          fromStationName: z.string().nullable(),
+          toStationId: z.string().nullable(),
+          toStationName: z.string().nullable(),
+          masterVersion: z.string().nullable(),
         }),
       ),
       total: z.number(),
@@ -1353,6 +1458,13 @@ export const Actions = {
           firstRiddenOn: r.firstRiddenOn,
           note: r.note,
           context: r.context,
+          serviceId: r.serviceId,
+          rideState: normalizeRideState(r.rideState),
+          fromStationId: r.fromStationId,
+          fromStationName: r.fromStationName,
+          toStationId: r.toStationId,
+          toStationName: r.toStationName,
+          masterVersion: r.masterVersion,
         })),
         total: rows.length,
       };
@@ -1361,15 +1473,17 @@ export const Actions = {
 
   addRiddenLine: defineAction({
     description:
-      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite).",
-    request: z.object({
-      name: z.string().min(1).max(100),
-      firstRiddenOn: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/, "firstRiddenOn must be YYYY-MM-DD"),
-      note: z.string().max(1000).nullable().optional(),
-      context: z.string().max(500).nullable().optional(),
-    }),
+      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite). The ride fields (serviceId, rideState, restored section) may be passed explicitly; otherwise they resolve from the service master — a migrated row restores its section, a known service starts unknown.",
+    request: z
+      .object({
+        name: z.string().min(1).max(100),
+        firstRiddenOn: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "firstRiddenOn must be YYYY-MM-DD"),
+        note: z.string().max(1000).nullable().optional(),
+        context: z.string().max(500).nullable().optional(),
+      })
+      .merge(rideFieldsSchema),
     response: z.object({ created: z.boolean(), id: z.number().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
@@ -1378,15 +1492,23 @@ export const Actions = {
         .select({
           id: schema.riddenLines.id,
           context: schema.riddenLines.context,
+          serviceId: schema.riddenLines.serviceId,
         })
         .from(schema.riddenLines)
         .where(eq(schema.riddenLines.name, name));
       if (existing[0]) {
         const context = args.context?.trim() || null;
-        if (context && !existing[0].context) {
+        const updates: Partial<typeof schema.riddenLines.$inferInsert> = {};
+        if (context && !existing[0].context) updates.context = context;
+        // Backfill the master linkage onto a pre-master row only;
+        // never overwrite a row that already has one.
+        if (!existing[0].serviceId) {
+          Object.assign(updates, resolveRideFields(name, args));
+        }
+        if (Object.keys(updates).length > 0) {
           await db
             .update(schema.riddenLines)
-            .set({ context })
+            .set(updates)
             .where(eq(schema.riddenLines.id, existing[0].id));
           ctx.invalidateQueries();
         }
@@ -1399,6 +1521,7 @@ export const Actions = {
           firstRiddenOn: args.firstRiddenOn,
           note: args.note?.trim() || null,
           context: args.context?.trim() || null,
+          ...resolveRideFields(name, args),
         })
         .returning({ id: schema.riddenLines.id });
       ctx.invalidateQueries();
@@ -1427,7 +1550,7 @@ export const Actions = {
 
   importRiddenLines: defineAction({
     description:
-      "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet.",
+      "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet. Fresh rows also get their ride fields from the service master (migrated rows restore their section); already-recorded rows with no service linkage yet get the same backfill, never an overwrite.",
     request: z.object({
       entries: z
         .array(
@@ -1451,13 +1574,18 @@ export const Actions = {
           id: schema.riddenLines.id,
           name: schema.riddenLines.name,
           context: schema.riddenLines.context,
+          serviceId: schema.riddenLines.serviceId,
         })
         .from(schema.riddenLines);
       const seen = new Map(
-        existing.map((r) => [r.name, { id: r.id, hasContext: !!r.context }]),
+        existing.map((r) => [
+          r.name,
+          { id: r.id, hasContext: !!r.context, serviceId: r.serviceId },
+        ]),
       );
       const fresh: (typeof schema.riddenLines.$inferInsert)[] = [];
       const contextUpdates: BatchItem<"sqlite">[] = [];
+      const rideUpdates: BatchItem<"sqlite">[] = [];
       let skipped = 0;
       for (const entry of args.entries) {
         const name = entry.name.trim();
@@ -1479,19 +1607,36 @@ export const Actions = {
           } else {
             skipped++;
           }
+          if (!known.serviceId && known.id > 0) {
+            const ride = resolveRideFields(name, {});
+            rideUpdates.push(
+              db
+                .update(schema.riddenLines)
+                .set(ride)
+                .where(eq(schema.riddenLines.id, known.id)),
+            );
+            known.serviceId = ride.serviceId;
+          }
           continue;
         }
-        seen.set(name, { id: -1, hasContext: !!(entry.context?.trim()) });
+        const ride = resolveRideFields(name, {});
+        seen.set(name, {
+          id: -1,
+          hasContext: !!(entry.context?.trim()),
+          serviceId: ride.serviceId,
+        });
         fresh.push({
           name,
           firstRiddenOn: entry.firstRiddenOn,
           note: entry.note?.trim() || null,
           context: entry.context?.trim() || null,
+          ...ride,
         });
       }
       const statements: BatchItem<"sqlite">[] = [
         ...fresh.map((row) => db.insert(schema.riddenLines).values(row)),
         ...contextUpdates,
+        ...rideUpdates,
       ];
       if (statements.length > 0) {
         const [first, ...rest] = statements;

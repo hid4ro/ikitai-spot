@@ -45,7 +45,6 @@ import {
 import {
   JAPAN_LINE_TOTAL,
   JAPAN_MUNICIPALITY_TOTAL,
-  LEDGER_LINE_NAME_MAP,
   RIDDEN_LINE_GEOMETRIES,
 } from "./assets/visited-lines";
 import {
@@ -888,16 +887,18 @@ const LINE_KEY_BY_NAME: ReadonlyMap<string, string> =
 
 /* Resolves a ledger line name (e.g. 「JR総武快速線」) to its key in
    RIDDEN_LINE_GEOMETRIES (「総武線|東日本旅客鉄道」). The rules live
-   in line-resolution.ts (regression-tested against the real asset);
-   this binds them to the bundled asset. Returns null when nothing
+   in line-resolution.ts (regression-tested against the real asset),
+   backed by the service master (shared/service-master.ts); this
+   binds them to the bundled asset. Returns null when nothing
    resolves — the line then simply has no track drawn and no color
-   chip. */
+   chip. Multi-line services (JR埼京線) also return null here: no
+   single key stands for them, and stage 2 will paint their ridden
+   section instead of a whole line. */
 function resolveRiddenLineKey(ledgerName: string): string | null {
   return resolveRiddenLineKeyInAsset(
     ledgerName,
     RIDDEN_LINE_GEOMETRIES,
     LINE_KEY_BY_NAME,
-    LEDGER_LINE_NAME_MAP,
   );
 }
 
@@ -906,6 +907,24 @@ function resolveRiddenLineKey(ledgerName: string): string | null {
 function riddenLineColor(ledgerName: string): string | null {
   const key = resolveRiddenLineKey(ledgerName);
   return key ? (RIDDEN_LINE_GEOMETRIES[key]?.color ?? null) : null;
+}
+
+/* The ride's recorded section, as one short line under the ledger
+   name: the restored section for partial rides （区間：新宿→大崎）,
+   全線乗車 for full rides, 区間不明 where the record pins down no
+   section. The state comes from the row (ridden_lines.ride_state);
+   formal line names stay out of the display — the list shows service
+   names and station names only. */
+function riddenLineRideLabel(line: RiddenLine): string | null {
+  if (line.rideState === "partial") {
+    if (line.fromStationName && line.toStationName) {
+      return `区間：${line.fromStationName}→${line.toStationName}`;
+    }
+    return "区間指定（区間の記録なし）";
+  }
+  if (line.rideState === "full") return "全線乗車";
+  if (line.rideState === "unknown") return "区間不明";
+  return null;
 }
 
 /* ---------------- conquest charts （制覇グラフ) ---------------- */
@@ -1174,7 +1193,6 @@ function ConquestCharts({
     riddenLines.map((l) => l.name),
     RIDDEN_LINE_GEOMETRIES,
     LINE_KEY_BY_NAME,
-    LEDGER_LINE_NAME_MAP,
   );
   const operatorRows: ProgressRow[] = [...operatorRidden.entries()]
     .map(([name, done]) => {
@@ -3002,7 +3020,9 @@ function VisitedMapSection({
      share one fetch): each ledger name resolves to at most one asset
      line key, and several ledger rows can land on the same key
      (JR総武快速線 and JR総武本線 are both 「総武線」) — the set keeps
-     each painted line unique. */
+     each painted line unique. Stage 1 still paints whole single-key
+     lines; a multi-line service (JR埼京線) paints nothing yet, and
+     stage 2 will paint only its ridden section instead. */
   const riddenQuery = useQuery({
     queryKey: ["riddenLines"],
     queryFn: () => api.listRiddenLines({}),
@@ -3377,13 +3397,12 @@ function VisitedMapSection({
      flies the map instead and never sets this). */
   const pendingLineScrollRef = useRef<number | null>(null);
   /* Each operator's first ledger row (see firstLineByOperator in
-     line-focus.ts): the bar tap's jump target. Unresolved rows
-     belong to no operator and are never a target. */
+     line-focus.ts): the bar tap's jump target. Names that resolve to
+     no operator are never a target. */
   const firstLineRowByOperator = firstLineByOperator(
     riddenQuery.data?.lines ?? [],
     RIDDEN_LINE_GEOMETRIES,
     LINE_KEY_BY_NAME,
-    LEDGER_LINE_NAME_MAP,
   );
   /* A municipality the reader tapped on the map that is NOT in the
      ledger yet: its name is shown under the map and its boundary gets
@@ -6149,6 +6168,7 @@ function RiddenLinesBlock({
         <ul className="mt-3 divide-y divide-[var(--border)] rounded-[var(--radius)] bg-[var(--surface)]">
           {lines.map((line) => {
             const editingLineContext = lineContextEditId === line.id;
+            const rideLabel = riddenLineRideLabel(line);
             return (
             <li
               key={line.id}
@@ -6179,6 +6199,9 @@ function RiddenLinesBlock({
                   className="min-w-0 flex-1 cursor-pointer text-left"
                 >
                   <span className="block truncate text-sm font-medium">{line.name}</span>
+                  {rideLabel && (
+                    <span className="block text-xs text-[var(--dim)]">{rideLabel}</span>
+                  )}
                   {line.note && (
                     <span className="block text-xs text-[var(--dim)]">{line.note}</span>
                   )}

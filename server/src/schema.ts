@@ -71,12 +71,26 @@ export const visitedMunicipalities = sqliteTable("visited_municipalities", {
 // delivery note from the chat-side log (seen_lines.md). context is the
 // trip context of that first ride (what the trip was for / on the way
 // back from), same free-text field as the municipality ledger's.
+// Stage 1 (subtask 1420) adds the service-master linkage: serviceId is
+// the service-master entry (shared/service-master.ts), rideState is
+// 'unknown' | 'partial' | 'full', and from/to are the ridden section
+// as N02 station group codes (N02_005g) with names. unknown means the
+// record pins down no section; partial means from/to are the section
+// actually ridden; full means the whole service. masterVersion is the
+// master version the ride was recorded at.
 export const riddenLines = sqliteTable("ridden_lines", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   firstRiddenOn: text("first_ridden_on").notNull(),
   note: text("note"),
   context: text("context"),
+  serviceId: text("service_id"),
+  rideState: text("ride_state").notNull().default("unknown"),
+  fromStationId: text("from_station_id"),
+  fromStationName: text("from_station_name"),
+  toStationId: text("to_station_id"),
+  toStationName: text("to_station_name"),
+  masterVersion: text("master_version"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

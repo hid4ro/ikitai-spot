@@ -6,35 +6,42 @@
    tested directly against the real asset — see line-focus.test.ts.
 
    Resolution goes through line-resolution.ts's resolveRiddenLineKey
-   (the subtask-1391 rules): a ledger name that resolves to no asset
-   line (e.g. JR埼京線, an explicit null in LEDGER_LINE_NAME_MAP)
-   belongs to no operator, so it is never a bar-jump target and a
-   row tap on it can only highlight the row — there is no track to
-   paint or frame. */
+   (the master-backed rules): a ledger name that resolves to no asset
+   line belongs to no operator, so it is never a bar-jump target.
+   Multi-line services (JR埼京線) belong to their service's operator
+   via the master, so they ARE jump targets — but a row tap on one
+   can only highlight the row until stage 2 paints the ridden
+   section, since no single track stands for the whole service. */
 
 import type { GeoJsonLineGeometry } from "./geojson";
 import { resolveRiddenLineKey } from "./line-resolution";
+import { serviceByLedgerName } from "../../shared/service-master";
 
 type LineGeometryMap = Readonly<
   Record<string, { operator: string; geometry: GeoJsonLineGeometry }>
 >;
 
-/* The operator a ledger line name belongs to, via its resolved
-   asset line; null when the name resolves to nothing. */
+/* The operator a ledger line name belongs to, via the service
+   master (multi-line services included) or, for names the master
+   does not know, via its resolved asset line; null when the name
+   resolves to nothing. */
 export function operatorOfLine(
   ledgerName: string,
   geometries: LineGeometryMap,
   keyByName: ReadonlyMap<string, string>,
-  ledgerMap: Readonly<Record<string, string | null>>,
 ): string | null {
-  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName, ledgerMap);
-  if (!key) return null;
+  const key = resolveRiddenLineKey(ledgerName, geometries, keyByName);
+  if (!key) {
+    // No single asset line: a multi-line service still has an
+    // operator in the master (JR埼京線 → 東日本旅客鉄道).
+    return serviceByLedgerName(ledgerName)?.operator ?? null;
+  }
   return geometries[key]?.operator ?? null;
 }
 
 /* The FIRST ledger row of each operator, in ledger order — the
    row a 事業者別 bar tap scrolls to. Rows that resolve to no
-   asset line belong to no operator and are skipped, exactly as
+   operator (unknown names) are skipped, exactly as
    countRiddenByOperator skips them. Several rows can share one
    asset line (JR総武快速線 and JR総武本線 are both 「総武線」);
    the earlier row in the ledger wins, later ones never replace it. */
@@ -42,11 +49,10 @@ export function firstLineByOperator<Row extends { id: number; name: string }>(
   rows: readonly Row[],
   geometries: LineGeometryMap,
   keyByName: ReadonlyMap<string, string>,
-  ledgerMap: Readonly<Record<string, string | null>>,
 ): ReadonlyMap<string, Row> {
   const first = new Map<string, Row>();
   for (const row of rows) {
-    const operator = operatorOfLine(row.name, geometries, keyByName, ledgerMap);
+    const operator = operatorOfLine(row.name, geometries, keyByName);
     if (!operator) continue;
     if (!first.has(operator)) first.set(operator, row);
   }
