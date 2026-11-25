@@ -74,6 +74,11 @@ const S = {
   西船橋: station("003547", "西船橋", 139.95907, 35.70737),
   京成高砂: station("003248", "京成高砂", 139.86659, 35.75087),
   印旛日本医大: station("003125", "印旛日本医大", 140.20276, 35.78782),
+  東松戸: station("003187", "東松戸", 139.94311, 35.77013),
+  北府中: station("003771", "北府中", 139.47179, 35.68086),
+  印西牧の原: station("003083", "印西牧の原", 140.16713, 35.80363),
+  新松戸: station("003045", "新松戸", 139.92111, 35.82549),
+  新鎌ヶ谷: station("003146", "新鎌ヶ谷", 139.99836, 35.77961),
 };
 
 function servicePath(serviceId: string): ServicePath {
@@ -272,6 +277,156 @@ describe("real asset: the migrated sections", () => {
     expect(
       innerCoords.some((p) => haversineKm(p, [S.品川.lng, S.品川.lat]) < 0.5),
     ).toBe(true);
+  });
+});
+
+describe("real asset: the subtask-1455 estimated sections", () => {
+  test("the two single-line sections measure their published rail kilometres", () => {
+    /* 武蔵野線 東松戸 64.0 km − 北府中 1.7 km = 62.3 km;
+       北総線 印西牧の原 28.5 km − 東松戸 7.5 km = 21.0 km
+       (Wikipedia station distances from 府中本町 / 京成高砂).
+       The ±10% band is the same one the migrated sections use. */
+    const cases: [string, StationRef, StationRef, number][] = [
+      ["jr-musashino", S.東松戸, S.北府中, 62.3],
+      ["hokuso", S.東松戸, S.印西牧の原, 21.0],
+    ];
+    for (const [serviceId, from, to, railKm] of cases) {
+      const path = servicePath(serviceId);
+      const clip = clipServicePath(path, from, to)!;
+      expect(clip).not.toBeNull();
+      expect(clip.approximate).toBe(false);
+      expect(clip.lengthKm).toBeGreaterThan(railKm * 0.9);
+      expect(clip.lengthKm).toBeLessThan(railKm * 1.1);
+    }
+    /* The clips follow the line through the stations between:
+       南浦和・新松戸 on 武蔵野線, 新鎌ヶ谷 on 北総線. */
+    const musashino = clipServicePath(
+      servicePath("jr-musashino"),
+      S.東松戸,
+      S.北府中,
+    )!;
+    const musashinoCoords = musashino.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.南浦和, S.新松戸]) {
+      expect(
+        musashinoCoords.some(
+          (p) => haversineKm(p, [via.lng, via.lat]) < 0.5,
+        ),
+      ).toBe(true);
+    }
+    const hokuso = clipServicePath(
+      servicePath("hokuso"),
+      S.東松戸,
+      S.印西牧の原,
+    )!;
+    const hokusoCoords = hokuso.legs.flatMap((leg) => leg.coords);
+    expect(
+      hokusoCoords.some(
+        (p) => haversineKm(p, [S.新鎌ヶ谷.lng, S.新鎌ヶ谷.lat]) < 0.5,
+      ),
+    ).toBe(true);
+  });
+
+  test("the Yamanote section takes the inner side, via 渋谷・目黒", () => {
+    const path = servicePath("yamanote");
+    const inner = clipServicePath(path, S.新宿, S.大崎, "inner")!;
+    /* Published 9.8 km; the asset measures 8.6 km because its
+       目黒→大崎 stretch is short (1.85 km against 2.8 km
+       published — the same shortfall the 大崎→目黒 test already
+       pins with its loose 1.5–2.5 band), so the band is loose
+       here too. What matters is that it is the short way, via
+       渋谷・目黒, and not the long way round via 田端・東京. */
+    expect(inner.lengthKm).toBeGreaterThan(7);
+    expect(inner.lengthKm).toBeLessThan(10);
+    const innerCoords = inner.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.渋谷, S.目黒]) {
+      expect(
+        innerCoords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.5),
+      ).toBe(true);
+    }
+    for (const notVia of [S.田端, S.東京]) {
+      expect(
+        innerCoords.some(
+          (p) => haversineKm(p, [notVia.lng, notVia.lat]) < 0.5,
+        ),
+      ).toBe(false);
+    }
+    const outer = clipServicePath(path, S.新宿, S.大崎, "outer")!;
+    expect(outer.lengthKm).toBeGreaterThan(20);
+  });
+
+  test("ledger rows carrying the three sections count their union", () => {
+    /* The live rows as they will stand after registration:
+       武蔵野線・北総線 move from unknown to partial with one
+       added section each; 山手線 keeps its primary 大崎→目黒
+       and gains 新宿→大崎 (inner). The Yamanote overlap
+       （目黒→大崎 is inside the new section) counts once. */
+    const rows = [
+      {
+        name: "JR武蔵野線",
+        serviceId: "jr-musashino",
+        serviceLinkSource: null,
+        fromStationId: null,
+        toStationId: null,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.東松戸.id,
+            toStationId: S.北府中.id,
+            direction: null,
+            blockId: null,
+            recordedServiceId: "jr-musashino",
+          },
+        ],
+      },
+      {
+        name: "北総線",
+        serviceId: "hokuso",
+        serviceLinkSource: null,
+        fromStationId: null,
+        toStationId: null,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.東松戸.id,
+            toStationId: S.印西牧の原.id,
+            direction: null,
+            blockId: null,
+            recordedServiceId: "hokuso",
+          },
+        ],
+      },
+      {
+        name: "山手線",
+        serviceId: "yamanote",
+        serviceLinkSource: null,
+        fromStationId: S.大崎.id,
+        toStationId: S.目黒.id,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.新宿.id,
+            toStationId: S.大崎.id,
+            direction: "inner" as const,
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ],
+      },
+    ];
+    const coverage = computeRiddenLineCoverage(rows, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-musashino")!.riddenKm).toBeCloseTo(
+      62.3,
+      0,
+    );
+    expect(coverage.perService.get("hokuso")!.riddenKm).toBeCloseTo(21.0, 0);
+    /* 山手線's union is the inner section alone (8.6 km): the
+       primary 大崎→目黒 sits inside it. */
+    expect(coverage.perService.get("yamanote")!.riddenKm).toBeCloseTo(8.6, 0);
+    expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
+    expect(coverage.completeServiceIds).toEqual([]);
   });
 });
 

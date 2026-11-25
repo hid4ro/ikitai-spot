@@ -21,6 +21,7 @@ import {
   isN02StationId,
   isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
+  recordedSectionFitsService,
   resolveRiddenService,
   sectionEndpointsKnownToService,
   sectionRouteAmbiguous,
@@ -28,6 +29,7 @@ import {
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
+  serviceOrderedStations,
   serviceStationIds,
   stationRefById,
   validateSectionEndpoints,
@@ -667,7 +669,11 @@ describe("stage 2 blocks (subtask 1421)", () => {
       // geometry code projects sections onto the line shape).
       for (const station of [
         ...entry.segments.flatMap((s) => [s.from, s.to]),
-        ...entry.blocks.flatMap((b) => [b.from, b.to]),
+        ...entry.blocks.flatMap((b) => [
+          b.from,
+          ...(b.stations ?? []),
+          b.to,
+        ]),
       ]) {
         expect(Number.isFinite(station.lng)).toBe(true);
         expect(Number.isFinite(station.lat)).toBe(true);
@@ -697,10 +703,13 @@ describe("stage 2 blocks (subtask 1421)", () => {
   });
 
   test("validateSectionEndpoints: mid-block stations and reversed order fail", () => {
-    // 国分寺 is a real station on 中央線 but not a block boundary.
+    // 国分寺 is a real station on 中央線 but is known only from a
+    // migrated ride — it is listed on no block, so it still cannot
+    // be a section endpoint (stage 3 lists stations on blocks;
+    // migrated endpoints stay out).
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "003606", "004029"),
-    ).toMatch(/not a boundary station/);
+    ).toMatch(/not a station of/);
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "004029", "003766"),
     ).toMatch(/running order/);
@@ -710,6 +719,62 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(validateSectionEndpoints("no-such-service", "003766", "003700")).toMatch(
       /unknown service/,
     );
+  });
+
+  test("validateSectionEndpoints: listed mid-block stations pass (subtask 1455)", () => {
+    // The three estimated sections of subtask 1455: both endpoints
+    // are stations listed on a block of the service.
+    expect(
+      validateSectionEndpoints("jr-musashino", "003187", "003771"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("hokuso", "003187", "003083"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("yamanote", "003700", "004135", "inner"),
+    ).toBeNull();
+    // The loop still needs its direction, and either side is a
+    // valid section — the direction picks which one.
+    expect(
+      validateSectionEndpoints("yamanote", "003700", "004135"),
+    ).toMatch(/needs a direction/);
+    expect(
+      validateSectionEndpoints("yamanote", "003700", "004135", "outer"),
+    ).toBeNull();
+    // Running order still holds between listed stations.
+    expect(
+      validateSectionEndpoints("jr-musashino", "003771", "003187"),
+    ).toMatch(/running order/);
+    expect(
+      validateSectionEndpoints("hokuso", "003083", "003187"),
+    ).toMatch(/running order/);
+    // A listed station against a boundary of a later block works.
+    expect(
+      validateSectionEndpoints("jr-musashino", "003187", "003004"),
+    ).toBeNull();
+  });
+
+  test("serviceOrderedStations interleaves block stations in running order", () => {
+    expect(
+      serviceOrderedStations("jr-musashino").map((s) => s.id),
+    ).toEqual(["003876", "003187", "003771", "003004", "003547"]);
+    expect(
+      serviceOrderedStations("hokuso").map((s) => s.id),
+    ).toEqual(["003248", "003187", "003083", "003125"]);
+    // A loop closes on its first station, like the boundaries.
+    expect(
+      serviceOrderedStations("yamanote").map((s) => s.id),
+    ).toEqual([
+      "004095",
+      "004135",
+      "003922",
+      "003700",
+      "003390",
+      "003335",
+      "003766",
+      "004095",
+    ]);
+    expect(serviceOrderedStations("no-such-service")).toEqual([]);
   });
 
   test("validateSectionEndpoints: a loop needs a direction", () => {
@@ -753,6 +818,12 @@ describe("stage 2 blocks (subtask 1421)", () => {
     // restored 中央線 section; 聖蹟桜ヶ丘 only in the 京王線 one).
     expect(stationRefById("003606")?.name).toBe("国分寺");
     expect(stationRefById("003971")?.name).toBe("聖蹟桜ヶ丘");
+    // A station listed on a block (stage 3, subtask 1455).
+    expect(stationRefById("003187")?.name).toBe("東松戸");
+    expect(stationRefById("003187")?.lng).toBeCloseTo(139.94311, 5);
+    expect(stationRefById("003187")?.lat).toBeCloseTo(35.77013, 5);
+    expect(stationRefById("003771")?.name).toBe("北府中");
+    expect(stationRefById("003083")?.name).toBe("印西牧の原");
     // Coordinates ride along, so a resolved station can be
     // projected onto the line shape.
     const shinjuku = stationRefById("003700")!;
@@ -803,7 +874,7 @@ describe("integrated review round 1: an explicit unlink is a confirmed answer", 
     ).toBe(false);
   });
 
-  test("serviceStationIds covers segment ends, block boundaries and migrated endpoints only", () => {
+  test("serviceStationIds covers segment ends, block boundaries, listed block stations and migrated endpoints", () => {
     const keio = serviceStationIds("keio");
     expect(keio.has("003700")).toBe(true); // 新宿, a segment end
     expect(keio.has("003966")).toBe(true); // 調布, a block boundary only
@@ -812,6 +883,16 @@ describe("integrated review round 1: an explicit unlink is a confirmed answer", 
     const chuo = serviceStationIds("jr-chuo-rapid");
     expect(chuo.has("003606")).toBe(true);
     expect(chuo.has("003634")).toBe(true); // 立川
+    /* Listed block stations (stage 3, subtask 1455) belong to
+       their service; a migrated endpoint of another service
+       still does not. */
+    const musashino = serviceStationIds("jr-musashino");
+    expect(musashino.has("003187")).toBe(true); // 東松戸
+    expect(musashino.has("003771")).toBe(true); // 北府中
+    expect(musashino.has("003083")).toBe(false); // 印西牧の原 is 北総線's
+    const hokuso = serviceStationIds("hokuso");
+    expect(hokuso.has("003187")).toBe(true); // 東松戸, shared with 武蔵野線
+    expect(hokuso.has("003083")).toBe(true); // 印西牧の原
     expect(serviceStationIds("no-such-service").size).toBe(0);
     /* Every migrated ride's endpoints are in its own service's
        set — the fit checks on both sides rely on it. */
@@ -841,6 +922,49 @@ describe("integrated review round 2: the fit yardsticks", () => {
     expect(sectionEndpointsKnownToService("keio", "003821", "003634")).toBe(
       false,
     );
+  });
+
+  test("a section between listed mid-block stations fits its service (subtask 1455)", () => {
+    /* The three estimated sections, as addRiddenSection would
+       store them (recorded under their own service, no block —
+       none of the three is exactly one block). */
+    expect(
+      recordedSectionFitsService("jr-musashino", {
+        fromStationId: "003187",
+        toStationId: "003771",
+        direction: null,
+        blockId: null,
+        recordedServiceId: "jr-musashino",
+      }),
+    ).toBe(true);
+    expect(
+      recordedSectionFitsService("hokuso", {
+        fromStationId: "003187",
+        toStationId: "003083",
+        direction: null,
+        blockId: null,
+        recordedServiceId: "hokuso",
+      }),
+    ).toBe(true);
+    expect(
+      recordedSectionFitsService("yamanote", {
+        fromStationId: "003700",
+        toStationId: "004135",
+        direction: "inner",
+        blockId: null,
+        recordedServiceId: "yamanote",
+      }),
+    ).toBe(true);
+    /* The same pair under the wrong service still does not fit. */
+    expect(
+      recordedSectionFitsService("hokuso", {
+        fromStationId: "003187",
+        toStationId: "003771",
+        direction: null,
+        blockId: null,
+        recordedServiceId: "hokuso",
+      }),
+    ).toBe(false);
   });
 
   test("a primary section whose pair runs on another service over a different route is ambiguous", () => {
