@@ -249,6 +249,61 @@ export function lineRowForPaintedFeature<
   return lineRowForPaintedKey(rows, perServiceLegs, feature.key);
 }
 
+/* The スポット tab's whole-country initial camera (review round 1,
+   finding 4): the mount opens on it, and entering the スポット tab
+   with no Pixel position restores it instead of keeping the record
+   tab's view. The zoom follows the pane width, exactly as the mount
+   computed it inline before this helper existed. */
+export function spotsInitialCamera(containerWidthPx: number): {
+  center: { lat: number; lng: number };
+  zoom: number;
+} {
+  return {
+    center: { lat: 37.6, lng: 138.4 },
+    zoom: containerWidthPx > 0 && containerWidthPx < 560 ? 3.2 : 4.2,
+  };
+}
+
+/* The mount effect's dependency snapshot, for the スポット-tab
+   remount skip below. */
+export type MapMountKeys = {
+  placesKey: string;
+  riddenLinesKey: string;
+  mapAttempt: number;
+  mapFailed: boolean;
+  boundarySettled: boolean;
+  showMapPane: boolean;
+};
+
+/* Whether a mount-effect re-run may skip rebuilding the map
+   (review round 1, finding 5): only when the ONLY thing that
+   changed since the last mount is the record data
+   (placesKey / riddenLinesKey), the スポット tab is showing, and
+   a live map exists to keep using. A retry, a failure flip, the
+   boundary set settling, or the pane appearing is never a
+   record-only change, so those still mount; with no previous
+   mount there is nothing to keep, so the first run mounts too.
+   The caller remembers the skipped data as stale and rebuilds on
+   the next record-tab entry. */
+export function shouldSkipSpotRemount(
+  lastKeys: MapMountKeys | null,
+  nextKeys: MapMountKeys,
+  variant: RecordMapVariant,
+  hasLiveMap: boolean,
+): boolean {
+  if (!lastKeys || !hasLiveMap || variant !== "spots") return false;
+  const recordDataChanged =
+    lastKeys.placesKey !== nextKeys.placesKey ||
+    lastKeys.riddenLinesKey !== nextKeys.riddenLinesKey;
+  if (!recordDataChanged) return false;
+  return (
+    lastKeys.mapAttempt === nextKeys.mapAttempt &&
+    lastKeys.mapFailed === nextKeys.mapFailed &&
+    lastKeys.boundarySettled === nextKeys.boundarySettled &&
+    lastKeys.showMapPane === nextKeys.showMapPane
+  );
+}
+
 /* Whether the live map's mount effect should run. The mount
    waits for the priority boundary set to settle, and — since
    integrated review round 2 (high) — for there to be anything

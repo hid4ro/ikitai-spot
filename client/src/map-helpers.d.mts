@@ -45,6 +45,12 @@ export type MapLibreLike = {
     options?: Record<string, unknown>,
   ) => void;
   flyTo: (options: Record<string, unknown>) => void;
+  /* Stop any in-flight camera animation (MapLibre's Map.stop): a
+     deliberate camera move first stops the previous tab's
+     animation instead of fighting it (review round 1, finding 7).
+     Optional: the declared shape is minimal, and a runtime
+     without it simply skips the stop. */
+  stop?: () => void;
   isStyleLoaded: () => boolean;
   once: (event: string, cb: () => void) => void;
   /* For the persistent focus highlight's tap handling: press start

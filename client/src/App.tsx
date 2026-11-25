@@ -6,6 +6,7 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -85,7 +86,10 @@ import {
   lineRowForPaintedFeature,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
+  shouldSkipSpotRemount,
+  spotsInitialCamera,
   stickyPaneVisibleTop,
+  type MapMountKeys,
   type RecordMapVariant,
 } from "./map-variant";
 import {
@@ -316,6 +320,13 @@ function drawCurrentLocationMarker(
     const reduceMotion =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    /* A deliberate pan first stops whatever camera animation the
+       previous tab left running (review round 1, finding 7). */
+    try {
+      map.stop?.();
+    } catch {
+      /* stopping is best-effort */
+    }
     map.flyTo({ center: [lng, lat], duration: reduceMotion ? 0 : 800 });
   }
 }
@@ -3067,6 +3078,7 @@ function VisitedMapSection({
   search,
   centerGetterRef,
   onSpotTap,
+  children,
 }: {
   active: boolean;
   /* Which map tab is showing (tab split, subtask 1439; the
@@ -3121,6 +3133,12 @@ function VisitedMapSection({
      handler the map stays display-only. (Moved from SpotListMap
      with the map.) */
   onSpotTap?: (point: SpotMapPoint) => void;
+  /* Content rendered below the map pane, inside the same grid div
+     (review round 1, finding 3): App passes the スポット tab's
+     list and controls here, so the sticky map pane's parent spans
+     the list too and the pane stays pinned while the list scrolls
+     beneath it. On the record tabs nothing is passed. */
+  children?: ReactNode;
 }) {
   const queryClient = useQueryClient();
   const visitedQuery = useQuery({
@@ -3154,24 +3172,39 @@ function VisitedMapSection({
     void ensureBoundaryManifest();
     void ensurePrefectureBorders();
   }, []);
-  /* The priority prefectures follow the ledger: this (re)runs
-     whenever a new ledger lands, so a municipality recorded in a
-     prefecture that has not loaded yet pulls its boundaries in
-     too. boundarySettled flips once the first priority round
-     finishes, successfully or not. */
+  /* The priority prefectures follow the ledger — but the ledger
+     must not gate the map (review round 1, finding 2): this
+     (re)runs whenever a new ledger lands, so a municipality
+     recorded in a prefecture that has not loaded yet pulls its
+     boundaries in too, and it starts at once with whatever
+     prefectures are known so far (none while the ledger is still
+     pending), so a hung ledger API no longer holds the map on
+     ライブ地図を読み込み中 forever. boundarySettled flips once
+     the first priority round finishes, successfully or not. The
+     wait is also capped: a slow manifest-then-prefecture
+     sequence used to add ~30 s before the mount could start;
+     after the cap the map mounts without the boundary layers and
+     they fill in behind it (the background refresh and the
+     placesKey remount pick the shapes up when they land). */
   useEffect(() => {
-    if (!visitedQuery.data && !visitedQuery.isError) return;
     const prefs = [
       ...new Set(
         (visitedQuery.data?.municipalities ?? []).map((m) => m.prefecture),
       ),
     ];
     let cancelled = false;
-    void loadBoundaryPriorities(prefs).then(() => {
-      if (!cancelled) setBoundarySettled(true);
+    let capTimer: ReturnType<typeof setTimeout> | null = null;
+    const settleCap = new Promise<void>((resolve) => {
+      capTimer = setTimeout(resolve, 10_000);
     });
+    void Promise.race([loadBoundaryPriorities(prefs), settleCap]).then(
+      () => {
+        if (!cancelled) setBoundarySettled(true);
+      },
+    );
     return () => {
       cancelled = true;
+      if (capTimer) clearTimeout(capTimer);
     };
   }, [visitedQuery.data, visitedQuery.isError]);
   /* Once the priority set is in, the rest of the country streams
@@ -3525,6 +3558,58 @@ function VisitedMapSection({
   const cameraRequestRef = useRef(cameraRequest);
   cameraRequestRef.current = cameraRequest;
   const liveMapRef = useRef<MapLibreLike | null>(null);
+  /* Stop any camera animation still running on the live map, so a
+     deliberate camera move never fights the previous tab's
+     in-flight fitBounds / flyTo (review round 1, finding 7). The
+     stop lives at each deliberate move, not at the variant-change
+     effect's head: that callback runs in the same commit as the
+     new tab's framing, so a stop there would cancel the framing
+     that just started (and the spots re-take fly-to). */
+  const stopCamera = (map: MapLibreLike) => {
+    try {
+      map.stop?.();
+    } catch {
+      /* stopping is best-effort */
+    }
+  };
+  /* Tear down the live map instance and drop every reference to
+     it: the handle, the live-map ref the framing effects read,
+     the center getter the spot list's sort reads, and the
+     listener guards. Called whenever the map goes away — the
+     mount effect's cleanup (so leaving for the その他 tab, or a
+     remount, never leaves a detached instance running), and the
+     mount gate's no-mount path (so the empty record state keeps
+     at most one instance, review round 1, finding 1).
+     Idempotent: a missing handle is a no-op. */
+  const destroyLiveMap = () => {
+    try {
+      mapHandleRef.current?.destroy();
+    } catch {
+      /* a half-mounted handle may refuse */
+    }
+    mapHandleRef.current = null;
+    liveMapRef.current = null;
+    focusListenerMapRef.current = null;
+    spotTapListenerMapRef.current = null;
+    if (centerGetterRef) centerGetterRef.current = null;
+  };
+  /* The スポット tab's whole-country initial camera (review round
+     1, finding 4): the same center / zoom the mount passes on
+     the スポット tab. Used when entering the スポット tab with
+     no Pixel position — the spots framing effect leaves the
+     camera alone without one, so the record tab's view would
+     otherwise linger. Instant, like the mount. */
+  const resetSpotsCamera = (map: MapLibreLike) => {
+    const { center, zoom } = spotsInitialCamera(
+      mapContainerRef.current?.clientWidth ?? 0,
+    );
+    try {
+      stopCamera(map);
+      map.flyTo({ center: [center.lng, center.lat], zoom, duration: 0 });
+    } catch {
+      /* framing is a cue; a failure leaves the current view */
+    }
+  };
   const [locBusy, setLocBusy] = useState(false);
   /* Busy flag for this tab's own 「Pixelの位置を取り直す」 button
      (separate from locBusy, which belongs to the frame button). */
@@ -3555,20 +3640,35 @@ function VisitedMapSection({
      automatically when the map and the ledger are ready (unless the
      reader has already picked a municipality), and again whenever
      the 「今いる市区町村に合わせる」 button is pressed. */
-  const frameCurrentMunicipality = async (manual: boolean) => {
+  const frameCurrentMunicipality = async (manual: boolean): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
     if (manual) setLocBusy(false);
     if (!loc) {
-      return;
+      return false;
     }
     currentLocRef.current = { lat: loc.lat, lng: loc.lng };
+    /* The スポット tab's location follows the same read (review
+       round 1, finding 8): without this, a re-take on a record
+       tab moved currentLocRef alone, and returning to the スポット
+       tab re-plotted the marker and the nearest spot from the
+       stale spotLoc — the 60 s poll compares against
+       currentLocRef, so it early-returned and never repaired it. */
+    spotLocRef.current = loc;
+    setSpotLoc(loc);
     const hit = findMunicipalityAt(loc.lat, loc.lng, municipalitiesRef.current);
     const reduceMotion =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     withLiveMapRef.current((map) => {
+      /* Awaiting the location read can outlive the tab: if the
+         reader has moved to the スポット tab meanwhile, the
+         record framing must not yank its camera (review round 1,
+         finding 6). The marker is redrawn by the spots framing
+         effect there. */
+      if (variantRef.current === "spots") return;
       try {
+        stopCamera(map);
         ensureFocusListenersRef.current(map);
         drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
         const bounds = hit ? geometryBounds(hit.geometry) : null;
@@ -3591,11 +3691,62 @@ function VisitedMapSection({
         /* framing is best-effort; a failure leaves the current view */
       }
     });
+    return true;
   };
   /* Kept in a ref so the auto-fit effect below always calls the
      latest version without re-running. */
   const frameCurrentRef = useRef(frameCurrentMunicipality);
   frameCurrentRef.current = frameCurrentMunicipality;
+  /* Fit the camera to every visited municipality the reader can
+     place (review round 1, finding 4): entering a record tab
+     with no Pixel position must still restore the record tabs'
+     initial camera instead of leaving the スポット tab's view.
+     Falls back to the whole-country camera when nothing is
+     placeable. */
+  const frameVisitedBounds = () => {
+    withLiveMapRef.current((map) => {
+      if (variantRef.current === "spots") return;
+      try {
+        stopCamera(map);
+        let minLng = Infinity;
+        let minLat = Infinity;
+        let maxLng = -Infinity;
+        let maxLat = -Infinity;
+        for (const m of municipalitiesRef.current) {
+          const point = representativePoint(m);
+          if (!point) continue;
+          if (point.lng < minLng) minLng = point.lng;
+          if (point.lat < minLat) minLat = point.lat;
+          if (point.lng > maxLng) maxLng = point.lng;
+          if (point.lat > maxLat) maxLat = point.lat;
+        }
+        const reduceMotion =
+          typeof window !== "undefined" &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (Number.isFinite(minLng)) {
+          if (minLng === maxLng && minLat === maxLat) {
+            minLng -= 0.04;
+            maxLng += 0.04;
+            minLat -= 0.03;
+            maxLat += 0.03;
+          }
+          map.fitBounds(
+            [
+              [minLng, minLat],
+              [maxLng, maxLat],
+            ],
+            { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+          );
+        } else {
+          resetSpotsCamera(map);
+        }
+      } catch {
+        /* framing is best-effort; a failure leaves the current view */
+      }
+    });
+  };
+  const frameVisitedBoundsRef = useRef(frameVisitedBounds);
+  frameVisitedBoundsRef.current = frameVisitedBounds;
   const didAutoFitRef = useRef(false);
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
@@ -3617,7 +3768,18 @@ function VisitedMapSection({
        landed wins — never yank the camera away from it. */
     didAutoFitRef.current = true;
     if (focusedIdRef.current !== null) return;
-    void frameCurrentRef.current(false);
+    void frameCurrentRef.current(false).then((located) => {
+      /* No Pixel position: the record tabs' initial camera is the
+         visited municipalities' bounds, not the スポット tab's
+         view left behind (review round 1, finding 4). */
+      if (
+        !located &&
+        focusedIdRef.current === null &&
+        variantRef.current !== "spots"
+      ) {
+        frameVisitedBoundsRef.current();
+      }
+    });
   }, [mapReady, visitedQuery.isPending, mapFailed, variant]);
   /* Follow the Pixel while the reader stays on this tab: the
      location job stores a fresh position about once a minute, so
@@ -3731,8 +3893,35 @@ function VisitedMapSection({
     if (!cameraRequest || cameraRequest.target !== "visited") return;
     if (cameraRequest.seq <= appliedCameraSeqRef.current) return;
     if (mapReady === 0) return;
+    /* A request that arrives while the スポット tab is showing
+       waits for the return to a record tab (review round 1,
+       finding 6): the spots framing effect owns the camera there,
+       and this fly-to must not land on it. The request stays
+       unapplied, so the variant change re-runs this effect. */
+    if (variant === "spots") return;
     appliedCameraSeqRef.current = cameraRequest.seq;
     currentLocRef.current = { lat: cameraRequest.lat, lng: cameraRequest.lng };
+    /* Keep the スポット tab's location in step (review round 1,
+       finding 8): the deviceLoc adoption early-returns when the
+       position is already shown, so this is the path that would
+       otherwise leave spotLoc stale. The request carries no
+       capture time, so the label says 0分前 — the re-take just
+       read the stored position, and the adoption corrects the age
+       whenever it runs. */
+    const prevSpot = spotLocRef.current;
+    if (
+      !prevSpot ||
+      prevSpot.lat !== cameraRequest.lat ||
+      prevSpot.lng !== cameraRequest.lng
+    ) {
+      const loc = {
+        lat: cameraRequest.lat,
+        lng: cameraRequest.lng,
+        label: "Pixelの位置（0分前）",
+      };
+      spotLocRef.current = loc;
+      setSpotLoc(loc);
+    }
     withLiveMapRef.current((map) => {
       try {
         drawCurrentLocationMarker(map, cameraRequest.lat, cameraRequest.lng, true);
@@ -3740,7 +3929,7 @@ function VisitedMapSection({
         /* the camera move is a cue only */
       }
     });
-  }, [cameraRequest, mapReady]);
+  }, [cameraRequest, mapReady, variant]);
 
   /* Spot sync + framing (unification, subtask 1460 — moved from
      SpotListMap): whenever the filtered set, the resolved
@@ -3829,6 +4018,7 @@ function VisitedMapSection({
           : [],
       });
       if (best && !cameraReq) {
+        stopCamera(map);
         map.fitBounds(
           [
             [
@@ -4033,6 +4223,14 @@ function VisitedMapSection({
     .map((m) => `${m.id}${boundaryGeometryFor(m) ? "g" : ""}`)
     .join(",");
 
+  /* The mount effect's previous dependency snapshot, and whether
+     record data arrived while the スポット tab was showing and
+     the rebuild was skipped (review round 1, finding 5): the
+     next record-tab entry rebuilds, and hands the new mount its
+     one-shot auto-fit back. */
+  const lastMountKeysRef = useRef<MapMountKeys | null>(null);
+  const mapDataStaleRef = useRef(false);
+
   /* Mount the interactive map once the priority boundary set has
      settled (boundarySettled — until then the static preview
      covers the pane). The mount does NOT wait for the municipality
@@ -4069,7 +4267,43 @@ function VisitedMapSection({
      the runtime's place-fit); the spots framing effect below
      owns the first fit from there. */
   useEffect(() => {
-    if (!shouldMountLiveMap(mapFailed, boundarySettled, showMapPane)) return;
+    if (!shouldMountLiveMap(mapFailed, boundarySettled, showMapPane)) {
+      /* No mount here: drop any live instance instead of leaving
+         it attached to a removed container (review round 1,
+         finding 1 — the empty record state used to keep the
+         instance while its DOM went away, and the next スポット
+         visit made a second one). */
+      destroyLiveMap();
+      lastMountKeysRef.current = null;
+      return;
+    }
+    const nextKeys: MapMountKeys = {
+      placesKey,
+      riddenLinesKey,
+      mapAttempt,
+      mapFailed,
+      boundarySettled,
+      showMapPane,
+    };
+    /* A record-data arrival while the スポット tab is showing
+       must not rebuild the map the reader is using (review round
+       1, finding 5): skip the remount, remember the data is
+       stale, and rebuild on the next record-tab entry instead.
+       Anything else — a retry, a failure flip, the boundary set
+       settling, the pane appearing — still mounts. */
+    if (
+      shouldSkipSpotRemount(
+        lastMountKeysRef.current,
+        nextKeys,
+        variantRef.current,
+        mapHandleRef.current?.getMap() != null,
+      )
+    ) {
+      mapDataStaleRef.current = true;
+      lastMountKeysRef.current = nextKeys;
+      return;
+    }
+    lastMountKeysRef.current = nextKeys;
     setBasemapReady(false);
     const container = mapContainerRef.current;
     if (!container) return;
@@ -4093,17 +4327,7 @@ function VisitedMapSection({
         /* Pending withLiveMap waiters belonged to this mount; the
            remount's own calls re-register what it still needs. */
         cancelMapWaitersRef.current();
-        try {
-          mapHandleRef.current?.destroy();
-        } catch {
-          /* a half-mounted handle may refuse; the fallback or the
-             remount replaces its container either way */
-        }
-        mapHandleRef.current = null;
-        liveMapRef.current = null;
-        focusListenerMapRef.current = null;
-        spotTapListenerMapRef.current = null;
-        if (centerGetterRef) centerGetterRef.current = null;
+        destroyLiveMap();
       },
       remount: () => setMapAttempt((n) => n + 1),
       giveUp: (reason) => {
@@ -4640,16 +4864,11 @@ function VisitedMapSection({
          fresh node now — e.g. returning to the スポット tab after
          a record tab with no records unmounted it — and the old
          handle would otherwise stay attached to the detached
-         node). The failure control's destroyMount does the same
-         on its own path; this is the plain-remount twin. */
-      try {
-        mapHandleRef.current?.destroy();
-      } catch {
-        /* a half-mounted handle may refuse; the fresh mount
-           replaces its container either way */
-      }
-      mapHandleRef.current = null;
-      liveMapRef.current = null;
+         node). The mount cleanup already destroyed it on the
+         re-run path; this is the plain-remount twin, and the
+         failure control's destroyMount does the same on its own
+         path. */
+      destroyLiveMap();
       focusListenerMapRef.current = null;
       spotTapListenerMapRef.current = null;
       mapHandleRef.current = mountPlaceListMap(
@@ -4677,15 +4896,7 @@ function VisitedMapSection({
              tab switches never remount, so the record tabs'
              place-fit is untouched. */
           ...(variantRef.current === "spots"
-            ? {
-                center: { lat: 37.6, lng: 138.4 },
-                zoom:
-                  container.clientWidth > 0
-                    ? container.clientWidth < 560
-                      ? 3.2
-                      : 4.2
-                    : 4.2,
-              }
+            ? spotsInitialCamera(container.clientWidth)
             : {}),
           ...(overlays.length > 0 ? { overlays } : {}),
         },
@@ -4776,6 +4987,11 @@ function VisitedMapSection({
       cancelled = true;
       stopWatch?.();
       cancelMapWaitersRef.current();
+      /* The map itself goes away with this effect run — a remount
+         rebuilds it, and leaving for the その他 tab (which
+         unmounts the section) must not leave a detached instance
+         running (review round 1, finding 1). */
+      destroyLiveMap();
     };
     // placesKey captures the municipality set plus each one's shape
     // availability; riddenLinesKey captures the path ranges and styles
@@ -4863,15 +5079,59 @@ function VisitedMapSection({
         if (focusedIdRef.current !== null) return;
         if (didAutoFitRef.current) return;
         didAutoFitRef.current = true;
-        void frameCurrentRef.current(false);
+        void frameCurrentRef.current(false).then((located) => {
+          /* No Pixel position: the record tabs' initial camera is
+             the visited municipalities' bounds, not the スポット
+             tab's view left behind (review round 1, finding 4). */
+          if (
+            !located &&
+            focusedIdRef.current === null &&
+            variantRef.current !== "spots"
+          ) {
+            frameVisitedBoundsRef.current();
+          }
+        });
       }
     });
     if (variant === "spots") {
+      /* The next record entry gets its one-shot auto-fit back
+         (review round 1, finding 4: the flag used to stick after
+         the first entry, so re-entering a record tab never
+         re-framed). */
+      didAutoFitRef.current = false;
       /* A record focus would linger highlighted over the ghost
          fills with no ledger row to explain it — the fresh
          mount used to drop it with the map. */
       clearFocusRef.current();
       setTappedMunicipality(null);
+      /* Without a Pixel position the spots framing effect leaves
+         the camera alone — restore the スポット tab's
+         whole-country view instead of keeping the record tab's
+         (review round 1, finding 4). With a position the
+         framing effect owns the camera and this stays out of its
+         way. */
+      if (!spotLocRef.current) {
+        withLiveMapRef.current((map) => {
+          try {
+            resetSpotsCamera(map);
+          } catch {
+            /* framing is a cue; a failure leaves the current view */
+          }
+        });
+      }
+    }
+    /* Record data that arrived while the スポット tab was showing
+       left the map stale (review round 1, finding 5): rebuild it
+       now that a record tab is showing, and hand the new mount
+       its one-shot auto-fit back so it frames the current
+       municipality instead of opening on the runtime's default
+       place-fit. This runs after the paint above, so the
+       spots→record branch in the same commit still sees the
+       auto-fit as consumed and does not frame the old map. */
+    if (variant !== "spots" && mapDataStaleRef.current) {
+      mapDataStaleRef.current = false;
+      didAutoFitRef.current = false;
+      setMapAttempt((n) => n + 1);
     }
   }, [variant]);
 
@@ -4906,7 +5166,12 @@ function VisitedMapSection({
      map): the waiter stays registered until flushMapWaiters retries
      it when a map signals readiness, or the mount teardown cancels
      it. A waiter's `fn` always reads the latest state when it finally
-     runs, so a late run applies current data, not a stale snapshot. */
+     runs, so a late run applies current data, not a stale snapshot.
+     The same registration covers the style wait: when the map exists
+     but its style is still loading, the delayed run stays
+     cancellable and only fires while that map is still the live one
+     (review round 1, finding 7) — a remount must not let the old
+     map's draw land afterwards. */
   const withLiveMap = (fn: (map: MapLibreLike) => void) => {
     const waiter: MapWaiter = {
       fn,
@@ -4916,25 +5181,41 @@ function VisitedMapSection({
     };
     mapWaitersRef.current.add(waiter);
     let attempts = 0;
+    /* fn runs at most once per waiter, however many times the
+       style wait is armed or the waiter is flushed. */
+    let settled = false;
+    /* The style wait is armed at most once: a flush while it is
+       pending must not register a second delayed run. */
+    let styleWaitArmed = false;
     const tryOnce = () => {
-      if (waiter.cancelled) {
+      if (waiter.cancelled || settled) {
         mapWaitersRef.current.delete(waiter);
         return;
       }
       const map = mapHandleRef.current?.getMap() ?? null;
       if (map) {
-        mapWaitersRef.current.delete(waiter);
         if (map.isStyleLoaded()) {
+          settled = true;
+          mapWaitersRef.current.delete(waiter);
           fn(map);
         } else {
-          let done = false;
+          /* The style is still loading: keep the waiter
+             registered (review round 1, finding 7) so a teardown
+             cancels the delayed run, and only run fn while this
+             map is still the live one — a remount in between must
+             not let the old map's draw land on the new one, nor
+             let the old map be written back into liveMapRef. */
+          if (styleWaitArmed) return;
+          styleWaitArmed = true;
           const run = () => {
-            if (done || waiter.cancelled) return;
-            done = true;
+            if (settled || waiter.cancelled) return;
+            settled = true;
+            mapWaitersRef.current.delete(waiter);
+            if (mapHandleRef.current?.getMap() !== map) return;
             fn(map);
           };
           map.once("load", run);
-          setTimeout(run, 2000);
+          waiter.timer = setTimeout(run, 2000);
         }
         return;
       }
@@ -4945,7 +5226,7 @@ function VisitedMapSection({
       /* Poll exhausted: stay registered (see the header comment). */
     };
     waiter.retry = () => {
-      if (waiter.cancelled) return;
+      if (waiter.cancelled || settled || styleWaitArmed) return;
       if (waiter.timer) clearTimeout(waiter.timer);
       attempts = 0;
       tryOnce();
@@ -5053,6 +5334,11 @@ function VisitedMapSection({
     rowScrollSeqRef.current += 1;
     const geometry = boundaryGeometryFor(m);
     withLiveMap((map) => {
+      /* A later tap — or leaving for the スポット tab, which
+         clears the focus — supersedes this one: never paint a
+         stale highlight for a row the reader has already left
+         (review round 1, finding 6). */
+      if (variantRef.current !== "municipalities" || focusedIdRef.current !== m.id) return;
       try {
         setFocusGeometry(map, geometry, m);
       } catch {
@@ -5082,6 +5368,11 @@ function VisitedMapSection({
     rowScrollSeqRef.current += 1;
     setTappedMunicipality({ kind: "unvisited", name: hit.name, prefecture: hit.prefecture });
     withLiveMap((map) => {
+      /* The highlight belongs to the 市区町村 tab alone: if the
+         reader has switched away while this draw was waiting, it
+         must not paint over the new tab (review round 1,
+         finding 6). */
+      if (variantRef.current !== "municipalities") return;
       try {
         /* A tapped designated city also gets its ward lines in the
            focus color, and its thick focus outline follows the
@@ -5607,7 +5898,12 @@ function VisitedMapSection({
       const bounds = boundsForMunicipality(m);
       const geometry = boundaryGeometryFor(m);
       withLiveMap((map) => {
+        /* A later tap — or leaving for the スポット tab, which
+           clears the focus — supersedes this one (review round 1,
+           finding 6). */
+        if (variantRef.current !== "municipalities" || focusedIdRef.current !== m.id) return;
         try {
+          stopCamera(map);
           ensureFocusListeners(map);
           setFocusGeometry(map, geometry, m);
           if (bounds) {
@@ -5710,6 +6006,7 @@ function VisitedMapSection({
            already left. */
         if (focusedLineIdRef.current !== line.id) return;
         try {
+          stopCamera(map);
           ensureFocusListeners(map);
           if (service) setFocusSection(map, service.id, painted.legs);
           if (bounds) {
@@ -5995,7 +6292,8 @@ function VisitedMapSection({
           record controls all follow below the map. On the
           スポット tab (unification, subtask 1460) only the map
           pane renders here — the spot list and its controls live
-          in App's スポット section below it. */}
+          in App's スポット section, passed in as children below
+          the map pane (review round 1, finding 3). */}
 
       {variant !== "spots" && visitedQuery.isPending && <p className="mt-3 text-sm text-[var(--dim)]">読み込み中…</p>}
       {variant !== "spots" && visitedQuery.isError && (
@@ -6068,11 +6366,19 @@ function VisitedMapSection({
                     fallbackPhase === "fading" ? "opacity-0" : "opacity-100"
                   }`}
                 >
-                  <img
-                    src={visitedMapFallbackUrl}
-                    alt=""
-                    className="h-full w-full object-contain"
-                  />
+                  {/* The static record map only covers the load when
+                      there are records to show (review round 1,
+                      finding 9): with no spots and no records it
+                      would present the stored 35-municipality image
+                      as if it were the reader's own record. The
+                      loading text below stays either way. */}
+                  {(totalVisited > 0 || hasRiddenLines) && (
+                    <img
+                      src={visitedMapFallbackUrl}
+                      alt=""
+                      className="h-full w-full object-contain"
+                    />
+                  )}
                   <p role="status" className="absolute left-2 top-2 rounded bg-[var(--bg)] px-2 py-1 text-xs">
                     ライブ地図を読み込み中
                   </p>
@@ -6088,7 +6394,15 @@ function VisitedMapSection({
               )}
             </div>
           )}
-          {(mapFailed || !showMapPane) && variant !== "spots" && (
+          {/* The static record map is only a fallback for a map
+              that has records to show (review round 1, finding 9):
+              with no spots and no records it would present the
+              stored 35-municipality image as if it were the
+              reader's own record. The empty state above covers
+              that case instead. */}
+          {(mapFailed || !showMapPane) &&
+            variant !== "spots" &&
+            (totalVisited > 0 || hasRiddenLines) && (
             <figure
               className="map-fade-in"
               ref={(el) => {
@@ -6181,6 +6495,14 @@ function VisitedMapSection({
             </p>
           )}
           </div>
+
+          {/* The スポット tab's list and controls (passed in as
+              children from App): they render inside this grid div —
+              the sticky map pane's parent — so on the スポット tab
+              the pane stays pinned while the list scrolls beneath
+              it (review round 1, finding 3). On the record tabs no
+              children are passed, so this renders nothing. */}
+          {children}
 
           {/* Right under the map: the frame button, then the stats
               in one compact block (prefecture counts, progress, and
@@ -8736,7 +9058,9 @@ export function App() {
             three, and `variant` alone decides which family is the
             hero — switching tabs never remounts the map or
             refetches a dataset. The スポット tab's controls and
-            list follow below it in the スポット section. */}
+            list ride inside it as children, so the pinned map
+            stays put while the list scrolls (review round 1,
+            finding 3). */}
         {(tab === "map" || tab === "lines" || tab === "spots") && (
           <VisitedMapSection
             active
@@ -8750,587 +9074,588 @@ export function App() {
             search={search}
             centerGetterRef={spotMapCenterGetterRef}
             onSpotTap={openDetailFromMap}
-          />
-        )}
+          >
+            {/* ===== spot management (スポット tab) ===== */}
+            {tab === "spots" && (
+            <section aria-label="スポット管理" className="pt-3">
+              {/* No visible heading row on this tab (the reader asked
+                  for it gone, count line included); the sr-only h2 only
+                  remains as the detail-close focus fallback target. The
+                  map itself is the shared VisitedMapSection this
+                  section renders inside as children (unification,
+                  subtask 1460; review round 1, finding 3): the sticky
+                  pane sits at the same position and size as before,
+                  and this section holds only the controls and the list
+                  below it. */}
+              <h2 ref={headingRef} tabIndex={-1} className="sr-only">スポット管理</h2>
 
-        {/* ===== spot management (スポット tab) ===== */}
-        {tab === "spots" && (
-        <section aria-label="スポット管理" className="pt-3">
-          {/* No visible heading row on this tab (the reader asked
-              for it gone, count line included); the sr-only h2 only
-              remains as the detail-close focus fallback target. The
-              map itself is the shared VisitedMapSection above this
-              section (unification, subtask 1460): the sticky pane
-              sits at the same position and size as before, and this
-              section holds only the controls and the list below
-              it. */}
-          <h2 ref={headingRef} tabIndex={-1} className="sr-only">スポット管理</h2>
+              {spotFetchNotice !== null && (
+                <p className="mt-2 text-sm text-[var(--signal)]" role="alert">
+                  {spotFetchNotice}
+                </p>
+              )}
 
-          {spotFetchNotice !== null && (
-            <p className="mt-2 text-sm text-[var(--signal)]" role="alert">
-              {spotFetchNotice}
-            </p>
-          )}
-
-          {/* Subtask 450 — wide layout (2xl only): below the sticky
-              map, the controls become a left rail and the list (+ the
-              phase-3 detail pane) takes the right column. Below 2xl
-              this wrapper is a plain div and everything stacks
-              exactly as before; only classes arrange it, so the
-              inputs never remount and focus, text, filters, and page
-              survive resizes. Round-1 re-review fix: the rail is no
-              longer sticky — with 34 tags it runs taller than the
-              viewport, and the sticky pin left the lower tags
-              unreachable even after 2500px of page scroll at
-              1536×600; as a normal in-flow column the whole rail
-              scrolls with the page. */}
-          <div className="2xl:grid 2xl:grid-cols-[20rem_minmax(0,1fr)] 2xl:items-start 2xl:gap-x-6">
-          {/* Management controls under the map, tidied into one
-              compact stack (DOM order stays search → visit state →
-              memo-only → sort → list → tags): the search box gets
-              its own full-width row; the visit-state chips and the
-              memo-only chip share one tighter row; the two selects
-              sit side by side in a two-column grid at every width,
-              each with its small label above it instead of a wide
-              label + full-width select row; the tag label rides
-              inline with its chips. Only classes arrange them — the
-              inputs never remount, so focus, text, filters, and page
-              survive resizes. */}
-          <div className="mt-3 space-y-2 2xl:col-start-1 2xl:row-span-2">
-            <div>
-              <label htmlFor="spot-search" className="sr-only">スポットを検索</label>
-              <input
-                id="spot-search"
-                className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
-                placeholder="名前・メモ・住所・タグで検索"
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <div className="flex gap-1.5" role="tablist" aria-label="訪問状態で絞り込む">
-              {(
-                [
-                  ["unvisited", "未訪問"],
-                  ["visited", "訪問済み"],
-                  ["all", "すべて"],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  role="tab"
-                  aria-selected={filter === key}
-                  onClick={() => { setFilter(key); setPage(0); }}
-                  className={`rounded-full px-3 py-1.5 text-sm font-medium ${
-                    filter === key
-                      ? "bg-[var(--accent)] text-[var(--accent-ink)]"
-                      : "bg-[var(--surface)] text-[var(--dim)]"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-              </div>
-
-              <button
-                type="button"
-                aria-pressed={memoOnly}
-                onClick={() => { setMemoOnly((v) => !v); setPage(0); }}
-                className={`rounded-full px-3 py-1.5 text-sm font-medium ${
-                  memoOnly
-                    ? "bg-[var(--signal)] text-white"
-                    : "bg-[var(--surface)] text-[var(--dim)]"
-                }`}
-              >
-                メモありだけ
-              </button>
-            </div>
-
-            {/* Sort order (subtask 680): 「地図の中心から近い順」
-                snapshots the spot list map's center at the moment
-                it is chosen; the captured point is then fixed for
-                paging and filter changes. 「Pixelの位置から近い順」
-                reads the position the external location job stores
-                server-side and adopts it only while it is fresh
-                (30 minutes). Browser geolocation is not offered:
-                it cannot work in the in-app browser. */}
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label htmlFor="sort-order" className="mb-1 block text-xs text-[var(--dim)]">並び替え</label>
-                <select
-                  id="sort-order"
-                  value={sortChoice}
-                  onChange={(e) =>
-                    selectSort(e.target.value as "default" | "map" | "device")
-                  }
-                  className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
-                >
-                  <option value="default">標準（未訪問が先・名前順）</option>
-                  <option value="device">Pixelの位置から近い順</option>
-                  <option value="map">地図の中心から近い順</option>
-                </select>
-              </div>
-
-              <div>
-                <label htmlFor="list-filter" className="mb-1 block text-xs text-[var(--dim)]">リスト</label>
-                <div className="flex items-center gap-1.5">
-                  <select
-                    id="list-filter"
-                    value={listFilter ?? ""}
-                    onChange={(e) => pickList(e.target.value === "" ? null : e.target.value)}
-                    className="min-w-0 flex-1 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
-                  >
-                    <option value="">すべてのリスト</option>
-                    {listNames.map((n) => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                  {listFilter && (
-                    <button
-                      type="button"
-                      onClick={() => pickList(null)}
-                      className="shrink-0 rounded-[var(--radius)] border border-[var(--border)] px-2.5 py-2 text-sm"
-                    >
-                      解除
-                    </button>
-                  )}
+              {/* Subtask 450 — wide layout (2xl only): below the sticky
+                  map, the controls become a left rail and the list (+ the
+                  phase-3 detail pane) takes the right column. Below 2xl
+                  this wrapper is a plain div and everything stacks
+                  exactly as before; only classes arrange it, so the
+                  inputs never remount and focus, text, filters, and page
+                  survive resizes. Round-1 re-review fix: the rail is no
+                  longer sticky — with 34 tags it runs taller than the
+                  viewport, and the sticky pin left the lower tags
+                  unreachable even after 2500px of page scroll at
+                  1536×600; as a normal in-flow column the whole rail
+                  scrolls with the page. */}
+              <div className="2xl:grid 2xl:grid-cols-[20rem_minmax(0,1fr)] 2xl:items-start 2xl:gap-x-6">
+              {/* Management controls under the map, tidied into one
+                  compact stack (DOM order stays search → visit state →
+                  memo-only → sort → list → tags): the search box gets
+                  its own full-width row; the visit-state chips and the
+                  memo-only chip share one tighter row; the two selects
+                  sit side by side in a two-column grid at every width,
+                  each with its small label above it instead of a wide
+                  label + full-width select row; the tag label rides
+                  inline with its chips. Only classes arrange them — the
+                  inputs never remount, so focus, text, filters, and page
+                  survive resizes. */}
+              <div className="mt-3 space-y-2 2xl:col-start-1 2xl:row-span-2">
+                <div>
+                  <label htmlFor="spot-search" className="sr-only">スポットを検索</label>
+                  <input
+                    id="spot-search"
+                    className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
+                    placeholder="名前・メモ・住所・タグで検索"
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                  />
                 </div>
-              </div>
-            </div>
 
-            {allTags.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-xs text-[var(--dim)]">タグで絞り込む</span>
-                {allTags.map((t) => {
-                  const active = tagFilter === t.name;
-                  return (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex gap-1.5" role="tablist" aria-label="訪問状態で絞り込む">
+                  {(
+                    [
+                      ["unvisited", "未訪問"],
+                      ["visited", "訪問済み"],
+                      ["all", "すべて"],
+                    ] as const
+                  ).map(([key, label]) => (
                     <button
-                      key={t.name}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => pickTag(active ? null : t.name)}
+                      key={key}
+                      role="tab"
+                      aria-selected={filter === key}
+                      onClick={() => { setFilter(key); setPage(0); }}
                       className={`rounded-full px-3 py-1.5 text-sm font-medium ${
-                        active
+                        filter === key
                           ? "bg-[var(--accent)] text-[var(--accent-ink)]"
-                          : "bg-[var(--surface)] text-[var(--text)]"
+                          : "bg-[var(--surface)] text-[var(--dim)]"
                       }`}
                     >
-                      {t.name}
-                      <span className={`ml-1 text-xs ${active ? "" : "text-[var(--dim)]"}`}>{t.total}</span>
+                      {label}
                     </button>
-                  );
-                })}
-                {tagFilter && (
+                  ))}
+                  </div>
+
                   <button
                     type="button"
-                    onClick={() => pickTag(null)}
-                    className="rounded-full border border-[var(--border)] px-3 py-1.5 text-sm"
+                    aria-pressed={memoOnly}
+                    onClick={() => { setMemoOnly((v) => !v); setPage(0); }}
+                    className={`rounded-full px-3 py-1.5 text-sm font-medium ${
+                      memoOnly
+                        ? "bg-[var(--signal)] text-white"
+                        : "bg-[var(--surface)] text-[var(--dim)]"
+                    }`}
                   >
-                    タグ絞り込みを解除
+                    メモありだけ
                   </button>
-                )}
-              </div>
-            )}
-          </div>
+                </div>
 
-          {/* Distance-sort status (subtask 680): while a distance
-              order is on screen, name its basis next to the list.
-              The standard order shows nothing here. */}
-          {/* Subtask 450: one wrapper so the (mutually exclusive)
-              status blocks share a single 2xl grid cell above the
-              list — the wrapper is a plain div below 2xl. */}
-          <div className="2xl:col-start-2 2xl:row-start-1">
-          {distanceActive && originKind && (
-            <p className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium text-[var(--accent)]">
-                {originKind === "device"
-                  ? "Pixelの位置から近い順"
-                  : "地図の中心から近い順"}
-                で表示中
-                {originKind === "device" && deviceOriginAt !== null && (
-                  <>（{deviceAgeMinutes(deviceOriginAt)}分前の位置）</>
-                )}
-              </span>
-              {originKind === "device" && (
-                <button
-                  type="button"
-                  onClick={() => acquireDeviceOrigin("spots")}
-                  disabled={devicePending}
-                  className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm disabled:opacity-40"
-                >
-                  {devicePending ? "確認中…" : "Pixelの位置を取り直す"}
-                </button>
-              )}
-            </p>
-          )}
-          {sortChoice === "device" && devicePending && !distanceActive && (
-            <p className="mt-2 text-sm text-[var(--dim)]">Pixelの位置を確認中…</p>
-          )}
-          {sortChoice === "device" && deviceNotice && !distanceActive && (
-            <div className="mt-2 rounded-[var(--radius)] bg-[var(--signal-bg)] p-3 text-sm" role="alert">
-              <p>
-                {deviceNotice.kind === "stale"
-                  ? `Pixelの位置が古いため（${new Date(deviceNotice.at).toLocaleString("ja-JP")}に取得）、並び替えは行っていません。`
-                  : deviceNotice.kind === "error"
-                    ? "Pixelの位置を確認できませんでした。並び替えは行っていません。"
-                    : "Pixelの位置がまだ保存されていません。並び替えは行っていません。"}
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => acquireDeviceOrigin("spots")}
-                  className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-medium"
-                >
-                  もう一度確認する
-                </button>
-                <button
-                  type="button"
-                  onClick={() => selectSort("map")}
-                  className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-medium"
-                >
-                  地図の中心から近い順で並べ替える
-                </button>
-              </div>
-            </div>
-          )}
-          </div>
+                {/* Sort order (subtask 680): 「地図の中心から近い順」
+                    snapshots the spot list map's center at the moment
+                    it is chosen; the captured point is then fixed for
+                    paging and filter changes. 「Pixelの位置から近い順」
+                    reads the position the external location job stores
+                    server-side and adopts it only while it is fresh
+                    (30 minutes). Browser geolocation is not offered:
+                    it cannot work in the in-app browser. */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label htmlFor="sort-order" className="mb-1 block text-xs text-[var(--dim)]">並び替え</label>
+                    <select
+                      id="sort-order"
+                      value={sortChoice}
+                      onChange={(e) =>
+                        selectSort(e.target.value as "default" | "map" | "device")
+                      }
+                      className="w-full rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
+                    >
+                      <option value="default">標準（未訪問が先・名前順）</option>
+                      <option value="device">Pixelの位置から近い順</option>
+                      <option value="map">地図の中心から近い順</option>
+                    </select>
+                  </div>
 
-          {/* Phase 3 layout: at xl the list and the detail pane sit
-              side by side; below xl this is a plain block and the
-              detail element renders as a fixed bottom sheet instead.
-              The grid is a class switch on wrapper divs — nothing
-              remounts on resize. Subtask 450: at 2xl this grid nests
-              in the right column of the wide layout (see above), so
-              the list keeps its detail pane beside it while the
-              controls sit in the left rail. */}
-          <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6 2xl:col-start-2 2xl:row-start-2">
-          <div className="min-w-0">
-          {spotsQuery.isPending && <p className="mt-6 text-center text-sm text-[var(--dim)]">読み込み中…</p>}
-          {spotsQuery.isError && (
-            <p className="mt-6 text-center text-sm text-[var(--signal)]">
-              一覧の読み込みに失敗しました{" "}
-              <button type="button" className="underline" onClick={() => void spotsQuery.refetch()}>再試行</button>
-            </p>
-          )}
-          {spotsQuery.data && total === 0 && !listFilter && !tagFilter && !search && !memoOnly && (
-            <div className="mt-6 rounded-[var(--radius)] bg-[var(--surface)] p-6 text-center">
-              <p className="font-[family-name:var(--font-display)] text-lg font-bold">まだスポットがありません</p>
-              <p className="mt-2 text-sm text-[var(--dim)]">
-                「その他」タブの「スポットを追加」か「取り込み」から登録を始められます。
-              </p>
-            </div>
-          )}
-          {spotsQuery.data && pageSpots.length === 0 && (total > 0 || listFilter || tagFilter || search || memoOnly) && (
-            <p className="mt-6 text-center text-sm text-[var(--dim)]">この条件のスポットはありません</p>
-          )}
-
-          {listActionError && (
-            <p className="mt-3 text-sm text-[var(--signal)]" role="alert">{listActionError}</p>
-          )}
-
-          <ul ref={listRef} className="mt-3 space-y-2">
-            {pageSpots.map((spot, index) => {
-              const isSelected = selectedId === spot.id;
-              /* Round-1 re-review fix: animate only the pinned
-                 first-display ids, at their pinned position — a
-                 row keeps its delay even if its page index shifts,
-                 and rows outside the pinned set never animate.
-                 Round-2: the class applies only while the current
-                 display still matches the pinned first display — a
-                 sort switch drops it synchronously, in the same
-                 render, instead of waiting for the end effect to
-                 clear the pinned ids. */
-              const staggerIndex =
-                staggerIds === null || staggerKey !== staggerKeyRef.current
-                  ? -1
-                  : staggerIds.indexOf(spot.id);
-              return (
-                <li
-                  key={spot.id}
-                  style={staggerIndex >= 0 ? { animationDelay: `${staggerIndex * 30}ms` } : undefined}
-                  className={`rounded-[var(--radius)] p-3 ${
-                    isSelected
-                      ? "bg-[var(--surface-alt)] shadow-[inset_3px_0_0_var(--accent)]"
-                      : "bg-[var(--surface)]"
-                  }${staggerIndex >= 0 ? " row-stagger" : ""}`}
-                >
-                  {/* Compact row: name, list chip, visit state, memo
-                      excerpt, address, tags. The row itself is the
-                      selection button (keyboard-operable); the tag
-                      chips are sibling buttons, never nested inside
-                      it, and filter exactly as before. All editing
-                      and actions live in the detail pane / sheet. */}
-                  <button
-                    type="button"
-                    data-spot-row={spot.id}
-                    aria-pressed={isSelected}
-                    aria-label={`${spot.name}の詳細を開く`}
-                    ref={(el) => {
-                      if (el) rowRefs.current.set(spot.id, el);
-                      else rowRefs.current.delete(spot.id);
-                    }}
-                    onClick={() => openDetail(spot, index)}
-                    className="block w-full text-left"
-                  >
-                    <span className="block font-medium leading-snug">
-                      {spot.visited && (
-                        <span className="mr-2 inline-block rotate-[-8deg] rounded border-2 border-[var(--signal)] px-1 text-xs font-black text-[var(--signal)]">済</span>
-                      )}
-                      {spot.name}
-                    </span>
-                    <span className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
-                      <span className={`rounded-full px-2 py-0.5 text-[var(--text)] ${isSelected ? "bg-[var(--surface)]" : "bg-[var(--surface-alt)]"}`}>{spot.category}</span>
-                      <span className={spot.visited ? "font-medium text-[var(--accent)]" : "text-[var(--dim)]"}>
-                        {spot.visited ? "訪問済み" : "未訪問"}
-                      </span>
-                      {/* Distance from the sort's fixed origin — only
-                          present on rows the server measured (spots
-                          without coordinates carry none and sit at
-                          the end of the distance order). */}
-                      {typeof spot.distance_km === "number" && (
-                        <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-medium text-[var(--accent-ink)]">
-                          {formatDistanceKm(spot.distance_km)}
-                        </span>
-                      )}
-                      {spot.note?.trim() && (
-                        <span className="rounded-full bg-[var(--signal-bg)] px-2 py-0.5 font-medium text-[var(--signal)]">メモあり</span>
-                      )}
-                    </span>
-                    {spot.note && (
-                      <span className="mt-1.5 block whitespace-pre-wrap break-words text-sm leading-relaxed text-[var(--text)]">
-                        {spot.note.length > 160 ? `${spot.note.slice(0, 160)}…` : spot.note}
-                      </span>
-                    )}
-                    {spot.address && (
-                      <span className="mt-0.5 block truncate text-sm text-[var(--dim)]">{spot.address}</span>
-                    )}
-                  </button>
-                  {spot.tags.length > 0 && (
-                    <span className="mt-2 flex flex-wrap gap-1.5">
-                      {spot.tags.map((tag) => (
+                  <div>
+                    <label htmlFor="list-filter" className="mb-1 block text-xs text-[var(--dim)]">リスト</label>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        id="list-filter"
+                        value={listFilter ?? ""}
+                        onChange={(e) => pickList(e.target.value === "" ? null : e.target.value)}
+                        className="min-w-0 flex-1 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
+                      >
+                        <option value="">すべてのリスト</option>
+                        {listNames.map((n) => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                      {listFilter && (
                         <button
-                          key={tag}
                           type="button"
-                          onClick={() => pickTag(tag)}
-                          aria-label={`タグ「${tag}」で絞り込む`}
-                          className="rounded-full border border-[var(--accent)] px-2.5 py-1 text-xs font-medium text-[var(--accent)]"
+                          onClick={() => pickList(null)}
+                          className="shrink-0 rounded-[var(--radius)] border border-[var(--border)] px-2.5 py-2 text-sm"
                         >
-                          {tag}
+                          解除
                         </button>
-                      ))}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-
-          {pageCount > 1 && (
-            <nav aria-label="ページ送り" className="mt-4 flex items-center justify-between gap-2">
-              <button
-                type="button"
-                disabled={safePage <= 0}
-                onClick={() => setPage(safePage - 1)}
-                className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 font-medium disabled:opacity-40"
-              >
-                前のページ
-              </button>
-              <span className="text-sm text-[var(--dim)]">
-                {safePage + 1} / {pageCount}ページ
-              </span>
-              <button
-                type="button"
-                disabled={safePage >= pageCount - 1}
-                onClick={() => setPage(safePage + 1)}
-                className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 font-medium disabled:opacity-40"
-              >
-                次のページ
-              </button>
-            </nav>
-          )}
-          </div>
-
-          {/* Spot detail — ONE element, always mounted while the
-              スポット tab is shown. Below xl it is a bottom sheet:
-              fixed to the bottom, hidden while closed, sliding in on
-              a restrained spring (.sheet-slide). From xl up the same
-              element is a static sticky side pane, and while closed
-              it shows the empty state instead of hiding. Only
-              responsive classes switch the presentation, so resizing
-              or rotating mid-edit never remounts it — the SpotForm
-              inside keeps its input and focus. */}
-          {selectedId !== null && (
-            <div
-              aria-hidden="true"
-              onClick={closeDetail}
-              className="fixed inset-0 z-[45] bg-black/40 xl:hidden"
-            />
-          )}
-          <aside
-            ref={sheetRef}
-            aria-label="スポット詳細"
-            className={`fixed inset-x-0 bottom-0 z-50 max-h-[85dvh] overflow-y-auto rounded-t-2xl border-t border-[var(--border)] bg-[var(--surface)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-[0_-10px_36px_rgb(0_0_0/0.3)] xl:sticky xl:top-5 xl:z-auto xl:max-h-none xl:overflow-visible xl:rounded-[var(--radius)] xl:border xl:p-4 xl:shadow-none xl:left-auto xl:right-auto xl:bottom-auto ${
-              selectedId !== null ? "sheet-slide" : "hidden"
-            } xl:block`}
-          >
-            {(editing || selectedSpot) && (
-              <div className="mb-3 flex items-start justify-between gap-3">
-                <h3 className="min-w-0 font-[family-name:var(--font-display)] font-bold leading-snug">
-                  {editing ? (
-                    <>「{editing.name}」を編集中</>
-                  ) : selectedSpot ? (
-                    <>
-                      {selectedSpot.visited && (
-                        <span className="mr-2 inline-block rotate-[-8deg] rounded border-2 border-[var(--signal)] px-1 text-xs font-black text-[var(--signal)]">済</span>
                       )}
-                      {selectedSpot.name}
-                    </>
-                  ) : null}
-                </h3>
-                <button
-                  type="button"
-                  data-detail-close
-                  onClick={closeDetail}
-                  aria-label="詳細を閉じる"
-                  className="shrink-0 rounded-full border border-[var(--border)] p-1.5 text-[var(--dim)]"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
-                    <path d="M5 5l14 14M19 5L5 19" />
-                  </svg>
-                </button>
-              </div>
-            )}
-            {editing ? (
-              <SpotForm
-                initial={editing}
-                submitLabel="保存する"
-                busy={updateMutation.isPending}
-                onSubmit={(row) => updateMutation.mutate({ id: editing.id, row })}
-                onCancel={() => setEditing(null)}
-                listNames={listNames}
-              />
-            ) : selectedSpot ? (
-              <>
-                <p className="flex flex-wrap items-center gap-1.5 text-xs">
-                  <span className="rounded-full bg-[var(--surface-alt)] px-2 py-0.5 text-[var(--text)]">{selectedSpot.category}</span>
-                  <span className={selectedSpot.visited ? "font-medium text-[var(--accent)]" : "text-[var(--dim)]"}>
-                    {selectedSpot.visited ? "訪問済み" : "未訪問"}
-                  </span>
-                  {selectedSpot.lat !== null && selectedSpot.lng !== null ? (
-                    <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-medium text-[var(--accent-ink)]">座標あり</span>
-                  ) : (
-                    <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--dim)]">座標なし</span>
-                  )}
-                  {selectedSpot.note?.trim() && (
-                    <span className="rounded-full bg-[var(--signal-bg)] px-2 py-0.5 font-medium text-[var(--signal)]">メモあり</span>
-                  )}
-                </p>
-                {selectedSpot.note && (
-                  <div className="mt-3 rounded-lg bg-[var(--surface-alt)] px-3 py-2.5">
-                    <p className="text-xs font-bold tracking-wide text-[var(--dim)]">メモ</p>
-                    <p className="mt-1 whitespace-pre-wrap break-words text-base leading-relaxed text-[var(--text)]">
-                      {selectedSpot.note.length > 160 && !expandedNotes.has(selectedSpot.id)
-                        ? `${selectedSpot.note.slice(0, 160)}…`
-                        : selectedSpot.note}
-                    </p>
-                    {selectedSpot.note.length > 160 && (
+                    </div>
+                  </div>
+                </div>
+
+                {allTags.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-[var(--dim)]">タグで絞り込む</span>
+                    {allTags.map((t) => {
+                      const active = tagFilter === t.name;
+                      return (
+                        <button
+                          key={t.name}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => pickTag(active ? null : t.name)}
+                          className={`rounded-full px-3 py-1.5 text-sm font-medium ${
+                            active
+                              ? "bg-[var(--accent)] text-[var(--accent-ink)]"
+                              : "bg-[var(--surface)] text-[var(--text)]"
+                          }`}
+                        >
+                          {t.name}
+                          <span className={`ml-1 text-xs ${active ? "" : "text-[var(--dim)]"}`}>{t.total}</span>
+                        </button>
+                      );
+                    })}
+                    {tagFilter && (
                       <button
                         type="button"
-                        aria-expanded={expandedNotes.has(selectedSpot.id)}
-                        onClick={() =>
-                          setExpandedNotes((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(selectedSpot.id)) next.delete(selectedSpot.id);
-                            else next.add(selectedSpot.id);
-                            return next;
-                          })
-                        }
-                        className="mt-1 text-sm font-medium text-[var(--accent)] underline"
+                        onClick={() => pickTag(null)}
+                        className="rounded-full border border-[var(--border)] px-3 py-1.5 text-sm"
                       >
-                        {expandedNotes.has(selectedSpot.id) ? "メモを閉じる" : "メモを全文見る"}
+                        タグ絞り込みを解除
                       </button>
                     )}
                   </div>
                 )}
-                {selectedSpot.address && (
-                  <p className="mt-3 text-sm text-[var(--text)]">
-                    <span className="mb-0.5 block text-xs font-bold tracking-wide text-[var(--dim)]">住所</span>
-                    {selectedSpot.address}
-                  </p>
-                )}
-                <p className="mt-3 text-sm text-[var(--dim)]">
-                  座標:{" "}
-                  {selectedSpot.lat !== null && selectedSpot.lng !== null
-                    ? `${selectedSpot.lat.toFixed(5)}, ${selectedSpot.lng.toFixed(5)}`
-                    : "未設定（近接通知の対象外）"}
+              </div>
+
+              {/* Distance-sort status (subtask 680): while a distance
+                  order is on screen, name its basis next to the list.
+                  The standard order shows nothing here. */}
+              {/* Subtask 450: one wrapper so the (mutually exclusive)
+                  status blocks share a single 2xl grid cell above the
+                  list — the wrapper is a plain div below 2xl. */}
+              <div className="2xl:col-start-2 2xl:row-start-1">
+              {distanceActive && originKind && (
+                <p className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="font-medium text-[var(--accent)]">
+                    {originKind === "device"
+                      ? "Pixelの位置から近い順"
+                      : "地図の中心から近い順"}
+                    で表示中
+                    {originKind === "device" && deviceOriginAt !== null && (
+                      <>（{deviceAgeMinutes(deviceOriginAt)}分前の位置）</>
+                    )}
+                  </span>
+                  {originKind === "device" && (
+                    <button
+                      type="button"
+                      onClick={() => acquireDeviceOrigin("spots")}
+                      disabled={devicePending}
+                      className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm disabled:opacity-40"
+                    >
+                      {devicePending ? "確認中…" : "Pixelの位置を取り直す"}
+                    </button>
+                  )}
                 </p>
-                {selectedSpot.visited && selectedSpot.visited_at && (
-                  <p className="mt-1.5 text-sm text-[var(--dim)]">
-                    {new Date(selectedSpot.visited_at).toLocaleDateString("ja-JP")} に訪問
+              )}
+              {sortChoice === "device" && devicePending && !distanceActive && (
+                <p className="mt-2 text-sm text-[var(--dim)]">Pixelの位置を確認中…</p>
+              )}
+              {sortChoice === "device" && deviceNotice && !distanceActive && (
+                <div className="mt-2 rounded-[var(--radius)] bg-[var(--signal-bg)] p-3 text-sm" role="alert">
+                  <p>
+                    {deviceNotice.kind === "stale"
+                      ? `Pixelの位置が古いため（${new Date(deviceNotice.at).toLocaleString("ja-JP")}に取得）、並び替えは行っていません。`
+                      : deviceNotice.kind === "error"
+                        ? "Pixelの位置を確認できませんでした。並び替えは行っていません。"
+                        : "Pixelの位置がまだ保存されていません。並び替えは行っていません。"}
                   </p>
-                )}
-                {selectedSpot.tags.length > 0 && (
-                  <div className="mt-3">
-                    <p className="text-xs font-bold tracking-wide text-[var(--dim)]">タグ</p>
-                    <div className="mt-1 flex flex-wrap gap-1.5">
-                      {selectedSpot.tags.map((tag) => (
-                        <button
-                          key={tag}
-                          type="button"
-                          onClick={() => pickTag(tag)}
-                          aria-label={`タグ「${tag}」で絞り込む`}
-                          className="rounded-full border border-[var(--accent)] px-2.5 py-1 text-xs font-medium text-[var(--accent)]"
-                        >
-                          {tag}
-                        </button>
-                      ))}
-                    </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => acquireDeviceOrigin("spots")}
+                      className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-medium"
+                    >
+                      もう一度確認する
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => selectSort("map")}
+                      className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 font-medium"
+                    >
+                      地図の中心から近い順で並べ替える
+                    </button>
                   </div>
-                )}
-                {/* The four card actions, unchanged in behavior —
-                    they live in the detail now instead of the row. */}
-                <div className="mt-4 grid grid-cols-2 gap-2 text-sm sm:flex sm:flex-wrap">
+                </div>
+              )}
+              </div>
+
+              {/* Phase 3 layout: at xl the list and the detail pane sit
+                  side by side; below xl this is a plain block and the
+                  detail element renders as a fixed bottom sheet instead.
+                  The grid is a class switch on wrapper divs — nothing
+                  remounts on resize. Subtask 450: at 2xl this grid nests
+                  in the right column of the wide layout (see above), so
+                  the list keeps its detail pane beside it while the
+                  controls sit in the left rail. */}
+              <div className="xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] xl:items-start xl:gap-x-6 2xl:col-start-2 2xl:row-start-2">
+              <div className="min-w-0">
+              {spotsQuery.isPending && <p className="mt-6 text-center text-sm text-[var(--dim)]">読み込み中…</p>}
+              {spotsQuery.isError && (
+                <p className="mt-6 text-center text-sm text-[var(--signal)]">
+                  一覧の読み込みに失敗しました{" "}
+                  <button type="button" className="underline" onClick={() => void spotsQuery.refetch()}>再試行</button>
+                </p>
+              )}
+              {spotsQuery.data && total === 0 && !listFilter && !tagFilter && !search && !memoOnly && (
+                <div className="mt-6 rounded-[var(--radius)] bg-[var(--surface)] p-6 text-center">
+                  <p className="font-[family-name:var(--font-display)] text-lg font-bold">まだスポットがありません</p>
+                  <p className="mt-2 text-sm text-[var(--dim)]">
+                    「その他」タブの「スポットを追加」か「取り込み」から登録を始められます。
+                  </p>
+                </div>
+              )}
+              {spotsQuery.data && pageSpots.length === 0 && (total > 0 || listFilter || tagFilter || search || memoOnly) && (
+                <p className="mt-6 text-center text-sm text-[var(--dim)]">この条件のスポットはありません</p>
+              )}
+
+              {listActionError && (
+                <p className="mt-3 text-sm text-[var(--signal)]" role="alert">{listActionError}</p>
+              )}
+
+              <ul ref={listRef} className="mt-3 space-y-2">
+                {pageSpots.map((spot, index) => {
+                  const isSelected = selectedId === spot.id;
+                  /* Round-1 re-review fix: animate only the pinned
+                     first-display ids, at their pinned position — a
+                     row keeps its delay even if its page index shifts,
+                     and rows outside the pinned set never animate.
+                     Round-2: the class applies only while the current
+                     display still matches the pinned first display — a
+                     sort switch drops it synchronously, in the same
+                     render, instead of waiting for the end effect to
+                     clear the pinned ids. */
+                  const staggerIndex =
+                    staggerIds === null || staggerKey !== staggerKeyRef.current
+                      ? -1
+                      : staggerIds.indexOf(spot.id);
+                  return (
+                    <li
+                      key={spot.id}
+                      style={staggerIndex >= 0 ? { animationDelay: `${staggerIndex * 30}ms` } : undefined}
+                      className={`rounded-[var(--radius)] p-3 ${
+                        isSelected
+                          ? "bg-[var(--surface-alt)] shadow-[inset_3px_0_0_var(--accent)]"
+                          : "bg-[var(--surface)]"
+                      }${staggerIndex >= 0 ? " row-stagger" : ""}`}
+                    >
+                      {/* Compact row: name, list chip, visit state, memo
+                          excerpt, address, tags. The row itself is the
+                          selection button (keyboard-operable); the tag
+                          chips are sibling buttons, never nested inside
+                          it, and filter exactly as before. All editing
+                          and actions live in the detail pane / sheet. */}
+                      <button
+                        type="button"
+                        data-spot-row={spot.id}
+                        aria-pressed={isSelected}
+                        aria-label={`${spot.name}の詳細を開く`}
+                        ref={(el) => {
+                          if (el) rowRefs.current.set(spot.id, el);
+                          else rowRefs.current.delete(spot.id);
+                        }}
+                        onClick={() => openDetail(spot, index)}
+                        className="block w-full text-left"
+                      >
+                        <span className="block font-medium leading-snug">
+                          {spot.visited && (
+                            <span className="mr-2 inline-block rotate-[-8deg] rounded border-2 border-[var(--signal)] px-1 text-xs font-black text-[var(--signal)]">済</span>
+                          )}
+                          {spot.name}
+                        </span>
+                        <span className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs">
+                          <span className={`rounded-full px-2 py-0.5 text-[var(--text)] ${isSelected ? "bg-[var(--surface)]" : "bg-[var(--surface-alt)]"}`}>{spot.category}</span>
+                          <span className={spot.visited ? "font-medium text-[var(--accent)]" : "text-[var(--dim)]"}>
+                            {spot.visited ? "訪問済み" : "未訪問"}
+                          </span>
+                          {/* Distance from the sort's fixed origin — only
+                              present on rows the server measured (spots
+                              without coordinates carry none and sit at
+                              the end of the distance order). */}
+                          {typeof spot.distance_km === "number" && (
+                            <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-medium text-[var(--accent-ink)]">
+                              {formatDistanceKm(spot.distance_km)}
+                            </span>
+                          )}
+                          {spot.note?.trim() && (
+                            <span className="rounded-full bg-[var(--signal-bg)] px-2 py-0.5 font-medium text-[var(--signal)]">メモあり</span>
+                          )}
+                        </span>
+                        {spot.note && (
+                          <span className="mt-1.5 block whitespace-pre-wrap break-words text-sm leading-relaxed text-[var(--text)]">
+                            {spot.note.length > 160 ? `${spot.note.slice(0, 160)}…` : spot.note}
+                          </span>
+                        )}
+                        {spot.address && (
+                          <span className="mt-0.5 block truncate text-sm text-[var(--dim)]">{spot.address}</span>
+                        )}
+                      </button>
+                      {spot.tags.length > 0 && (
+                        <span className="mt-2 flex flex-wrap gap-1.5">
+                          {spot.tags.map((tag) => (
+                            <button
+                              key={tag}
+                              type="button"
+                              onClick={() => pickTag(tag)}
+                              aria-label={`タグ「${tag}」で絞り込む`}
+                              className="rounded-full border border-[var(--accent)] px-2.5 py-1 text-xs font-medium text-[var(--accent)]"
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {pageCount > 1 && (
+                <nav aria-label="ページ送り" className="mt-4 flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => visitedMutation.mutate({ id: selectedSpot.id, visited: !selectedSpot.visited })}
-                    disabled={visitedMutation.isPending}
-                    className={`rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 ${
-                      selectedSpot.visited
-                        ? "border border-[var(--border)] text-[var(--dim)]"
-                        : "bg-[var(--accent)] text-[var(--accent-ink)]"
-                    }`}
+                    disabled={safePage <= 0}
+                    onClick={() => setPage(safePage - 1)}
+                    className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 font-medium disabled:opacity-40"
                   >
-                    {visitedMutation.isPending ? "保存中…" : selectedSpot.visited ? "未訪問に戻す" : "訪問済みにする"}
+                    前のページ
                   </button>
-                  {selectedMapsHref && (
-                    <a
-                      href={selectedMapsHref}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-center text-[var(--text)]"
-                    >
-                      地図で開く
-                    </a>
-                  )}
-                  <button type="button" onClick={() => setEditing(selectedSpot)} className="rounded-lg border border-[var(--border)] px-3 py-1.5">
-                    編集
+                  <span className="text-sm text-[var(--dim)]">
+                    {safePage + 1} / {pageCount}ページ
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safePage >= pageCount - 1}
+                    onClick={() => setPage(safePage + 1)}
+                    className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 font-medium disabled:opacity-40"
+                  >
+                    次のページ
                   </button>
-                  <button type="button" onClick={() => { setDeleteError(null); setConfirmDelete(selectedSpot); }} className="rounded-lg px-3 py-1.5 text-center text-[var(--dim)]">
-                    削除
-                  </button>
-                </div>
-              </>
-            ) : (
-              <p className="text-sm leading-relaxed text-[var(--dim)]">
-                スポットを選ぶと、ここに詳細が表示されます
-              </p>
-            )}
-          </aside>
-          </div>
-          </div>
-        </section>
+                </nav>
+              )}
+              </div>
 
+              {/* Spot detail — ONE element, always mounted while the
+                  スポット tab is shown. Below xl it is a bottom sheet:
+                  fixed to the bottom, hidden while closed, sliding in on
+                  a restrained spring (.sheet-slide). From xl up the same
+                  element is a static sticky side pane, and while closed
+                  it shows the empty state instead of hiding. Only
+                  responsive classes switch the presentation, so resizing
+                  or rotating mid-edit never remounts it — the SpotForm
+                  inside keeps its input and focus. */}
+              {selectedId !== null && (
+                <div
+                  aria-hidden="true"
+                  onClick={closeDetail}
+                  className="fixed inset-0 z-[45] bg-black/40 xl:hidden"
+                />
+              )}
+              <aside
+                ref={sheetRef}
+                aria-label="スポット詳細"
+                className={`fixed inset-x-0 bottom-0 z-50 max-h-[85dvh] overflow-y-auto rounded-t-2xl border-t border-[var(--border)] bg-[var(--surface)] p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-[0_-10px_36px_rgb(0_0_0/0.3)] xl:sticky xl:top-5 xl:z-auto xl:max-h-none xl:overflow-visible xl:rounded-[var(--radius)] xl:border xl:p-4 xl:shadow-none xl:left-auto xl:right-auto xl:bottom-auto ${
+                  selectedId !== null ? "sheet-slide" : "hidden"
+                } xl:block`}
+              >
+                {(editing || selectedSpot) && (
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <h3 className="min-w-0 font-[family-name:var(--font-display)] font-bold leading-snug">
+                      {editing ? (
+                        <>「{editing.name}」を編集中</>
+                      ) : selectedSpot ? (
+                        <>
+                          {selectedSpot.visited && (
+                            <span className="mr-2 inline-block rotate-[-8deg] rounded border-2 border-[var(--signal)] px-1 text-xs font-black text-[var(--signal)]">済</span>
+                          )}
+                          {selectedSpot.name}
+                        </>
+                      ) : null}
+                    </h3>
+                    <button
+                      type="button"
+                      data-detail-close
+                      onClick={closeDetail}
+                      aria-label="詳細を閉じる"
+                      className="shrink-0 rounded-full border border-[var(--border)] p-1.5 text-[var(--dim)]"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+                        <path d="M5 5l14 14M19 5L5 19" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                {editing ? (
+                  <SpotForm
+                    initial={editing}
+                    submitLabel="保存する"
+                    busy={updateMutation.isPending}
+                    onSubmit={(row) => updateMutation.mutate({ id: editing.id, row })}
+                    onCancel={() => setEditing(null)}
+                    listNames={listNames}
+                  />
+                ) : selectedSpot ? (
+                  <>
+                    <p className="flex flex-wrap items-center gap-1.5 text-xs">
+                      <span className="rounded-full bg-[var(--surface-alt)] px-2 py-0.5 text-[var(--text)]">{selectedSpot.category}</span>
+                      <span className={selectedSpot.visited ? "font-medium text-[var(--accent)]" : "text-[var(--dim)]"}>
+                        {selectedSpot.visited ? "訪問済み" : "未訪問"}
+                      </span>
+                      {selectedSpot.lat !== null && selectedSpot.lng !== null ? (
+                        <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 font-medium text-[var(--accent-ink)]">座標あり</span>
+                      ) : (
+                        <span className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--dim)]">座標なし</span>
+                      )}
+                      {selectedSpot.note?.trim() && (
+                        <span className="rounded-full bg-[var(--signal-bg)] px-2 py-0.5 font-medium text-[var(--signal)]">メモあり</span>
+                      )}
+                    </p>
+                    {selectedSpot.note && (
+                      <div className="mt-3 rounded-lg bg-[var(--surface-alt)] px-3 py-2.5">
+                        <p className="text-xs font-bold tracking-wide text-[var(--dim)]">メモ</p>
+                        <p className="mt-1 whitespace-pre-wrap break-words text-base leading-relaxed text-[var(--text)]">
+                          {selectedSpot.note.length > 160 && !expandedNotes.has(selectedSpot.id)
+                            ? `${selectedSpot.note.slice(0, 160)}…`
+                            : selectedSpot.note}
+                        </p>
+                        {selectedSpot.note.length > 160 && (
+                          <button
+                            type="button"
+                            aria-expanded={expandedNotes.has(selectedSpot.id)}
+                            onClick={() =>
+                              setExpandedNotes((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(selectedSpot.id)) next.delete(selectedSpot.id);
+                                else next.add(selectedSpot.id);
+                                return next;
+                              })
+                            }
+                            className="mt-1 text-sm font-medium text-[var(--accent)] underline"
+                          >
+                            {expandedNotes.has(selectedSpot.id) ? "メモを閉じる" : "メモを全文見る"}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {selectedSpot.address && (
+                      <p className="mt-3 text-sm text-[var(--text)]">
+                        <span className="mb-0.5 block text-xs font-bold tracking-wide text-[var(--dim)]">住所</span>
+                        {selectedSpot.address}
+                      </p>
+                    )}
+                    <p className="mt-3 text-sm text-[var(--dim)]">
+                      座標:{" "}
+                      {selectedSpot.lat !== null && selectedSpot.lng !== null
+                        ? `${selectedSpot.lat.toFixed(5)}, ${selectedSpot.lng.toFixed(5)}`
+                        : "未設定（近接通知の対象外）"}
+                    </p>
+                    {selectedSpot.visited && selectedSpot.visited_at && (
+                      <p className="mt-1.5 text-sm text-[var(--dim)]">
+                        {new Date(selectedSpot.visited_at).toLocaleDateString("ja-JP")} に訪問
+                      </p>
+                    )}
+                    {selectedSpot.tags.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-xs font-bold tracking-wide text-[var(--dim)]">タグ</p>
+                        <div className="mt-1 flex flex-wrap gap-1.5">
+                          {selectedSpot.tags.map((tag) => (
+                            <button
+                              key={tag}
+                              type="button"
+                              onClick={() => pickTag(tag)}
+                              aria-label={`タグ「${tag}」で絞り込む`}
+                              className="rounded-full border border-[var(--accent)] px-2.5 py-1 text-xs font-medium text-[var(--accent)]"
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* The four card actions, unchanged in behavior —
+                        they live in the detail now instead of the row. */}
+                    <div className="mt-4 grid grid-cols-2 gap-2 text-sm sm:flex sm:flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => visitedMutation.mutate({ id: selectedSpot.id, visited: !selectedSpot.visited })}
+                        disabled={visitedMutation.isPending}
+                        className={`rounded-lg px-3 py-1.5 font-medium disabled:opacity-50 ${
+                          selectedSpot.visited
+                            ? "border border-[var(--border)] text-[var(--dim)]"
+                            : "bg-[var(--accent)] text-[var(--accent-ink)]"
+                        }`}
+                      >
+                        {visitedMutation.isPending ? "保存中…" : selectedSpot.visited ? "未訪問に戻す" : "訪問済みにする"}
+                      </button>
+                      {selectedMapsHref && (
+                        <a
+                          href={selectedMapsHref}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-center text-[var(--text)]"
+                        >
+                          地図で開く
+                        </a>
+                      )}
+                      <button type="button" onClick={() => setEditing(selectedSpot)} className="rounded-lg border border-[var(--border)] px-3 py-1.5">
+                        編集
+                      </button>
+                      <button type="button" onClick={() => { setDeleteError(null); setConfirmDelete(selectedSpot); }} className="rounded-lg px-3 py-1.5 text-center text-[var(--dim)]">
+                        削除
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm leading-relaxed text-[var(--dim)]">
+                    スポットを選ぶと、ここに詳細が表示されます
+                  </p>
+                )}
+              </aside>
+              </div>
+              </div>
+            </section>
+
+            )}
+          </VisitedMapSection>
         )}
 
         {/* ===== add / import + settings (その他 tab) =====

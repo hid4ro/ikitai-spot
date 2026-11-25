@@ -10,8 +10,11 @@ import {
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
+  shouldSkipSpotRemount,
+  spotsInitialCamera,
   stickyPaneVisibleTop,
   variantPaintOps,
+  type MapMountKeys,
 } from "./map-variant";
 
 const paintValue = (
@@ -376,5 +379,108 @@ describe("shouldMountLiveMap (the mount waits for something to show, round 2 hig
   test("an unsettled boundary set or a failed map never mounts", () => {
     expect(shouldMountLiveMap(false, false, true)).toBe(false);
     expect(shouldMountLiveMap(true, true, true)).toBe(false);
+  });
+});
+
+describe("spotsInitialCamera (review round 1, finding 4)", () => {
+  test("the whole-country center, with the narrow-pane zoom under 560px", () => {
+    expect(spotsInitialCamera(0)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 4.2,
+    });
+    expect(spotsInitialCamera(559)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 3.2,
+    });
+    expect(spotsInitialCamera(560)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 4.2,
+    });
+    expect(spotsInitialCamera(1200).zoom).toBe(4.2);
+  });
+});
+
+describe("shouldSkipSpotRemount (review round 1, finding 5)", () => {
+  const base: MapMountKeys = {
+    placesKey: "1g,2g",
+    riddenLinesKey: "[]",
+    mapAttempt: 0,
+    mapFailed: false,
+    boundarySettled: true,
+    showMapPane: true,
+  };
+
+  test("a record-data-only change on the スポット tab with a live map skips the rebuild", () => {
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, riddenLinesKey: "[x]" },
+        "spots",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  test("anything else still mounts", () => {
+    /* No previous mount: the first run mounts. */
+    expect(shouldSkipSpotRemount(null, base, "spots", true)).toBe(false);
+    /* No live map to keep: mount. */
+    expect(
+      shouldSkipSpotRemount(base, { ...base, placesKey: "1g" }, "spots", false),
+    ).toBe(false);
+    /* A record tab wants the fresh shapes: rebuild. */
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g" },
+        "municipalities",
+        true,
+      ),
+    ).toBe(false);
+    /* A retry, a failure flip, the boundary set settling, or the
+       pane appearing is never a record-only change. */
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", mapAttempt: 1 },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", mapFailed: true },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", boundarySettled: false },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", showMapPane: false },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    /* Nothing changed at all: no skip decision is needed (the
+       effect would not re-run), and the predicate says mount. */
+    expect(shouldSkipSpotRemount(base, base, "spots", true)).toBe(false);
   });
 });
