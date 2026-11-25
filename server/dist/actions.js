@@ -5027,11 +5027,26 @@ function inArray(column, values) {
   }
   return sql`${column} in ${bindIfParam(values, column)}`;
 }
+function notInArray(column, values) {
+  if (Array.isArray(values)) {
+    if (values.length === 0) {
+      return sql`true`;
+    }
+    return sql`${column} not in ${values.map((v) => bindIfParam(v, column))}`;
+  }
+  return sql`${column} not in ${bindIfParam(values, column)}`;
+}
 function isNull(value) {
   return sql`${value} is null`;
 }
 function isNotNull(value) {
   return sql`${value} is not null`;
+}
+function exists(subquery) {
+  return sql`exists ${subquery}`;
+}
+function notExists(subquery) {
+  return sql`not exists ${subquery}`;
 }
 function like(column, value) {
   return sql`${column} like ${value}`;
@@ -7702,8 +7717,10 @@ var Actions = {
     }),
     async handler(ctx) {
       const db = ctx.db();
-      const rows = await db.select().from(riddenLines).orderBy(asc(riddenLines.firstRiddenOn), asc(riddenLines.name));
-      const sectionRows = rows.length > 0 ? await db.select().from(riddenLineSections).where(inArray(riddenLineSections.riddenLineId, rows.map((r) => r.id))).orderBy(asc(riddenLineSections.id)) : [];
+      const [rows, sectionRows] = await db.batch([
+        db.select().from(riddenLines).orderBy(asc(riddenLines.firstRiddenOn), asc(riddenLines.name)),
+        db.select().from(riddenLineSections).orderBy(asc(riddenLineSections.id))
+      ]);
       const sectionsByLine = new Map;
       for (const section of sectionRows) {
         const list = sectionsByLine.get(section.riddenLineId) ?? [];
@@ -7929,7 +7946,7 @@ var Actions = {
     }
   }),
   addRiddenSection: defineAction({
-    description: "Adds one section to a ridden-lines ledger row \u2014 a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks \u2014 a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered \u2014 the named block must agree with the direction given (review round 2). Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it \u2014 a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable. A duplicate add also repairs a row left unknown with a section on record (review round 2).",
+    description: "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID if the existing section has none.",
     request: object({
       riddenLineId: number2().int().positive(),
       fromStationId: string2().max(20),
@@ -7970,11 +7987,12 @@ var Actions = {
         if (!block) {
           throw new Error(`addRiddenSection: unknown block "${blockId}" for "${line.name}"`);
         }
-        const endpointsMatch = block.from.id === fromStationId && block.to.id === toStationId || block.from.id === toStationId && block.to.id === fromStationId;
-        if (!endpointsMatch) {
-          throw new Error(`addRiddenSection: block "${blockId}" runs ${block.from.name}\u301C${block.to.name}, not the given section`);
+        const forward = block.from.id === fromStationId && block.to.id === toStationId;
+        const reverse = !block.direction && block.from.id === toStationId && block.to.id === fromStationId;
+        if (!forward && !reverse) {
+          throw new Error(`addRiddenSection: block "${blockId}" runs ${block.from.name}\u2192${block.to.name}, not the given section`);
         }
-        if (block.direction && direction && block.direction !== direction) {
+        if (block.direction && block.direction !== direction) {
           throw new Error(`addRiddenSection: block "${blockId}" runs ${block.direction}, not ${direction}`);
         }
       }
@@ -7984,7 +8002,8 @@ var Actions = {
         const existing = await db.select().from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.riddenLineId));
         return existing.find((s) => s.fromStationId === fromStationId && s.toStationId === toStationId && (s.direction ?? null) === direction);
       };
-      const adoptBlockId = async (existing) => {
+      const markPartial = () => db.update(riddenLines).set({ rideState: "partial" }).where(and(eq(riddenLines.id, args.riddenLineId), notInArray(riddenLines.rideState, ["partial", "full"]), exists(db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.riddenLineId))))).returning({ id: riddenLines.id });
+      const reuseSection = async (existing) => {
         if (blockId && !existing.blockId) {
           if (!recordedSectionFitsService(service.id, {
             ...existing,
@@ -7992,51 +8011,45 @@ var Actions = {
           })) {
             throw new Error(`addRiddenSection: the existing section's recorded route cannot be attributed to ${service.displayName}`);
           }
-          await db.update(riddenLineSections).set({ blockId }).where(and(eq(riddenLineSections.id, existing.id), isNull(riddenLineSections.blockId)));
+          await db.batch([
+            db.update(riddenLineSections).set({ blockId }).where(and(eq(riddenLineSections.id, existing.id), isNull(riddenLineSections.blockId))),
+            markPartial()
+          ]);
+          ctx.invalidateQueries();
+        } else if ((await markPartial()).length > 0) {
           ctx.invalidateQueries();
         }
+        return { created: false, id: existing.id };
       };
       const duplicate = await findDuplicate();
-      const repairRideState = async () => {
-        const [fresh] = await db.select().from(riddenLines).where(eq(riddenLines.id, args.riddenLineId)).limit(1);
-        if (!fresh || normalizeRideState(fresh.rideState) !== "unknown") {
-          return;
-        }
-        const sections = await db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.riddenLineId)).limit(1);
-        if (sections.length > 0) {
-          await db.update(riddenLines).set({ rideState: "partial" }).where(eq(riddenLines.id, args.riddenLineId));
-        }
-      };
       if (duplicate) {
-        await adoptBlockId(duplicate);
-        await repairRideState();
-        return { created: false, id: duplicate.id };
+        return reuseSection(duplicate);
       }
       let insertedId;
       try {
-        const inserted = await db.insert(riddenLineSections).values({
-          riddenLineId: args.riddenLineId,
-          fromStationId,
-          fromStationName: fromName,
-          toStationId,
-          toStationName: toName,
-          direction,
-          blockId,
-          recordedServiceId: service.id
-        }).returning({ id: riddenLineSections.id });
+        const [inserted] = await db.batch([
+          db.insert(riddenLineSections).values({
+            riddenLineId: args.riddenLineId,
+            fromStationId,
+            fromStationName: fromName,
+            toStationId,
+            toStationName: toName,
+            direction,
+            blockId,
+            recordedServiceId: service.id
+          }).returning({ id: riddenLineSections.id }),
+          markPartial()
+        ]);
         insertedId = inserted[0]?.id ?? null;
       } catch (error) {
         if (isUniqueConstraintError(error)) {
           const winner = await findDuplicate();
           if (winner) {
-            await adoptBlockId(winner);
-            await repairRideState();
-            return { created: false, id: winner.id };
+            return reuseSection(winner);
           }
         }
         throw error;
       }
-      await repairRideState();
       ctx.invalidateQueries();
       return { created: true, id: insertedId };
     }
@@ -8051,15 +8064,10 @@ var Actions = {
       const section = sections[0];
       if (!section)
         return { ok: true };
-      await db.delete(riddenLineSections).where(eq(riddenLineSections.id, args.id));
-      const remaining = await db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, section.riddenLineId));
-      if (remaining.length === 0) {
-        const lines = await db.select().from(riddenLines).where(eq(riddenLines.id, section.riddenLineId));
-        const line = lines[0];
-        if (line && normalizeRideState(line.rideState) === "partial" && !line.fromStationId && !line.toStationId) {
-          await db.update(riddenLines).set({ rideState: "unknown" }).where(eq(riddenLines.id, line.id));
-        }
-      }
+      await db.batch([
+        db.delete(riddenLineSections).where(eq(riddenLineSections.id, args.id)),
+        db.update(riddenLines).set({ rideState: "unknown" }).where(and(eq(riddenLines.id, section.riddenLineId), eq(riddenLines.rideState, "partial"), or(isNull(riddenLines.fromStationId), eq(riddenLines.fromStationId, "")), or(isNull(riddenLines.toStationId), eq(riddenLines.toStationId, "")), notExists(db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, section.riddenLineId)))))
+      ]);
       ctx.invalidateQueries();
       return { ok: true };
     }

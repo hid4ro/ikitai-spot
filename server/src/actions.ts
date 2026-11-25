@@ -5,7 +5,7 @@
 // stored here verbatim), or from manual entry. Nothing is seeded.
 
 import { defineAction, z, type ActionsModule } from "@hatch/space-sdk";
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, inArray, isNotNull, isNull, like, notExists, notInArray, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import {
   blockById,
@@ -1688,26 +1688,16 @@ export const Actions = {
     }),
     async handler(ctx) {
       const db = ctx.db<typeof schema>();
-      const rows = await db
-        .select()
-        .from(schema.riddenLines)
-        .orderBy(
+      // Read both tables together so a section edit cannot split the snapshot.
+      const [rows, sectionRows] = await db.batch([
+        db.select().from(schema.riddenLines).orderBy(
           asc(schema.riddenLines.firstRiddenOn),
           asc(schema.riddenLines.name),
-        );
-      const sectionRows =
-        rows.length > 0
-          ? await db
-              .select()
-              .from(schema.riddenLineSections)
-              .where(
-                inArray(
-                  schema.riddenLineSections.riddenLineId,
-                  rows.map((r) => r.id),
-                ),
-              )
-              .orderBy(asc(schema.riddenLineSections.id))
-          : [];
+        ),
+        db.select().from(schema.riddenLineSections).orderBy(
+          asc(schema.riddenLineSections.id),
+        ),
+      ]);
       const sectionsByLine = new Map<number, typeof sectionRows>();
       for (const section of sectionRows) {
         const list = sectionsByLine.get(section.riddenLineId) ?? [];
@@ -2045,7 +2035,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks — a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered — the named block must agree with the direction given (review round 2). Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable. A duplicate add also repairs a row left unknown with a section on record (review round 2).",
+      "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID if the existing section has none.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -2104,24 +2094,18 @@ export const Actions = {
             `addRiddenSection: unknown block "${blockId}" for "${line.name}"`,
           );
         }
-        const endpointsMatch =
-          (block.from.id === fromStationId && block.to.id === toStationId) ||
-          (block.from.id === toStationId && block.to.id === fromStationId);
-        if (!endpointsMatch) {
+        const forward =
+          block.from.id === fromStationId && block.to.id === toStationId;
+        // A loop block pick follows the master's order and direction.
+        const reverse =
+          !block.direction &&
+          block.from.id === toStationId && block.to.id === fromStationId;
+        if (!forward && !reverse) {
           throw new Error(
-            `addRiddenSection: block "${blockId}" runs ${block.from.name}〜${block.to.name}, not the given section`,
+            `addRiddenSection: block "${blockId}" runs ${block.from.name}→${block.to.name}, not the given section`,
           );
         }
-        /* A named block must agree with the direction given:
-           a long way round a loop section saved with a blockId
-           would make the block toggle and the coverage disagree
-           (review round 2, medium — the block's direction is
-           the running order, so a section the other way round
-           it cannot be that block). Hand entries never name a
-           block, and block picks always send the block's own
-           direction, so a mismatch is a caller error, not a
-           case to silently rewrite. */
-        if (block.direction && direction && block.direction !== direction) {
+        if (block.direction && block.direction !== direction) {
           throw new Error(
             `addRiddenSection: block "${blockId}" runs ${block.direction}, not ${direction}`,
           );
@@ -2138,19 +2122,7 @@ export const Actions = {
         args.toStationName?.trim() ||
         stationRefById(toStationId)?.name ||
         null;
-      /* The same section twice returns the existing row instead of
-         duplicating it. The check below stops a sequential double
-         add; the unique index on the table (migration 0014) is
-         what stops two calls racing past the check together — the
-         insert then fails and the winner's row is returned. Either
-         way, a later call that names the master block must not
-         lose that link when the earlier call was a hand entry
-         without one: the surviving row adopts the block ID, the
-         runtime twin of migration 0014's dedupe rescue (integrated
-         review round 2, H-3) — without it the ledger could no
-         longer untick the block the section covers. The block was
-         already validated against this service above. The existing
-         section must also fit this service before attaching a block. */
+      // The unique index also covers simultaneous adds that both miss this check.
       const findDuplicate = async () => {
         const existing = await db
           .select()
@@ -2165,9 +2137,22 @@ export const Actions = {
             (s.direction ?? null) === direction,
         );
       };
-      const adoptBlockId = async (
+      const markPartial = () => db
+        .update(schema.riddenLines)
+        .set({ rideState: "partial" })
+        .where(and(
+          eq(schema.riddenLines.id, args.riddenLineId),
+          notInArray(schema.riddenLines.rideState, ["partial", "full"]),
+          exists(db.select({ id: schema.riddenLineSections.id })
+            .from(schema.riddenLineSections)
+            .where(eq(schema.riddenLineSections.riddenLineId, args.riddenLineId))),
+        ))
+        .returning({ id: schema.riddenLines.id });
+
+      const reuseSection = async (
         existing: typeof schema.riddenLineSections.$inferSelect,
       ) => {
+        // Keep a later block pick on the existing hand entry when its route fits.
         if (blockId && !existing.blockId) {
           if (!recordedSectionFitsService(service.id, {
             ...existing,
@@ -2177,87 +2162,52 @@ export const Actions = {
               `addRiddenSection: the existing section's recorded route cannot be attributed to ${service.displayName}`,
             );
           }
-          await db
-            .update(schema.riddenLineSections)
-            .set({ blockId })
-            .where(and(
-              eq(schema.riddenLineSections.id, existing.id),
-              isNull(schema.riddenLineSections.blockId),
-            ));
+          await db.batch([
+            db.update(schema.riddenLineSections)
+              .set({ blockId })
+              .where(and(
+                eq(schema.riddenLineSections.id, existing.id),
+                isNull(schema.riddenLineSections.blockId),
+              )),
+            markPartial(),
+          ]);
+          ctx.invalidateQueries();
+        } else if ((await markPartial()).length > 0) {
           ctx.invalidateQueries();
         }
+        return { created: false, id: existing.id };
       };
       const duplicate = await findDuplicate();
-      /* A row with sections on record is never unknown. The
-         handler's opening read of the row predates the insert,
-         so deciding unknown→partial from it goes stale when a
-         delete of the last section lands in between (review
-         round 2, medium — the delete returns the row to
-         unknown, the add still succeeds, and the row stays
-         unknown with a section on record). Re-read the row and
-         the section count at the point of the decision instead;
-         the duplicate and unique-constraint-winner paths get
-         the same repair, because they return early without
-         touching the state at all and so leave an already
-         inconsistent row inconsistent. */
-      const repairRideState = async () => {
-        const [fresh] = await db
-          .select()
-          .from(schema.riddenLines)
-          .where(eq(schema.riddenLines.id, args.riddenLineId))
-          .limit(1);
-        if (!fresh || normalizeRideState(fresh.rideState) !== "unknown") {
-          return;
-        }
-        const sections = await db
-          .select({ id: schema.riddenLineSections.id })
-          .from(schema.riddenLineSections)
-          .where(
-            eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
-          )
-          .limit(1);
-        if (sections.length > 0) {
-          await db
-            .update(schema.riddenLines)
-            .set({ rideState: "partial" })
-            .where(eq(schema.riddenLines.id, args.riddenLineId));
-        }
-      };
       if (duplicate) {
-        await adoptBlockId(duplicate);
-        await repairRideState();
-        return { created: false, id: duplicate.id };
+        return reuseSection(duplicate);
       }
       let insertedId: number | null;
       try {
-        const inserted = await db
-          .insert(schema.riddenLineSections)
-          .values({
-            riddenLineId: args.riddenLineId,
-            fromStationId,
-            fromStationName: fromName,
-            toStationId,
-            toStationName: toName,
-            direction,
-            blockId,
-            recordedServiceId: service.id,
-          })
-          .returning({ id: schema.riddenLineSections.id });
+        const [inserted] = await db.batch([
+          db.insert(schema.riddenLineSections)
+            .values({
+              riddenLineId: args.riddenLineId,
+              fromStationId,
+              fromStationName: fromName,
+              toStationId,
+              toStationName: toName,
+              direction,
+              blockId,
+              recordedServiceId: service.id,
+            })
+            .returning({ id: schema.riddenLineSections.id }),
+          markPartial(),
+        ]);
         insertedId = inserted[0]?.id ?? null;
       } catch (error) {
         if (isUniqueConstraintError(error)) {
           const winner = await findDuplicate();
           if (winner) {
-            await adoptBlockId(winner);
-            await repairRideState();
-            return { created: false, id: winner.id };
+            return reuseSection(winner);
           }
         }
         throw error;
       }
-      // An unknown row that gains a section now pins one down
-      // (re-read at this point — see repairRideState above).
-      await repairRideState();
       ctx.invalidateQueries();
       return { created: true, id: insertedId };
     },
@@ -2276,33 +2226,22 @@ export const Actions = {
         .where(eq(schema.riddenLineSections.id, args.id));
       const section = sections[0];
       if (!section) return { ok: true as const };
-      await db
-        .delete(schema.riddenLineSections)
-        .where(eq(schema.riddenLineSections.id, args.id));
-      const remaining = await db
-        .select({ id: schema.riddenLineSections.id })
-        .from(schema.riddenLineSections)
-        .where(
-          eq(schema.riddenLineSections.riddenLineId, section.riddenLineId),
-        );
-      if (remaining.length === 0) {
-        const lines = await db
-          .select()
-          .from(schema.riddenLines)
-          .where(eq(schema.riddenLines.id, section.riddenLineId));
-        const line = lines[0];
-        if (
-          line &&
-          normalizeRideState(line.rideState) === "partial" &&
-          !line.fromStationId &&
-          !line.toStationId
-        ) {
-          await db
-            .update(schema.riddenLines)
-            .set({ rideState: "unknown" })
-            .where(eq(schema.riddenLines.id, line.id));
-        }
-      }
+      // Evaluate the remaining sections within the same atomic batch as the delete.
+      await db.batch([
+        db.delete(schema.riddenLineSections)
+          .where(eq(schema.riddenLineSections.id, args.id)),
+        db.update(schema.riddenLines)
+          .set({ rideState: "unknown" })
+          .where(and(
+            eq(schema.riddenLines.id, section.riddenLineId),
+            eq(schema.riddenLines.rideState, "partial"),
+            or(isNull(schema.riddenLines.fromStationId), eq(schema.riddenLines.fromStationId, "")),
+            or(isNull(schema.riddenLines.toStationId), eq(schema.riddenLines.toStationId, "")),
+            notExists(db.select({ id: schema.riddenLineSections.id })
+              .from(schema.riddenLineSections)
+              .where(eq(schema.riddenLineSections.riddenLineId, section.riddenLineId))),
+          )),
+      ]);
       ctx.invalidateQueries();
       return { ok: true as const };
     },

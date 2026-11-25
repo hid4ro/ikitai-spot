@@ -640,6 +640,116 @@ test("a duplicate section registration adopts the later call's block_id (integra
   });
 });
 
+test("an add after a delete sees zero sections keeps the replacement ride partial", async () => {
+  await withLedger(async (client, ctx) => {
+    const line = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "武蔵野線",
+    });
+    if (line.id == null) throw new Error("Missing 武蔵野線 row");
+    const riddenLineId = line.id;
+    const first = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId,
+      fromStationId: "003876",
+      toStationId: "003004",
+    });
+    if (first.id == null) throw new Error("Missing initial section");
+
+    const execute = client.execute.bind(client);
+    const batch = client.batch.bind(client);
+    const statementSql = (statement: Parameters<TestDatabase["execute"]>[0]) =>
+      typeof statement === "string" ? statement : statement.sql;
+    let replacementId: number | null = null;
+    let deletePaused = false;
+    const addWhileDeletePaused = async () => {
+      deletePaused = true;
+      const replacement = await Actions.addRiddenSection.handler(ctx, {
+        riddenLineId,
+        fromStationId: "003004",
+        toStationId: "003547",
+      });
+      expect(replacement.created).toBe(true);
+      replacementId = replacement.id;
+    };
+
+    client.execute = async (statement) => {
+      const result = await execute(statement);
+      // Before the fix, let DELETE read an empty result, finish the competing
+      // add, then hand the now-stale result back to the delete handler.
+      if (!deletePaused && result.rows.length === 0 &&
+          statementSql(statement).startsWith('select "id" from "ridden_line_sections"')) {
+        await addWhileDeletePaused();
+      }
+      return result;
+    };
+    client.batch = async (statements, mode) => {
+      const result = await batch(statements, mode);
+      if (statements.some((statement) =>
+        statementSql(statement).startsWith('delete from "ridden_line_sections"'),
+      )) {
+        // The empty section list and unknown state must already be committed
+        // together before the competing add can run.
+        const [afterDelete] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+        expect(afterDelete).toMatchObject({ rideState: "unknown", sections: [] });
+        await addWhileDeletePaused();
+      }
+      return result;
+    };
+
+    expect(await Actions.deleteRiddenSection.handler(ctx, { id: first.id }))
+      .toEqual({ ok: true });
+    expect(replacementId).not.toBeNull();
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.rideState).toBe("partial");
+    expect(after?.sections).toEqual([
+      expect.objectContaining({
+        id: replacementId,
+        fromStationId: "003004",
+        toStationId: "003547",
+      }),
+    ]);
+  });
+});
+
+test("a failed ride-state update rolls back the section add or delete", async () => {
+  await withLedger(async (client, ctx) => {
+    const line = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "武蔵野線",
+    });
+    if (line.id == null) throw new Error("Missing 武蔵野線 row");
+    const section = {
+      riddenLineId: line.id,
+      fromStationId: "003876",
+      toStationId: "003004",
+    };
+    const rejectStateUpdates = () => client.execute(`
+      CREATE TRIGGER reject_ride_state BEFORE UPDATE OF ride_state ON ridden_lines
+      BEGIN
+        SELECT RAISE(ABORT, 'ride state update failed');
+      END
+    `);
+
+    await rejectStateUpdates();
+    await expect(Actions.addRiddenSection.handler(ctx, section))
+      .rejects.toThrow(/ride state update failed/);
+    const [afterFailedAdd] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(afterFailedAdd).toMatchObject({ rideState: "unknown", sections: [] });
+
+    await client.execute("DROP TRIGGER reject_ride_state");
+    const added = await Actions.addRiddenSection.handler(ctx, section);
+    if (added.id == null) throw new Error("Missing added section");
+    await rejectStateUpdates();
+    await expect(Actions.deleteRiddenSection.handler(ctx, { id: added.id }))
+      .rejects.toThrow(/ride state update failed/);
+    const [afterFailedDelete] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(afterFailedDelete).toMatchObject({
+      rideState: "partial",
+      sections: [expect.objectContaining({ id: added.id })],
+    });
+  });
+});
+
 test("a duplicate add repairs a row left unknown with a section on record (review round 2, medium)", async () => {
   await withLedger(async (_, ctx) => {
     /* The inconsistent state the review reproduced: a section
@@ -672,18 +782,42 @@ test("a duplicate add repairs a row left unknown with a section on record (revie
   `));
 });
 
-test("a named block must agree with the direction given (review round 2, medium)", async () => {
+test("a named loop block must match both its ordered endpoints and direction", async () => {
   await withLedger(async (_, ctx) => {
     const yamanote = await Actions.addRiddenLine.handler(ctx, {
       ...aRide,
       name: "山手線",
     });
     if (yamanote.id == null) throw new Error("Missing 山手線 row");
-    /* 新宿→渋谷 inner is a real ride (it runs yamanote/b2
-       end to end), but it cannot be saved AS yamanote/b2:
-       the block runs outer, so naming it would make the
-       toggle and the coverage disagree. The same endpoints
-       the outer way round are that block. */
+    /* 新宿→渋谷 outer uses the other five blocks. */
+    await expect(
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: yamanote.id,
+        fromStationId: "003700",
+        toStationId: "003922",
+        direction: "outer",
+        blockId: "yamanote/b2",
+      }),
+    ).rejects.toThrow(/runs 渋谷→新宿, not the given section/);
+    /* 渋谷→新宿 inner also goes the long way around. */
+    await expect(
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: yamanote.id,
+        fromStationId: "003922",
+        toStationId: "003700",
+        direction: "inner",
+        blockId: "yamanote/b2",
+      }),
+    ).rejects.toThrow(/runs outer, not inner/);
+    const blockFirst = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: yamanote.id,
+      fromStationId: "003922",
+      toStationId: "003700",
+      direction: "outer",
+      blockId: "yamanote/b2",
+    });
+    expect(blockFirst.created).toBe(true);
+    /* 新宿→渋谷 inner is the reverse ride and can be entered by hand. */
     await expect(
       Actions.addRiddenSection.handler(ctx, {
         riddenLineId: yamanote.id,
@@ -692,20 +826,29 @@ test("a named block must agree with the direction given (review round 2, medium)
         direction: "inner",
         blockId: "yamanote/b2",
       }),
-    ).rejects.toThrow(/runs outer, not inner/);
-    const blockFirst = await Actions.addRiddenSection.handler(ctx, {
+    ).rejects.toThrow(/runs 渋谷→新宿, not the given section/);
+    const handEntry = await Actions.addRiddenSection.handler(ctx, {
       riddenLineId: yamanote.id,
       fromStationId: "003700",
       toStationId: "003922",
-      direction: "outer",
-      blockId: "yamanote/b2",
+      direction: "inner",
     });
-    expect(blockFirst.created).toBe(true);
+    expect(handEntry.created).toBe(true);
     const row = (await Actions.listRiddenLines.handler(ctx, {})).lines.find(
       (line) => line.name === "山手線",
     );
-    expect(row?.sections).toEqual([
-      expect.objectContaining({ id: blockFirst.id, blockId: "yamanote/b2" }),
-    ]);
+    expect(row?.sections).toHaveLength(2);
+    expect(row?.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: blockFirst.id,
+        blockId: "yamanote/b2",
+        direction: "outer",
+      }),
+      expect.objectContaining({
+        id: handEntry.id,
+        blockId: null,
+        direction: "inner",
+      }),
+    ]));
   });
 });
