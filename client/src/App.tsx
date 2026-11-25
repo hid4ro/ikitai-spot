@@ -66,7 +66,7 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
-  fullyPaintedLineKeys,
+  ghostLineLegs,
   riddenLineIntervals,
   sectionBounds,
   type LineCoverage,
@@ -74,7 +74,6 @@ import {
 } from "./line-geometry";
 import {
   JAPAN_LINE_TOTAL_KM,
-  LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
 } from "./line-totals";
 import {
@@ -3332,34 +3331,38 @@ function VisitedMapSection({
   lineCoverageRef.current = lineCoverage;
   /* The 路線 tab's ghost of everything NOT ridden (tab split,
      subtask 1439 — the reader allowed unridden lines as a ghost
-     there): every formal line in the asset that is not fully
-     painted, in its own color, drawn by the mount as one thin
-     layer whose visibility the variant paint toggles. A service
-     can paint a formal line partially; the ghost then still
-     draws the line's whole path UNDER the painted legs, which is
-     what an underlay is for. Only a line ridden end to end
-     leaves the ghost (see fullyPaintedLineKeys): excluding by
-     "any leg paints this key" dropped the whole 山手線 loop from
-     the ghost the moment one section of it was ridden, so the
-     unridden arcs showed nothing and the loop read as gapped
-     (subtask 1456). */
+     there): for each formal line, the drawing shape minus the
+     solid-painted ranges, edge by edge (see ghostLineLegs) —
+     so a partially ridden line keeps exactly its unridden
+     stretches as a thin underlay, and only a line with nothing
+     unridden left leaves the ghost. The old whole-key exclusion
+     dropped the whole 山手線 loop from the ghost the moment one
+     section of it was ridden, so the unridden arcs showed
+     nothing and the loop read as gapped (subtask 1456, review
+     round 1). One feature per key, in its own color, drawn by
+     the mount as one thin layer whose visibility the variant
+     paint toggles. The legs keep full precision here; the
+     coarse-ghost simplification (subtask 1457) applies to this
+     per-key remainder geometry at merge time. */
   const unriddenLineFeatures = useMemo(() => {
-    const fullyPainted = fullyPaintedLineKeys(
-      lineCoverage,
-      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
-      LINE_TOTAL_KM,
-    );
     const features: {
       type: "Feature";
       properties: { key: string; color: string };
       geometry: GeoJsonLineGeometry;
     }[] = [];
-    for (const [key, entry] of Object.entries(RIDDEN_LINE_GEOMETRIES)) {
-      if (fullyPainted.has(key)) continue;
+    for (const [key, legs] of ghostLineLegs(
+      lineCoverage,
+      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
+    )) {
+      const entry = RIDDEN_LINE_GEOMETRIES[key];
+      if (!entry || legs.length === 0) continue;
       features.push({
         type: "Feature",
         properties: { key, color: entry.color },
-        geometry: entry.geometry,
+        geometry: {
+          type: "MultiLineString",
+          coordinates: legs.map((leg) => leg.coords),
+        },
       });
     }
     return features;
@@ -4747,10 +4750,11 @@ function VisitedMapSection({
         });
       }
       /* Unridden lines, the 路線 tab's ghost (tab split, subtask
-         1439): every formal line not fully painted (subtask
-         1456 — a partially painted line keeps its whole path as
-         the underlay), in its own color at a whisper of the
-         ridden lines' strength, BELOW them in the paint order.
+         1439): each formal line's unridden remainder, edge by
+         edge (subtask 1456 — a partially painted line keeps
+         exactly its unridden stretches as the underlay), in its
+         own color at a whisper of the ridden lines' strength,
+         BELOW them in the paint order.
          The layer rides along on every mount, but its visibility
          starts at "none": the variant paint applied right after
          the mount (and on every tab switch) shows it only on the

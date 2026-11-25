@@ -17,7 +17,7 @@ import {
   computeRiddenLineCoverage,
   coveredBlockIds,
   EdgeCoverage,
-  fullyPaintedLineKeys,
+  ghostLineLegs,
   graphSectionLegs,
   haversineKm,
   parseFullPathSnapshot,
@@ -886,13 +886,14 @@ describe("rides whose route the record cannot pin down (integrated review round 
   });
 });
 
-describe("fullyPaintedLineKeys: the 路線 tab's ghost exclusion (subtask 1456)", () => {
+describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, review round 1)", () => {
   const YAMA_KEY = "山手線|東日本旅客鉄道";
   const TOHOKU_KEY = "東北線|東日本旅客鉄道";
   const TOKAIDO_KEY = "東海道線|東日本旅客鉄道";
   const KEIO_KEY = "京王線|京王電鉄";
   const CHUO_KEY = "中央線|東日本旅客鉄道";
   const AKABANE_KEY = "赤羽線|東日本旅客鉄道";
+  const MUSA_KEY = "武蔵野線|東日本旅客鉄道";
 
   function coverageFor(
     intervals: ReadonlyMap<string, readonly RideInterval[]>,
@@ -903,11 +904,46 @@ describe("fullyPaintedLineKeys: the 路線 tab's ghost exclusion (subtask 1456)"
     return computeLineCoverage(intervals, full, paths, GEOMETRIES, 597);
   }
 
-  test("a partially ridden Yamanote keeps its whole route as the ghost underlay", () => {
+  /* Ghost kilometres on one formal-line key — the remainder of
+     the shape, measured on the legs themselves. */
+  function ghostKm(
+    coverage: ReturnType<typeof computeLineCoverage>,
+    key: string,
+  ): number {
+    const legs = ghostLineLegs(coverage, GEOMETRIES).get(key);
+    return legs ? legs.reduce((sum, leg) => sum + leg.lengthKm, 0) : 0;
+  }
+
+  /* Bounding box of the ghost legs on a key, so a test can say
+     WHERE the remainder is, not just how long it is. */
+  function ghostBounds(
+    coverage: ReturnType<typeof computeLineCoverage>,
+    key: string,
+  ): { minLng: number; maxLng: number; minLat: number; maxLat: number } | null {
+    const legs = ghostLineLegs(coverage, GEOMETRIES).get(key);
+    if (!legs || legs.length === 0) return null;
+    let minLng = Infinity;
+    let maxLng = -Infinity;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    for (const leg of legs) {
+      for (const [lng, lat] of leg.coords) {
+        minLng = Math.min(minLng, lng);
+        maxLng = Math.max(maxLng, lng);
+        minLat = Math.min(minLat, lat);
+        maxLat = Math.max(maxLat, lat);
+      }
+    }
+    return { minLng, maxLng, minLat, maxLat };
+  }
+
+  test("a partially ridden Yamanote keeps the rest of the loop as ghost", () => {
     /* The bug: any leg on the 山手線 key excluded the whole key
        from the ghost, so after the 新宿〜大崎 ride the unridden
        arcs of the loop showed nothing and the loop read as
-       gapped. A partial ride paints 8.58 of the key's 20.8 km. */
+       gapped. A partial ride paints 8.58 of the key's 23.46 km
+       shape; the remaining 14.88 km stays as ghost, all the way
+       round the north side (past 池袋, 35.73) to 大崎. */
     const coverage = coverageFor(
       new Map([
         [
@@ -925,60 +961,121 @@ describe("fullyPaintedLineKeys: the 路線 tab's ghost exclusion (subtask 1456)"
       new Set(),
     );
     expect(coverage.perKeyKm.get(YAMA_KEY)).toBeCloseTo(8.58, 1);
-    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(YAMA_KEY)).toBe(
-      false,
-    );
+    expect(ghostKm(coverage, YAMA_KEY)).toBeCloseTo(14.88, 1);
+    expect(ghostBounds(coverage, YAMA_KEY)!.maxLat).toBeGreaterThan(35.72);
   });
 
-  test("a full Yamanote lap leaves the ghost on the 山手線 key only", () => {
+  test("a full Yamanote lap leaves only the shape's off-spine remainder", () => {
+    /* A lap paints the whole loop, so the ghost shrinks to the
+       pieces the shortest path never takes — short bits at
+       junctions and station throats, 2.88 km in all. The
+       東北線 / 東海道線 keys the loop also runs on keep almost
+       their whole shapes (the lap paints only short stretches
+       of them). */
     const coverage = coverageFor(new Map(), new Set(["yamanote"]));
-    const fully = fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM);
-    expect(fully.has(YAMA_KEY)).toBe(true);
-    /* The same lap paints only short stretches of the 東北線 /
-       東海道線 keys the loop also runs on — most of those lines
-       is unridden, so their ghosts stay. */
-    expect(fully.has(TOHOKU_KEY)).toBe(false);
-    expect(fully.has(TOKAIDO_KEY)).toBe(false);
+    expect(ghostKm(coverage, YAMA_KEY)).toBeCloseTo(2.88, 1);
+    expect(ghostKm(coverage, TOHOKU_KEY)).toBeCloseTo(597.3, 0);
+    expect(ghostKm(coverage, TOKAIDO_KEY)).toBeCloseTo(160.0, 0);
   });
 
   test("a full Saikyo ride does not kill the Yamanote ghost", () => {
     /* 埼京線 shares the 山手線 key but runs only part of it
-       (大崎〜池袋, 13.18 of 20.8 km): completing the service
-       must not exclude the key — the per-service `complete`
+       (大崎〜池袋, 13.18 of 23.46 km): completing the service
+       must not clear the key — the per-service `complete`
        flag would have done exactly that. */
     const coverage = coverageFor(new Map(), new Set(["jr-saikyo"]));
     expect(coverage.perKeyKm.get(YAMA_KEY)).toBeCloseTo(13.18, 1);
-    const fully = fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM);
-    expect(fully.has(YAMA_KEY)).toBe(false);
-    /* The same ride DOES complete the 赤羽線 key end to end
-       (池袋〜赤羽 is the service's own stretch, and its union
-       spans 0.904 of the key — above the 0.85 span gate), so
-       that key leaves the ghost. */
-    expect(fully.has(AKABANE_KEY)).toBe(true);
+    expect(ghostKm(coverage, YAMA_KEY)).toBeCloseTo(10.27, 1);
+    /* The same ride DOES paint the 赤羽線 key's spine end to
+       end (池袋〜赤羽), so only the shape's off-spine slivers
+       at the two ends remain — 0.57 km, not the whole line. */
+    expect(ghostKm(coverage, AKABANE_KEY)).toBeCloseTo(0.57, 1);
   });
 
-  test("a full Keio ride leaves the ghost on the 京王線 key", () => {
+  test("a full Keio ride leaves the 京王新線 branch as ghost", () => {
+    /* 新宿〜京王八王子 paints 37.65 km; the 京王線 key's shape
+       still holds the 京王新線 side （笹塚〜新宿, about
+       2.8 km) unpainted, so the ghost stays — reaching the
+       新宿 side (lng 139.6993, next to 新宿 139.69993). */
     const coverage = coverageFor(new Map(), new Set(["keio"]));
-    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(KEIO_KEY)).toBe(
-      true,
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(2.93, 1);
+    expect(ghostBounds(coverage, KEIO_KEY)!.maxLng).toBeGreaterThan(139.69);
+  });
+
+  test("a partial Keio ride keeps the rest of the line as ghost", () => {
+    /* 府中→聖蹟桜ヶ丘 paints only 4.40 km of the 京王線
+       key's 40.58 km shape; the rest stays as ghost. */
+    const coverage = coverageFor(
+      new Map([
+        [
+          "keio",
+          [
+            {
+              serviceId: "keio",
+              from: S.府中,
+              to: S.聖蹟桜ヶ丘,
+              direction: null,
+            },
+          ],
+        ],
+      ]),
+      new Set(),
     );
+    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(4.4, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(36.18, 1);
+  });
+
+  test("one unridden block leaves exactly that block's shape as ghost", () => {
+    /* 新宿→府中 (blocks b1+b2) leaves b3 （府中→京王八王子)
+       unridden: the ghost is b3's shape plus the 京王新線
+       branch and the endpoint slivers, 18.92 km — and it
+       reaches the 京王八王子 end (lng 139.3425, next to
+       京王八王子 139.34298). */
+    const coverage = coverageFor(
+      new Map([
+        [
+          "keio",
+          [
+            {
+              serviceId: "keio",
+              from: S.新宿,
+              to: S.府中,
+              direction: null,
+            },
+          ],
+        ],
+      ]),
+      new Set(),
+    );
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(18.92, 1);
+    expect(ghostBounds(coverage, KEIO_KEY)!.minLng).toBeLessThan(139.35);
+  });
+
+  test("a full Musashino ride leaves the 大宮 branch as ghost", () => {
+    /* 府中本町〜西船橋 paints 71.78 km; the 武蔵野線 key's
+       shape still holds the unridden branch toward 大宮
+       (4.58 km: the 4.40 km leg up from 西浦和 plus the
+       0.18 km tip) and small off-spine bits, 5.45 km in all.
+       The ghost reaches north to lat 35.8851, toward 大宮
+       (35.90653). */
+    const coverage = coverageFor(new Map(), new Set(["jr-musashino"]));
+    expect(ghostKm(coverage, MUSA_KEY)).toBeCloseTo(5.45, 1);
+    expect(ghostBounds(coverage, MUSA_KEY)!.maxLat).toBeGreaterThan(35.88);
   });
 
   test("a complete service covering only part of its line keeps the ghost", () => {
     /* 中央線（快速） complete is 東京〜高尾, 51.77 of the
-       中央線 key's 221.1 km — the line is far from fully
-       painted even though the service is complete. */
+       中央線 key's 273.05 km shape — the line is far from
+       fully painted even though the service is complete. */
     const coverage = coverageFor(new Map(), new Set(["jr-chuo-rapid"]));
     expect(coverage.perService.get("jr-chuo-rapid")!.complete).toBe(true);
-    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(CHUO_KEY)).toBe(
-      false,
-    );
+    expect(ghostKm(coverage, CHUO_KEY)).toBeCloseTo(221.28, 1);
   });
 
-  test("an unknown ride paints nothing countable, so the ghost stays", () => {
+  test("an unknown ride leaves the whole shape as ghost", () => {
     /* A row with no section paints its whole path dashed and
-       counts zero kilometres: the key never reaches perKeyKm,
-       so it is never fully painted. */
+       counts zero kilometres: nothing is subtracted, so the
+       ghost is the key's whole 23.46 km shape. */
     const paths = new Map([["yamanote", servicePath("yamanote")]]);
     const coverage = computeLineCoverage(
       new Map(),
@@ -989,8 +1086,6 @@ describe("fullyPaintedLineKeys: the 路線 tab's ghost exclusion (subtask 1456)"
     );
     expect(coverage.perServiceLegs.get("yamanote")!.unknown).toBe(true);
     expect(coverage.perKeyKm.has(YAMA_KEY)).toBe(false);
-    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(YAMA_KEY)).toBe(
-      false,
-    );
+    expect(ghostKm(coverage, YAMA_KEY)).toBeCloseTo(23.46, 1);
   });
 });

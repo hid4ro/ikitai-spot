@@ -1145,80 +1145,69 @@ export function computeLineCoverage(
   };
 }
 
-/* How much of a formal line the services on it must span before
-   the line can leave the ghost at all (subtask 1456): the union
-   of the services' paths over the line's generated total
-   (LINE_TOTAL_KM). Measured 2026-11-25, the spanning keys land
-   at 0.904 and up （赤羽線 0.904, 山手線 0.989, 京王線 0.996)
-   while the next key down sits at 0.518 （川越線 — its services
-   run only half the line), so 0.85 sits in the empty band. */
-export const GHOST_EXCLUSION_MIN_SPAN = 0.85;
-
-/* The formal lines the 路線 tab's ghost may leave out (subtask
-   1456). A line leaves the ghost only when BOTH hold:
-   1. The rides on it cover the union of every service path that
-      runs on it (the paintable extent), on the same legs basis
-      the painted kilometres are measured on — so a line ridden
-      end to end compares at exactly 1.0, with the same 0.999
-      tolerance the service-completeness rule uses for rounding.
-   2. That union spans the formal line itself (its generated
-      total): the services on the line must actually run most of
-      it, or the stretches no service covers would lose their
-      only representation.
-   Neither condition alone works. Per-service `complete` is wrong
-   on shared keys: a full 埼京線 ride completes that service
-   while painting only 大崎〜池袋 of the 山手線 key, and a
-   complete 中央線（快速） paints only 東京〜高尾 of the 221 km
-   中央線 key. The generated total alone is wrong too: a full
-   Yamanote lap paints 20.58 km of the 山手線 key's 20.8 km
-   diameter (the shape runs a little past the end stations), so
-   no threshold near 1.0 separates a full lap from a partial one
-   on that basis — and a line like 東海道線, whose only service
-   runs 東京〜品川, would compare 6.7 against 107.5 forever.
-   Keys with no painted kilometre, keys no current service runs
-   on, and keys whose path cannot be built (a missing segment)
-   are never fully painted — the ghost stays, which is the safe
-   direction: a kept ghost is faint noise under the paint, while
-   a dropped one leaves an unridden stretch showing nothing (the
-   山手線 loop reading as gapped after a partial 新宿〜大崎
-   ride). Unknown rides paint dashed and count nothing, so they
-   never make a key fully painted either (their kilometres never
-   reach perKeyKm). */
-export function fullyPaintedLineKeys(
+/* The 路線 tab's ghost, edge by edge (subtask 1456, review round
+   1): for each formal line, the drawing shape minus the
+   solid-painted ranges — so a partially ridden line keeps
+   exactly its unridden stretches as ghost, and a line leaves
+   the ghost only when nothing unridden is left on it. No
+   threshold: any unpainted stretch, however short, stays as a
+   thin line (the user's rule: 乗った区間＝実線、乗ってない区
+   間＝薄い線、破線なし）.
+ *
+ * The subtraction runs on graph edges, the same basis the
+   painted legs are measured on: a painted leg names its edge
+   and its [fromT, toT] span, so the remainder of an edge is
+   the complement of the merged painted spans on it. Bridges
+   are not part of the asset shape, so they never appear in the
+   ghost — a painted bridge leg draws over the gap, as before.
+   Unknown rides paint dashed and count nothing, so their legs
+   are not subtracted either: the ghost stays under the dashed
+   paint, as before.
+ *
+ * A line with no painted leg at all keeps its whole shape, and
+   a fully ridden service still leaves its line's off-spine
+   pieces (parallel strands and spurs the shortest path never
+   takes — e.g. a small remainder on 赤羽線 after a full 埼京線
+   ride): the ghost is the remainder of the SHAPE, not of the
+   service, so the map and the painted distance can only agree
+   by construction. */
+export function ghostLineLegs(
   coverage: LineCoverage,
   geometries: LineGeometryMap,
-  totals: Readonly<Record<string, number>>,
-): ReadonlySet<string> {
-  const fully = new Set<string>();
-  for (const [key, paintedKm] of coverage.perKeyKm) {
-    if (!(paintedKm > 0)) continue;
-    const totalKm = totals[key];
-    if (!(totalKm && totalKm > 0)) continue;
-    const services = SERVICE_MASTER.filter((entry) =>
-      entry.segments.some((segment) => segment.formalLineKey === key),
-    );
-    if (services.length === 0) continue;
-    const paintable = new EdgeCoverage();
-    let unproven = false;
-    for (const service of services) {
-      const path = buildServicePath(service, geometries);
-      if (path.missing.some((m) => m.startsWith(`${key}:`))) {
-        unproven = true;
-        break;
-      }
-      for (const leg of path.legs) {
-        if (leg.key === key) paintable.addLeg(leg);
-      }
+): ReadonlyMap<string, readonly PathLeg[]> {
+  /* Painted spans per (formal-line key, graph edge), merged
+     across services — two services on one key (総武線) or two
+     blocks of one service count once. */
+  const covered = new Map<string, [number, number][]>();
+  for (const [, painted] of coverage.perServiceLegs) {
+    if (painted.unknown) continue;
+    for (const leg of painted.legs) {
+      const composite = `${leg.key}\u0000${leg.edge}`;
+      const list = covered.get(composite) ?? [];
+      list.push([leg.fromT, leg.toT]);
+      covered.set(composite, list);
     }
-    if (unproven) continue;
-    const paintableKm = paintable.kilometresOn(key, geometries);
-    if (paintableKm <= 0) continue;
-    /* Condition 2 first: the services must span the line. */
-    if (paintableKm < totalKm * GHOST_EXCLUSION_MIN_SPAN) continue;
-    /* Condition 1: the rides cover that span. */
-    if (paintedKm >= paintableKm * 0.999) fully.add(key);
   }
-  return fully;
+  const out = new Map<string, PathLeg[]>();
+  for (const key of Object.keys(geometries)) {
+    const graph = getLineGraph(key, geometries);
+    if (!graph) continue;
+    const legs: PathLeg[] = [];
+    for (const edge of graph.edges) {
+      if (edge.bridge) continue;
+      const ranges = mergeRanges(
+        covered.get(`${key}\u0000edge:${edge.id}`) ?? [],
+      );
+      let cursor = 0;
+      for (const [a, b] of ranges) {
+        if (a > cursor + 1e-9) legs.push(...sliceEdge(key, edge, cursor, a));
+        cursor = Math.max(cursor, b);
+      }
+      if (cursor < 1 - 1e-9) legs.push(...sliceEdge(key, edge, cursor, 1));
+    }
+    if (legs.length > 0) out.set(key, legs);
+  }
+  return out;
 }
 
 /* The snapshot a full ride stores, parsed back — null when the
