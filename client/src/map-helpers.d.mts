@@ -131,6 +131,14 @@ export function mountPlaceListMap(
     baseStyle?: "light" | "dark" | "grayscale";
     selectedClass?: string;
     overlays?: MapOverlay[];
+    /* Explicit initial camera (unification, subtask 1460): the
+       runtime honors center/zoom when given and skips its
+       place-fit — the unified map passes the spot tab's
+       whole-country camera at mount time so it opens exactly
+       as the old spot map did. Passed through to mountMap with
+       the other options (see map-helpers.mjs). */
+    center?: { lat: number; lng: number };
+    zoom?: number;
     /* Replaces the default numbered-pin renderer; return "" to draw
        no marker at all (the visited map does this so wide-zoom fills
        stay visible, and selects via taps on the painted shapes). */

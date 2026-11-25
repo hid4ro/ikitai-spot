@@ -15,7 +15,7 @@ import {
 } from "./map-variant";
 
 const paintValue = (
-  variant: "municipalities" | "lines",
+  variant: "spots" | "municipalities" | "lines",
   layer: string,
   name: string,
 ) =>
@@ -23,7 +23,7 @@ const paintValue = (
     (op) => op.layer === layer && op.name === name,
   )?.value;
 const layoutValue = (
-  variant: "municipalities" | "lines",
+  variant: "spots" | "municipalities" | "lines",
   layer: string,
   name: string,
 ) =>
@@ -68,12 +68,45 @@ describe("variantPaintOps", () => {
   test("the unridden-line ghost shows only on the 路線 tab", () => {
     expect(layoutValue("lines", "unridden-lines-ghost", "visibility")).toBe("visible");
     expect(layoutValue("municipalities", "unridden-lines-ghost", "visibility")).toBe("none");
+    expect(layoutValue("spots", "unridden-lines-ghost", "visibility")).toBe("none");
   });
 
-  test("every op targets a layer the record map actually mounts", () => {
+  test("the spot dots are the hero only on the スポット tab (unification, subtask 1460)", () => {
+    /* Hero = the mount spec in App.tsx (circle-opacity 0.6).
+       On the record tabs the hero dots are hidden outright: the
+       ghost-spots layer already carries the unvisited dots there,
+       and showing both would paint every unvisited spot twice. */
+    expect(paintValue("spots", "list-spot-points-circle", "circle-opacity")).toBe(0.6);
+    expect(layoutValue("spots", "list-spot-points-circle", "visibility")).toBe("visible");
+    expect(layoutValue("municipalities", "list-spot-points-circle", "visibility")).toBe("none");
+    expect(layoutValue("lines", "list-spot-points-circle", "visibility")).toBe("none");
+    /* The ghost-spots underlay is the mirror: visible on the
+       record tabs, hidden on the スポット tab where the hero
+       dots show the same unvisited spots. */
+    expect(layoutValue("spots", "ghost-spots-circle", "visibility")).toBe("none");
+    expect(layoutValue("municipalities", "ghost-spots-circle", "visibility")).toBe("visible");
+    expect(layoutValue("lines", "ghost-spots-circle", "visibility")).toBe("visible");
+  });
+
+  test("on the スポット tab the municipality fills and the ridden lines are both ghosts", () => {
+    expect(paintValue("spots", "visited-areas-fill", "fill-opacity")).toBe(0.1);
+    expect(paintValue("spots", "visited-fill-circle", "circle-opacity")).toBe(0.07);
+    expect(paintValue("spots", "visited-lines-color", "line-opacity")).toBe(0.32);
+    expect(paintValue("spots", "visited-lines-color", "line-width")).toBe(2);
+    expect(paintValue("spots", "visited-lines-casing", "line-opacity")).toBe(0.15);
+    expect(paintValue("spots", "visited-lines-unknown", "line-opacity")).toBe(0.28);
+    expect(
+      paintValue("spots", "visited-areas-outline", "line-opacity"),
+    ).toEqual(["interpolate", ["linear"], ["zoom"], 7, 0.22, 10, 0.32]);
+  });
+
+  test("every op targets a layer the unified map actually mounts", () => {
     /* Layer ids as mounted in App.tsx. A typo here would
        silently no-op through applyVariantPaint's missing-layer
-       skip, so pin the op set to the mounted set. */
+       skip, so pin the op set to the mounted set. The
+       ghost-spots layer is added at runtime by
+       ensureGhostSpotPoints, not by the mount overlays, but it
+       is a real layer on the live map all the same. */
     const mounted = new Set([
       "visited-areas-fill",
       "visited-areas-hit",
@@ -87,8 +120,10 @@ describe("variantPaintOps", () => {
       "visited-lines-color",
       "visited-lines-unknown",
       "unridden-lines-ghost",
+      "list-spot-points-circle",
+      "ghost-spots-circle",
     ]);
-    for (const variant of ["municipalities", "lines"] as const) {
+    for (const variant of ["spots", "municipalities", "lines"] as const) {
       const ops = variantPaintOps(variant);
       for (const op of [...ops.paint, ...ops.layout]) {
         expect(mounted.has(op.layer)).toBe(true);
