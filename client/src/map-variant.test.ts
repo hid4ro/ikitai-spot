@@ -6,6 +6,7 @@
    Run with: bun test client/src/map-variant.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
+  decideSpotDataRemount,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
@@ -482,5 +483,83 @@ describe("shouldSkipSpotRemount (review round 1, finding 5)", () => {
     /* Nothing changed at all: no skip decision is needed (the
        effect would not re-run), and the predicate says mount. */
     expect(shouldSkipSpotRemount(base, base, "spots", true)).toBe(false);
+  });
+});
+
+describe("decideSpotDataRemount (review round 2, finding 5)", () => {
+  const base: MapMountKeys = {
+    placesKey: "1g,2g",
+    riddenLinesKey: "[]",
+    mapAttempt: 0,
+    mapFailed: false,
+    boundarySettled: true,
+    showMapPane: true,
+  };
+
+  test("no previous mount, or no record-data change, means nothing to do", () => {
+    /* The first run belongs to the mount effect, and a re-render
+       alone must never bump the retry nonce — or the mount
+       would rebuild in a loop. */
+    expect(decideSpotDataRemount(null, base, "spots", true)).toBe("none");
+    expect(decideSpotDataRemount(base, base, "spots", true)).toBe("none");
+    expect(
+      decideSpotDataRemount(base, { ...base, mapAttempt: 1 }, "spots", true),
+    ).toBe("none");
+  });
+
+  test("a record-only arrival on the スポット tab with a live map is skipped", () => {
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        true,
+      ),
+    ).toBe("skip");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, riddenLinesKey: "[x]" },
+        "spots",
+        true,
+      ),
+    ).toBe("skip");
+  });
+
+  test("the same arrival on a record tab, or without a live map, rebuilds", () => {
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "municipalities",
+        true,
+      ),
+    ).toBe("remount");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "lines",
+        true,
+      ),
+    ).toBe("remount");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        false,
+      ),
+    ).toBe("remount");
+    /* A retry nonce moving at the same time is never a
+       record-only change, so it rebuilds too. */
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g", mapAttempt: 1 },
+        "spots",
+        true,
+      ),
+    ).toBe("remount");
   });
 });

@@ -304,6 +304,38 @@ export function shouldSkipSpotRemount(
   );
 }
 
+/* The record-data arrival's verdict for the shared map (review
+   round 2, finding 5): the mount effect's own cleanup used to
+   destroy the map before the new run could decide to skip, so
+   the skip could never take effect — React runs the previous
+   run's cleanup first. The decision therefore lives in a
+   separate effect that watches only the record-data keys, and
+   the mount effect no longer watches them at all:
+   - "none": no previous mount yet, or the record data did not
+     change — nothing to do (a re-render alone must never bump
+     the retry nonce, or the mount would rebuild in a loop).
+   - "skip": a record-only arrival on the スポット tab with a
+     live map — remember the data as stale, rebuild on the next
+     record-tab entry instead.
+   - "remount": anything else that changed the record data —
+     bump the retry nonce so the mount effect rebuilds. */
+export type SpotDataRemountDecision = "none" | "skip" | "remount";
+export function decideSpotDataRemount(
+  lastKeys: MapMountKeys | null,
+  nextKeys: MapMountKeys,
+  variant: RecordMapVariant,
+  hasLiveMap: boolean,
+): SpotDataRemountDecision {
+  if (!lastKeys) return "none";
+  const recordDataChanged =
+    lastKeys.placesKey !== nextKeys.placesKey ||
+    lastKeys.riddenLinesKey !== nextKeys.riddenLinesKey;
+  if (!recordDataChanged) return "none";
+  return shouldSkipSpotRemount(lastKeys, nextKeys, variant, hasLiveMap)
+    ? "skip"
+    : "remount";
+}
+
 /* Whether the live map's mount effect should run. The mount
    waits for the priority boundary set to settle, and — since
    integrated review round 2 (high) — for there to be anything

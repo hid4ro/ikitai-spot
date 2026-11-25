@@ -83,10 +83,10 @@ import {
 } from "./line-focus";
 import {
   applyVariantPaint,
+  decideSpotDataRemount,
   lineRowForPaintedFeature,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
-  shouldSkipSpotRemount,
   spotsInitialCamera,
   stickyPaneVisibleTop,
   type MapMountKeys,
@@ -3899,7 +3899,6 @@ function VisitedMapSection({
        and this fly-to must not land on it. The request stays
        unapplied, so the variant change re-runs this effect. */
     if (variant === "spots") return;
-    appliedCameraSeqRef.current = cameraRequest.seq;
     currentLocRef.current = { lat: cameraRequest.lat, lng: cameraRequest.lng };
     /* Keep the スポット tab's location in step (review round 1,
        finding 8): the deviceLoc adoption early-returns when the
@@ -3922,13 +3921,29 @@ function VisitedMapSection({
       spotLocRef.current = loc;
       setSpotLoc(loc);
     }
-    withLiveMapRef.current((map) => {
-      try {
-        drawCurrentLocationMarker(map, cameraRequest.lat, cameraRequest.lng, true);
-      } catch {
-        /* the camera move is a cue only */
-      }
-    });
+    /* The effect above already waits while the スポット tab is
+       showing, but that check runs before the style wait: if the
+       reader switches to the スポット tab while this camera
+       move is waiting, the move must not land on the スポット
+       map (review round 2, finding 6). The guard re-checks at
+       execution time, and the request is only marked applied
+       inside the callback — so a waiter dropped by the guard
+       leaves the request unapplied, and the variant change
+       re-runs this effect when a record tab returns. A duplicate
+       waiter (the effect re-running while one is still pending)
+       is harmless: the marker draw and the marking are
+       idempotent. */
+    withLiveMapRef.current(
+      (map) => {
+        appliedCameraSeqRef.current = cameraRequest.seq;
+        try {
+          drawCurrentLocationMarker(map, cameraRequest.lat, cameraRequest.lng, true);
+        } catch {
+          /* the camera move is a cue only */
+        }
+      },
+      { when: () => variantRef.current !== "spots" },
+    );
   }, [cameraRequest, mapReady, variant]);
 
   /* Spot sync + framing (unification, subtask 1460 — moved from
@@ -4285,24 +4300,9 @@ function VisitedMapSection({
       boundarySettled,
       showMapPane,
     };
-    /* A record-data arrival while the スポット tab is showing
-       must not rebuild the map the reader is using (review round
-       1, finding 5): skip the remount, remember the data is
-       stale, and rebuild on the next record-tab entry instead.
-       Anything else — a retry, a failure flip, the boundary set
-       settling, the pane appearing — still mounts. */
-    if (
-      shouldSkipSpotRemount(
-        lastMountKeysRef.current,
-        nextKeys,
-        variantRef.current,
-        mapHandleRef.current?.getMap() != null,
-      )
-    ) {
-      mapDataStaleRef.current = true;
-      lastMountKeysRef.current = nextKeys;
-      return;
-    }
+    /* The mount always mounts when it runs: the record-data
+       skip decision lives in the data-watch effect below, not
+       here (review round 2, finding 5). */
     lastMountKeysRef.current = nextKeys;
     setBasemapReady(false);
     const container = mapContainerRef.current;
@@ -4993,19 +4993,67 @@ function VisitedMapSection({
          running (review round 1, finding 1). */
       destroyLiveMap();
     };
-    // placesKey captures the municipality set plus each one's shape
-    // availability; riddenLinesKey captures the path ranges and styles
-    // the overlay paints. mapAttempt is the automatic-retry nonce.
-    // boundarySettled gates the first mount on the priority boundary
-    // set; later boundary arrivals do NOT remount (the refresh effect
-    // below updates the nationwide sources in place). showMapPane is
+    // mapAttempt is the automatic-retry nonce: a retry, the
+    // record-data watch below, and the stale-flag consumption on
+    // record-tab entry all bump it to rebuild. boundarySettled
+    // gates the first mount on the priority boundary set; later
+    // boundary arrivals do NOT remount (the refresh effect below
+    // updates the nationwide sources in place). showMapPane is
     // a gate of the mount itself (see shouldMountLiveMap): when it
     // flips after the boundary set settled — the first ride record
     // arriving, or the first spot points on the スポット tab — the
     // mount must run then, not sit on the earlier no-container
-    // pass. Refs, index, shaped and circled are derived from those.
+    // pass. placesKey / riddenLinesKey are deliberately NOT
+    // dependencies here (review round 2, finding 5): the
+    // record-data watch below owns them, so a data arrival never
+    // re-runs this effect — and its cleanup never destroys the
+    // map the reader is using. Refs, index, shaped and circled
+    // are derived from those.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placesKey, riddenLinesKey, mapFailed, mapAttempt, boundarySettled, showMapPane]);
+  }, [mapFailed, mapAttempt, boundarySettled, showMapPane]);
+
+  /* Record-data arrivals, watched on their own (review round 2,
+     finding 5): a record-data arrival while the スポット tab is
+     showing must not rebuild the map the reader is using
+     (review round 1, finding 5) — but the old code decided that
+     inside the mount effect, and React runs the previous run's
+     cleanup first, so the map was destroyed before the new run
+     could decide to skip. The decision now lives here, watching
+     only placesKey / riddenLinesKey: a record-only arrival on
+     the スポット tab marks the data stale and rebuilds on the
+     next record-tab entry instead, and any other record-data
+     change bumps the retry nonce so the mount effect rebuilds.
+     The mount effect no longer watches these keys at all, so a
+     data arrival never runs its cleanup. This effect is declared
+     after the mount effect, so the mount's first run has already
+     established lastMountKeysRef when this first runs. */
+  useEffect(() => {
+    const nextKeys: MapMountKeys = {
+      placesKey,
+      riddenLinesKey,
+      mapAttempt,
+      mapFailed,
+      boundarySettled,
+      showMapPane,
+    };
+    const decision = decideSpotDataRemount(
+      lastMountKeysRef.current,
+      nextKeys,
+      variantRef.current,
+      mapHandleRef.current?.getMap() != null,
+    );
+    if (decision === "none") return;
+    lastMountKeysRef.current = nextKeys;
+    if (decision === "skip") {
+      mapDataStaleRef.current = true;
+      return;
+    }
+    setMapAttempt((n) => n + 1);
+    // placesKey captures the municipality set plus each one's
+    // shape availability; riddenLinesKey captures the path ranges
+    // and styles the overlay paints.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placesKey, riddenLinesKey]);
 
   /* Background boundary arrivals grow the nationwide sources
      (unvisited outlines, unvisited ward lines, prefecture
@@ -5044,6 +5092,13 @@ function VisitedMapSection({
   useEffect(() => {
     const prevVariant = prevVariantRef.current;
     prevVariantRef.current = variant;
+    /* This callback closes over the variant of THIS run. A style
+       wait can outlive a second switch, and the held variant
+       would then paint the wrong tab — a スポット paint landing
+       on the 路線 tab shows the hero spot dots there (review
+       round 2, finding 7). The guard drops the waiter when the
+       reader has already left this variant; the new tab's own
+       run re-issues the paint, the resize, and the ring clear. */
     withLiveMapRef.current((map) => {
       try {
         map.resize();
@@ -5092,7 +5147,10 @@ function VisitedMapSection({
           }
         });
       }
-    });
+      /* Dropping this waiter leaves didAutoFitRef unconsumed, so
+         the auto-fit effect above still frames when the map
+         becomes ready — nothing is lost, only deferred. */
+    }, { when: () => variantRef.current === variant });
     if (variant === "spots") {
       /* The next record entry gets its one-shot auto-fit back
          (review round 1, finding 4: the flag used to stick after
@@ -5111,13 +5169,23 @@ function VisitedMapSection({
          framing effect owns the camera and this stays out of its
          way. */
       if (!spotLocRef.current) {
-        withLiveMapRef.current((map) => {
-          try {
-            resetSpotsCamera(map);
-          } catch {
-            /* framing is a cue; a failure leaves the current view */
-          }
-        });
+        /* The reset belongs to the スポット tab alone: entering
+           the スポット tab during a style load and switching
+           straight to 路線 must not let the late reset drag the
+           路線 map back to the whole-country view (review round
+           2, finding 4). The guard drops the waiter then; the
+           路線 tab keeps its camera, and the next スポット
+           entry re-issues the reset. */
+        withLiveMapRef.current(
+          (map) => {
+            try {
+              resetSpotsCamera(map);
+            } catch {
+              /* framing is a cue; a failure leaves the current view */
+            }
+          },
+          { when: () => variantRef.current === "spots" },
+        );
       }
     }
     /* Record data that arrived while the スポット tab was showing
@@ -5171,8 +5239,27 @@ function VisitedMapSection({
      but its style is still loading, the delayed run stays
      cancellable and only fires while that map is still the live one
      (review round 1, finding 7) — a remount must not let the old
-     map's draw land afterwards. */
-  const withLiveMap = (fn: (map: MapLibreLike) => void) => {
+     map's draw land afterwards.
+     A waiter may also carry a `when` guard (review round 2,
+     findings 4/6/7): a style wait or a map poll can outlive a tab
+     switch, and a stale tab's camera reset, camera move, or paint
+     must not land on the tab the reader is looking at now. The
+     guard is checked at the moment fn would run — not when the
+     waiter is enqueued — so a tab-scoped waiter is dropped
+     instead of firing late. A waiter without a guard is
+     tab-agnostic (boundary data, ghost points, the mount itself)
+     and always runs; the new tab's own effect re-issues whatever
+     a dropped waiter would have done. */
+  type WithLiveMapOptions = {
+    /* Run fn only while this returns true, checked at execution
+       time. Typical shape: () => variantRef.current === "spots"
+       for work that belongs to one tab. */
+    when?: () => boolean;
+  };
+  const withLiveMap = (
+    fn: (map: MapLibreLike) => void,
+    options?: WithLiveMapOptions,
+  ) => {
     const waiter: MapWaiter = {
       fn,
       cancelled: false,
@@ -5187,6 +5274,19 @@ function VisitedMapSection({
     /* The style wait is armed at most once: a flush while it is
        pending must not register a second delayed run. */
     let styleWaitArmed = false;
+    /* The single place fn runs from: the immediate path, the
+       style-wait run, and the poll that found a map all land
+       here, so the live-map identity check and the tab guard
+       apply to every one of them. A dropped waiter is settled
+       and forgotten, never retried. */
+    const runFn = (map: MapLibreLike) => {
+      if (settled || waiter.cancelled) return;
+      settled = true;
+      mapWaitersRef.current.delete(waiter);
+      if (mapHandleRef.current?.getMap() !== map) return;
+      if (options?.when && !options.when()) return;
+      fn(map);
+    };
     const tryOnce = () => {
       if (waiter.cancelled || settled) {
         mapWaitersRef.current.delete(waiter);
@@ -5195,9 +5295,7 @@ function VisitedMapSection({
       const map = mapHandleRef.current?.getMap() ?? null;
       if (map) {
         if (map.isStyleLoaded()) {
-          settled = true;
-          mapWaitersRef.current.delete(waiter);
-          fn(map);
+          runFn(map);
         } else {
           /* The style is still loading: keep the waiter
              registered (review round 1, finding 7) so a teardown
@@ -5207,13 +5305,7 @@ function VisitedMapSection({
              let the old map be written back into liveMapRef. */
           if (styleWaitArmed) return;
           styleWaitArmed = true;
-          const run = () => {
-            if (settled || waiter.cancelled) return;
-            settled = true;
-            mapWaitersRef.current.delete(waiter);
-            if (mapHandleRef.current?.getMap() !== map) return;
-            fn(map);
-          };
+          const run = () => runFn(map);
           map.once("load", run);
           waiter.timer = setTimeout(run, 2000);
         }
