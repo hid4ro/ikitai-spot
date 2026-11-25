@@ -702,7 +702,7 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toBeNull();
   });
 
-  test("validateSectionEndpoints: mid-block stations and reversed order fail", () => {
+  test("validateSectionEndpoints: unlisted stations fail, reversed order passes (review round 1)", () => {
     // 国分寺 is a real station on 中央線 but is known only from a
     // migrated ride — it is listed on no block, so it still cannot
     // be a section endpoint (stage 3 lists stations on blocks;
@@ -710,9 +710,14 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "003606", "004029"),
     ).toMatch(/not a station of/);
+    // A section is one stretch of the line, travelled either
+    // way: 高尾→東京 is the same stretch as 東京→高尾, so the
+    // old running-order rejection is gone (review round 1, high
+    // — the return ride 東松戸→北府中 runs against the running
+    // order and must be accepted).
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "004029", "003766"),
-    ).toMatch(/running order/);
+    ).toBeNull();
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "003766", "003766"),
     ).toMatch(/two different stations/);
@@ -723,12 +728,21 @@ describe("stage 2 blocks (subtask 1421)", () => {
 
   test("validateSectionEndpoints: listed mid-block stations pass (subtask 1455)", () => {
     // The three estimated sections of subtask 1455: both endpoints
-    // are stations listed on a block of the service.
+    // are stations listed on a block of the service. The 武蔵野線
+    // one runs against the running order （東松戸→北府中 is the
+    // return ride) — that is accepted, and so is the same pair
+    // the other way round.
     expect(
       validateSectionEndpoints("jr-musashino", "003187", "003771"),
     ).toBeNull();
     expect(
+      validateSectionEndpoints("jr-musashino", "003771", "003187"),
+    ).toBeNull();
+    expect(
       validateSectionEndpoints("hokuso", "003187", "003083"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("hokuso", "003083", "003187"),
     ).toBeNull();
     expect(
       validateSectionEndpoints("yamanote", "003700", "004135", "inner"),
@@ -741,23 +755,16 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       validateSectionEndpoints("yamanote", "003700", "004135", "outer"),
     ).toBeNull();
-    // Running order still holds between listed stations.
-    expect(
-      validateSectionEndpoints("jr-musashino", "003771", "003187"),
-    ).toMatch(/running order/);
-    expect(
-      validateSectionEndpoints("hokuso", "003083", "003187"),
-    ).toMatch(/running order/);
     // A listed station against a boundary of a later block works.
     expect(
-      validateSectionEndpoints("jr-musashino", "003187", "003004"),
+      validateSectionEndpoints("jr-musashino", "003187", "003547"),
     ).toBeNull();
   });
 
   test("serviceOrderedStations interleaves block stations in running order", () => {
     expect(
       serviceOrderedStations("jr-musashino").map((s) => s.id),
-    ).toEqual(["003876", "003187", "003771", "003004", "003547"]);
+    ).toEqual(["003876", "003771", "003004", "003187", "003547"]);
     expect(
       serviceOrderedStations("hokuso").map((s) => s.id),
     ).toEqual(["003248", "003187", "003083", "003125"]);

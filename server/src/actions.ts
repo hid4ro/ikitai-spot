@@ -31,10 +31,12 @@ import * as schema from "./schema";
 const rideStateSchema = z.enum(["unknown", "partial", "full"]);
 
 /* One added section of a ridden line (stage 2, subtask 1421):
-   a block pick, or a hand-entered section between two boundary
-   stations. direction is 'inner' | 'outer' on a loop service,
-   null elsewhere; blockId names the master block the section
-   covers, when it is exactly one block. */
+   a block pick, or a hand-entered section between two stations
+   the service is known to serve (stage 3: a boundary station,
+   or a station listed on one of its blocks). direction is
+   'inner' | 'outer' on a loop service, null elsewhere; blockId
+   names the master block the section covers, when it is exactly
+   one block. */
 const riddenSectionSchema = z.object({
   id: z.number(),
   fromStationId: z.string(),
@@ -2043,7 +2045,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable.",
+      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks — a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),

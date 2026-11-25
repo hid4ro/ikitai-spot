@@ -244,8 +244,11 @@ describe("real asset: the migrated sections", () => {
   test("the Yamanote section takes the outer side, not the long way round", () => {
     const path = servicePath("yamanote");
     const outer = clipServicePath(path, S.大崎, S.目黒, "outer")!;
-    /* 大崎→目黒 is ~2.9 km outer (via 五反田); the inner way
-       round is the rest of the 34.5 km loop. */
+    /* 大崎→目黒 is 2.1 km outer, published (via 五反田); the
+       asset measures ~1.85 km, inside the loose 1.5–2.5 band
+       (review round 1, low — the old comment's 2.9 km was
+       wrong). The inner way round is the rest of the 34.5 km
+       loop. */
     expect(outer.lengthKm).toBeGreaterThan(1.5);
     expect(outer.lengthKm).toBeLessThan(2.5);
     const inner = clipServicePath(path, S.大崎, S.目黒, "inner")!;
@@ -329,14 +332,13 @@ describe("real asset: the subtask-1455 estimated sections", () => {
   test("the Yamanote section takes the inner side, via 渋谷・目黒", () => {
     const path = servicePath("yamanote");
     const inner = clipServicePath(path, S.新宿, S.大崎, "inner")!;
-    /* Published 9.8 km; the asset measures 8.6 km because its
-       目黒→大崎 stretch is short (1.85 km against 2.8 km
-       published — the same shortfall the 大崎→目黒 test already
-       pins with its loose 1.5–2.5 band), so the band is loose
-       here too. What matters is that it is the short way, via
-       渋谷・目黒, and not the long way round via 田端・東京. */
-    expect(inner.lengthKm).toBeGreaterThan(7);
-    expect(inner.lengthKm).toBeLessThan(10);
+    /* Published 8.6 km; the asset measures 8.58 km, matching
+       the published figure to the first decimal (review round
+       1, low — the old comment's 9.8 km was wrong, and so was
+       the 7–10 km band it justified). What matters is that it
+       is the short way, via 渋谷・目黒, and not the long way
+       round via 田端・東京. */
+    expect(inner.lengthKm).toBeCloseTo(8.6, 1);
     const innerCoords = inner.legs.flatMap((leg) => leg.coords);
     for (const via of [S.渋谷, S.目黒]) {
       expect(
@@ -401,6 +403,7 @@ describe("real asset: the subtask-1455 estimated sections", () => {
         name: "山手線",
         serviceId: "yamanote",
         serviceLinkSource: null,
+        recordedServiceId: "yamanote",
         fromStationId: S.大崎.id,
         toStationId: S.目黒.id,
         pathSnapshot: null as string | null,
@@ -422,9 +425,17 @@ describe("real asset: the subtask-1455 estimated sections", () => {
       0,
     );
     expect(coverage.perService.get("hokuso")!.riddenKm).toBeCloseTo(21.0, 0);
-    /* 山手線's union is the inner section alone (8.6 km): the
-       primary 大崎→目黒 sits inside it. */
-    expect(coverage.perService.get("yamanote")!.riddenKm).toBeCloseTo(8.6, 0);
+    /* 山手線's union is the inner section alone (8.58 km): the
+       primary 大崎→目黒 sits inside it, and the row carries
+       its recordedServiceId so the primary is attributed at
+       all — without it the overlap would never be counted
+       twice and this test would be vacuous (review round 1,
+       medium). The tight precision is the point: the
+       double-count measured 8.686 km before the fix. */
+    expect(coverage.perService.get("yamanote")!.riddenKm).toBeCloseTo(
+      8.58,
+      1,
+    );
     expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
     expect(coverage.completeServiceIds).toEqual([]);
   });
@@ -697,6 +708,26 @@ describe("coveredBlockIds: whole-block coverage for the block picker", () => {
       { serviceId: "yamanote", from: S.田端, to: S.品川 },
     ]);
     expect([...covered].sort()).toEqual(["yamanote/b5", "yamanote/b6"]);
+  });
+
+  test("a Yamanote inner section ending at a non-boundary station covers the block it runs over whole", () => {
+    /* 新宿→大崎 inner (review round 1, medium): 大崎 is no
+       boundary station, but the section runs yamanote/b2
+       （渋谷〜新宿) end to end, so the block is covered and
+       cannot be picked again — the old version located
+       endpoints among boundary stations only and marked
+       nothing, leaving the same range re-registerable.
+       yamanote/b1 （品川〜渋谷) is only partly ridden
+       （渋谷→大崎), so it stays open. */
+    const covered = coveredBlockIds("yamanote", [
+      {
+        serviceId: "yamanote",
+        from: S.新宿,
+        to: S.大崎,
+        direction: "inner",
+      },
+    ]);
+    expect([...covered].sort()).toEqual(["yamanote/b2"]);
   });
 });
 

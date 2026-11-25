@@ -181,13 +181,16 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         to: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
         /* Stage 3 (subtask 1455): the 2026-11-12 return ride
            東松戸〜北府中, estimated from the return-trip record
-           （印西牧の原での実習への行き帰り) — both stations sit
-           inside this block, so they are listed here rather than
-           splitting it. Coordinates are the N02 station-point
-           centroids (mean over the station's N02_005 features:
-           東松戸 003187 over its 3 features). */
+           （印西牧の原での実習への行き帰り) — 北府中 sits inside
+           this block, so it is listed here rather than splitting
+           it. 東松戸 belongs to b2 （南浦和〜西船橋), not here:
+           the running order is 府中本町→北府中→…→南浦和→…→
+           東松戸→…→西船橋 (review round 1, high — the first
+           version listed 東松戸 on b1 ahead of 北府中, which put
+           it before 南浦和 and rejected the return ride).
+           Coordinates are the N02 station-point centroids (mean
+           over the station's N02_005 features). */
         stations: [
-          { id: "003187", name: "東松戸", lng: 139.94311, lat: 35.77013 },
           { id: "003771", name: "北府中", lng: 139.47179, lat: 35.68086 },
         ],
       },
@@ -195,6 +198,11 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "jr-musashino/b2",
         from: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
         to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
+        /* Stage 3 (subtask 1455): 東松戸 sits inside this block
+           (see the b1 note for the running order). */
+        stations: [
+          { id: "003187", name: "東松戸", lng: 139.94311, lat: 35.77013 },
+        ],
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -1171,16 +1179,23 @@ export function serviceIsLoop(serviceId: string): boolean {
 /* Validates a section (an added ride between two stations) for
    the stage-2 block input, extended in stage 3 (subtask 1455)
    to any two stations the service is known to serve. The
-   endpoints must be stations of the service, in running order —
-   a boundary station, or a station listed on one of its blocks
-   (a section may span several whole blocks, and may start or
-   end at a listed mid-block station, but it may not start or
-   end at a station the master only knows from a migrated ride).
-   On a loop the caller must also give the direction, since the
-   same two stations can be joined either way round. Returns an
-   error string, or null when the section is valid. This is the
-   rule the server's addRiddenSection enforces; the client
-   checks it first so a bad tap never reaches the server. */
+   endpoints must be stations of the service — a boundary
+   station, or a station listed on one of its blocks (a section
+   may span several whole blocks, and may start or end at a
+   listed mid-block station, but it may not start or end at a
+   station the master only knows from a migrated ride). On a
+   non-loop service the pair may run either way: a section is
+   one stretch of the line, and a real ride can travel it
+   against the running order （東松戸→北府中 on the 武蔵野線
+   return, review round 1, high) — the pair is stored as
+   travelled, and the geometry treats it as undirected (the
+   clip swaps it into running order, the route check reads it
+   either way). On a loop the caller must also give the
+   direction, since the same two stations can be joined either
+   way round. Returns an error string, or null when the section
+   is valid. This is the rule the server's addRiddenSection
+   enforces; the client checks it first so a bad tap never
+   reaches the server. */
 export function validateSectionEndpoints(
   serviceId: string,
   fromStationId: string,
@@ -1219,9 +1234,8 @@ export function validateSectionEndpoints(
     }
     return null;
   }
-  if (fromIndex >= toIndex) {
-    return "the section runs against the service's running order";
-  }
+  /* A non-loop section is one stretch of the line, travelled
+     either way — no running-order check (see the comment above). */
   return null;
 }
 
