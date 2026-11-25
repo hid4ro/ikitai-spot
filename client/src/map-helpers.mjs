@@ -133,8 +133,18 @@ export function mountPlaceListMap(container, options, onUnavailable) {
   };
   const map = mountMap(container, {
     ...mapOptions,
-    marker: marker ?? ((_place, index, selected) =>
-      `<div class="pin${selected ? ' pin--on' : ''}">${index + 1}</div>`),
+    /* The pin is built as a DOM element, never an HTML string: the
+       bundled runtime renders string marker content as plain text
+       (local patch, see map-helpers.d.mts), so markup returned from
+       a marker callback would show up as literal text — and any
+       label text interpolated into it would be an injection sink
+       if that ever changed back. */
+    marker: marker ?? ((_place, index, selected) => {
+      const el = document.createElement('div');
+      el.className = `pin${selected ? ' pin--on' : ''}`;
+      el.textContent = String(index + 1);
+      return el;
+    }),
     onSelectPlace: index => highlight(index, true),
   }, onUnavailable);
   if (map === null) return null;

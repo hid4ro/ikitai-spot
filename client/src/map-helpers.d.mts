@@ -6,9 +6,14 @@
 // The bundled runtime (assets/hatch-maps.js) also carries local patches,
 // re-apply them if it is ever re-copied from the platform original:
 // (1) the mount handle's getMap / fitBounds / flyTo passthroughs (see
-// PlaceListMapHandle below), and (2) the worker-probe timeout Q7 raised
+// PlaceListMapHandle below), (2) the worker-probe timeout Q7 raised
 // from 3 s to 10 s, so a busy main thread on a phone cannot fail the
-// probe — and with it every mount — on a slow first load.
+// probe — and with it every mount — on a slow first load, and
+// (3) the marker-content renderer (rD) renders a string as React text
+// children instead of dangerouslySetInnerHTML: marker content derives
+// from stored place labels, so a crafted spot name must display as
+// text, never execute as markup. Callers that need styled marker
+// content return an HTMLElement (the runtime moves the node in).
 
 export type MapPlace = {
   label: string;
@@ -147,8 +152,15 @@ export function mountPlaceListMap(
     zoom?: number;
     /* Replaces the default numbered-pin renderer; return "" to draw
        no marker at all (the visited map does this so wide-zoom fills
-       stay visible, and selects via taps on the painted shapes). */
-    marker?: (place: MapPlace, index: number, selected: boolean) => string;
+       stay visible, and selects via taps on the painted shapes).
+       A returned string is rendered as plain text, never as HTML
+       (local patch 3 above); return an HTMLElement for styled
+       marker content. */
+    marker?: (
+      place: MapPlace,
+      index: number,
+      selected: boolean,
+    ) => string | HTMLElement;
   },
   /* Same reason contract as mountMap's callback. */
   onUnavailable: (reason?: string) => void,
