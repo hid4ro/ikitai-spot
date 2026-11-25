@@ -40,7 +40,9 @@
 
 import {
   SERVICE_MASTER,
+  blockById,
   blocksForService,
+  primarySectionRouteAmbiguous,
   serviceBoundaryStations,
   serviceById,
   serviceIsLoop,
@@ -915,6 +917,11 @@ type RecordedSection = {
   fromStationId: string;
   toStationId: string;
   direction: "inner" | "outer" | null;
+  /* The master block the section names, when it is exactly one
+     block — the section's own record of which service it was
+     ridden on (stage 2). Optional in the type because older
+     fixtures omit it; the API always sends it. */
+  blockId?: string | null;
 };
 
 type RecordedRiddenLine = RiddenServiceLink & {
@@ -925,6 +932,21 @@ type RecordedRiddenLine = RiddenServiceLink & {
   sections?: readonly RecordedSection[];
 };
 
+/* The intervals of one ledger row that may honestly be counted
+   under the given service. Two kinds of recorded sections are
+   held out (integrated review round 2, high — the client twin
+   of the server's riddenLinkFitProblem):
+   - an added section naming a block of ANOTHER service: the
+     block ID is the section's own record of where it was
+     ridden, so it must not be projected onto this service's
+     path (a 総武本線 block's 東京→千葉 section completed
+     総武快速線 this way);
+   - the primary section whose endpoints run on more than one
+     route (primarySectionRouteAmbiguous): the pair alone
+     cannot say which route was ridden （中央線（快速）'s
+     東京→新宿 is also 山手線's pair, over a different route),
+     so it counts for neither service until it is recorded as
+     a block section, which pins the route outright. */
 export function riddenLineIntervals(
   row: RecordedRiddenLine,
   serviceId: string,
@@ -940,9 +962,16 @@ export function riddenLineIntervals(
     if (from && to) intervals.push({ serviceId, from, to, direction });
   };
   if (row.rideState === "partial" && row.fromStationId && row.toStationId) {
-    addInterval(row.fromStationId, row.toStationId, null);
+    if (
+      !primarySectionRouteAmbiguous(serviceId, row.fromStationId, row.toStationId)
+    ) {
+      addInterval(row.fromStationId, row.toStationId, null);
+    }
   }
   for (const section of row.sections ?? []) {
+    if (section.blockId != null && !blockById(serviceId, section.blockId)) {
+      continue;
+    }
     addInterval(section.fromStationId, section.toStationId, section.direction);
   }
   return intervals;
@@ -964,7 +993,11 @@ export function riddenLineIntervals(
      stations the linked service is known to serve
      (serviceStationIds); a section recorded on another service
      is held the same way, instead of being projected onto this
-     service's path wherever its endpoints happen to land. */
+     service's path wherever its endpoints happen to land;
+   - and riddenLineIntervals holds two more kinds out: an added
+     section naming another service's block, and a primary
+     section whose endpoints run on more than one route (see
+     its comment). */
 export function computeRiddenLineCoverage(
   rows: readonly RecordedRiddenLine[],
   geometries: LineGeometryMap,

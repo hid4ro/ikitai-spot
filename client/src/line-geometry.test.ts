@@ -705,3 +705,151 @@ describe("rides recorded under another service (integrated review round 1, high)
     expect(coverage.perService.get("keio")!.riddenKm).toBeGreaterThan(15);
   });
 });
+
+describe("rides whose route the record cannot pin down (integrated review round 2, high)", () => {
+  const base = {
+    serviceLinkSource: "explicit" as const,
+    fromStationId: null,
+    toStationId: null,
+    pathSnapshot: null as string | null,
+    sections: [] as never[],
+  };
+
+  test("a primary section shared with another service over a different route counts for neither", () => {
+    /* 東京→新宿 is 中央線（快速）'s first block — and also a
+       山手線 pair, over a different route. Relinked to 山手線,
+       the record's ~9.1 km came back as 山手線's ~16.9 km. The
+       endpoints cannot tell the routes apart, so the section
+       counts for neither service; it takes a block section to
+       pin the route. */
+    for (const [name, serviceId] of [
+      ["山手線", "yamanote"],
+      ["JR中央線（快速）", "jr-chuo-rapid"],
+    ] as const) {
+      const coverage = computeRiddenLineCoverage(
+        [
+          {
+            ...base,
+            name,
+            serviceId,
+            rideState: "partial" as const,
+            fromStationId: "003766",
+            toStationId: "003700",
+          },
+        ],
+        GEOMETRIES,
+        597,
+      );
+      expect(coverage.perService.get(serviceId)!.riddenKm).toBe(0);
+      expect(coverage.networkRiddenKm).toBe(0);
+      expect(coverage.completeServiceIds).toEqual([]);
+    }
+  });
+
+  test("primary sections only one route can claim still count", () => {
+    const cases = [
+      /* The restored 山手線 ride — no rival route can be shown
+         for 大崎→目黒. */
+      ["山手線", "yamanote", "004135", "004072"],
+      /* The restored 埼京線 ride, on 山手線 trackage — the same
+         route 山手線 itself takes between the pair. */
+      ["JR埼京線", "jr-saikyo", "003700", "004135"],
+      /* 総武快速線 and 総武本線 share 東京→千葉 over the one
+         formal line 総武線. */
+      ["JR総武快速線", "jr-sobu-rapid", "003766", "004173"],
+      /* 京王線's restored section, ending at a mid-segment
+         station no other service serves. */
+      ["京王線", "keio", "003821", "003971"],
+    ] as const;
+    for (const [name, serviceId, fromStationId, toStationId] of cases) {
+      const coverage = computeRiddenLineCoverage(
+        [
+          {
+            ...base,
+            name,
+            serviceId,
+            rideState: "partial" as const,
+            fromStationId,
+            toStationId,
+          },
+        ],
+        GEOMETRIES,
+        597,
+      );
+      expect(coverage.perService.get(serviceId)!.riddenKm).toBeGreaterThan(0);
+    }
+  });
+
+  test("an added section naming another service's block counts nothing; unpinned, it counts", () => {
+    const row = {
+      ...base,
+      name: "JR総武快速線",
+      serviceId: "jr-sobu-rapid",
+      rideState: "partial" as const,
+      fromStationId: "003589" /* 船橋 */,
+      toStationId: "004173" /* 千葉 */,
+      sections: [
+        {
+          fromStationId: "003766",
+          toStationId: "004173",
+          direction: null,
+          blockId: "jr-sobu-local/b1",
+        },
+      ],
+    };
+    const held = computeRiddenLineCoverage([row], GEOMETRIES, 597);
+    /* Only the primary section 船橋→千葉 counts (~14 km); the
+       総武本線 block's 東京→千葉 would have nearly tripled it
+       and completed the rapid service's painted range. */
+    expect(held.perService.get("jr-sobu-rapid")!.riddenKm).toBeGreaterThan(5);
+    expect(held.perService.get("jr-sobu-rapid")!.riddenKm).toBeLessThan(20);
+    const unpinned = computeRiddenLineCoverage(
+      [
+        {
+          ...row,
+          sections: [
+            {
+              fromStationId: "003766",
+              toStationId: "004173",
+              direction: null,
+              blockId: null,
+            },
+          ],
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    expect(
+      unpinned.perService.get("jr-sobu-rapid")!.riddenKm,
+    ).toBeGreaterThan(35);
+  });
+
+  test("an added section naming the row's own service's block counts", () => {
+    const coverage = computeRiddenLineCoverage(
+      [
+        {
+          ...base,
+          name: "JR総武快速線",
+          serviceId: "jr-sobu-rapid",
+          rideState: "partial" as const,
+          fromStationId: "003589",
+          toStationId: "004173",
+          sections: [
+            {
+              fromStationId: "003766",
+              toStationId: "003589",
+              direction: null,
+              blockId: "jr-sobu-rapid/b1",
+            },
+          ],
+        },
+      ],
+      GEOMETRIES,
+      597,
+    );
+    /* 船橋→千葉 plus the block's 東京→船橋： the whole
+       東京→千葉 range. */
+    expect(coverage.perService.get("jr-sobu-rapid")!.riddenKm).toBeGreaterThan(35);
+  });
+});

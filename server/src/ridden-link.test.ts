@@ -386,3 +386,130 @@ test("isUniqueConstraintError sees through Drizzle's error wrapping (integrated 
   expect(isUniqueConstraintError(new Error("some other failure"))).toBe(false);
   expect(isUniqueConstraintError(undefined)).toBe(false);
 });
+
+test("relinking a primary section whose endpoints run on another route is refused (integrated review round 2, high)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    /* The record is 中央線（快速）'s 東京→新宿 — that service's
+       first block. 山手線 serves both endpoints too, but over a
+       different route, so the pair alone cannot say the ride
+       was 山手線's: the relink is refused and the row is left
+       exactly as stored. */
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "yamanote",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after).toEqual(before);
+    /* Confirming the service the ride was recorded on fits. */
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-chuo-rapid",
+      }),
+    ).toEqual({ ok: true, serviceId: "jr-chuo-rapid" });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('中央線（各駅停車）', '2026-11-23', 'jr-chuo-rapid', 'partial', '003766', '003700', 'historical-master', 0)`));
+});
+
+test("relinking a row whose added section names another service's block is refused (integrated review round 2, high)", async () => {
+  await withLedger(async (client, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    /* The added section is 総武本線's block b1 （東京→千葉）.
+       Its endpoints are stations 総武快速線 serves too, so the
+       endpoint check alone would let the relink carry the
+       section onto the rapid service; the block ID is the
+       section's own record of where it was ridden, and it does
+       not belong to 総武快速線. */
+    await client.execute(
+      `INSERT INTO ridden_line_sections
+         (ridden_line_id, from_station_id, to_station_id, from_station_name, to_station_name, block_id, created_at)
+       VALUES (${before.id}, '003766', '004173', '東京', '千葉', 'jr-sobu-local/b1', 0)`,
+    );
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-sobu-rapid",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    /* With the block link gone, the same section is an
+       endpoints-only record over the shared formal line, and
+       the relink fits. */
+    await client.execute(
+      `UPDATE ridden_line_sections SET block_id = NULL WHERE ridden_line_id = ${before.id}`,
+    );
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "jr-sobu-rapid",
+      }),
+    ).toEqual({ ok: true, serviceId: "jr-sobu-rapid" });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('中央線（各駅停車）', '2026-11-23', 'jr-sobu-local', 'partial', '003766', '004173', 'historical-master', 0)`));
+});
+
+test("a duplicate section registration adopts the later call's block_id (integrated review round 2, H-3)", async () => {
+  await withLedger(async (_, ctx) => {
+    /* Hand entry first, block pick second: the surviving row
+       must adopt keio/b1, or the ledger can no longer untick
+       the block the section covers. */
+    const keio = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "京王線",
+    });
+    if (keio.id == null) throw new Error("Missing 京王線 row");
+    const handFirst = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: keio.id,
+      fromStationId: "003700",
+      toStationId: "003966",
+    });
+    expect(handFirst.created).toBe(true);
+    expect(
+      await Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: keio.id,
+        fromStationId: "003700",
+        toStationId: "003966",
+        blockId: "keio/b1",
+      }),
+    ).toEqual({ created: false, id: handFirst.id });
+    const keioRow = (await Actions.listRiddenLines.handler(ctx, {})).lines.find(
+      (row) => row.name === "京王線",
+    );
+    expect(keioRow?.sections).toEqual([
+      expect.objectContaining({ id: handFirst.id, blockId: "keio/b1" }),
+    ]);
+    /* Block pick first, hand entry second: the row keeps the
+       block it already has. */
+    const yamanote = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "山手線",
+    });
+    if (yamanote.id == null) throw new Error("Missing 山手線 row");
+    const blockFirst = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: yamanote.id,
+      fromStationId: "004095",
+      toStationId: "003922",
+      direction: "outer",
+      blockId: "yamanote/b1",
+    });
+    expect(blockFirst.created).toBe(true);
+    expect(
+      await Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: yamanote.id,
+        fromStationId: "004095",
+        toStationId: "003922",
+        direction: "outer",
+      }),
+    ).toEqual({ created: false, id: blockFirst.id });
+    const yamanoteRow = (
+      await Actions.listRiddenLines.handler(ctx, {})
+    ).lines.find((row) => row.name === "山手線");
+    expect(yamanoteRow?.sections).toEqual([
+      expect.objectContaining({ id: blockFirst.id, blockId: "yamanote/b1" }),
+    ]);
+  });
+});

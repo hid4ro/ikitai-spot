@@ -58,7 +58,7 @@ import {
   blocksForService,
   isRiddenServiceLinkReviewable,
   resolveRiddenService,
-  serviceBoundaryStations,
+  sectionEndpointsKnownToService,
   serviceById,
   usableRiddenService,
 } from "../../shared/service-master";
@@ -84,6 +84,7 @@ import {
   applyVariantPaint,
   lineRowForPaintedFeature,
   municipalityRowForPaintedName,
+  shouldMountLiveMap,
   stickyPaneVisibleTop,
   type RecordMapVariant,
 } from "./map-variant";
@@ -3766,9 +3767,14 @@ function VisitedMapSection({
      tap on a painted shape highlights it and scrolls the ledger to
      its row (see ensureFocusListeners). When the runtime cannot run,
      the stored static map of the same municipalities takes its
-     place. */
+     place. The mount also waits for showLiveMap (shouldMountLiveMap):
+     the container it mounts into only renders under that condition,
+     so a mount attempted before it — boundary data settled while
+     the only record, an unlinked ride, was still in flight — found
+     no container and never retried when the frame appeared
+     (integrated review round 2, high). */
   useEffect(() => {
-    if (mapFailed || !boundarySettled) return;
+    if (!shouldMountLiveMap(mapFailed, boundarySettled, showLiveMap)) return;
     setBasemapReady(false);
     const container = mapContainerRef.current;
     if (!container) return;
@@ -4376,10 +4382,14 @@ function VisitedMapSection({
     // the overlay paints. mapAttempt is the automatic-retry nonce.
     // boundarySettled gates the first mount on the priority boundary
     // set; later boundary arrivals do NOT remount (the refresh effect
-    // below updates the nationwide sources in place). Refs,
-    // index, shaped and circled are derived from those.
+    // below updates the nationwide sources in place). showLiveMap is
+    // a gate of the mount itself (see shouldMountLiveMap): when it
+    // flips after the boundary set settled — the first ride record
+    // arriving — the mount must run then, not sit on the earlier
+    // no-container pass. Refs, index, shaped and circled are derived
+    // from those.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placesKey, riddenLinesKey, mapFailed, mapAttempt, boundarySettled]);
+  }, [placesKey, riddenLinesKey, mapFailed, mapAttempt, boundarySettled, showLiveMap]);
 
   /* Background boundary arrivals grow the nationwide sources
      (unvisited outlines, unvisited ward lines, prefecture
@@ -6959,22 +6969,30 @@ function RiddenLinesBlock({
             const explicitlyUnlinked =
               line.serviceId == null && line.serviceLinkSource === "explicit";
             const reviewable = isRiddenServiceLinkReviewable(line);
-            /* The chosen service's boundaries, for the hint when
-               the row's recorded section does not fit it: such a
-               choice cannot be confirmed (the server refuses it —
-               integrated review round 1, high), so the hint says
-               so before the reader tries. */
-            const chosenBoundaries =
-              linkReviewLineId === line.id && linkReviewChoice
-                ? serviceBoundaryStations(linkReviewChoice)
-                : [];
+            /* The chosen service's known stations, for the hint
+               when the row's recorded section does not fit it:
+               such a choice cannot be confirmed (the server
+               refuses it — integrated review round 1, high), so
+               the hint says so before the reader tries. The
+               yardstick is the server's own — the stations the
+               service is known to serve (serviceStationIds, via
+               sectionEndpointsKnownToService), NOT just its block
+               boundaries: a restored section can end at a
+               mid-segment station （京王線's 府中→聖蹟桜ヶ丘）,
+               which the server accepts and the boundary-only
+               check wrongly refused (integrated review round 2,
+               medium). */
             const sectionEndpointsMismatch =
+              linkReviewLineId === line.id &&
               linkReviewChoice !== "" &&
               line.rideState === "partial" &&
               line.fromStationId != null &&
               line.toStationId != null &&
-              (chosenBoundaries.findIndex((s) => s.id === line.fromStationId) < 0 ||
-                chosenBoundaries.findIndex((s) => s.id === line.toStationId) < 0);
+              !sectionEndpointsKnownToService(
+                linkReviewChoice,
+                line.fromStationId,
+                line.toStationId,
+              );
             const displayName = service?.displayName ?? line.name;
             const key = resolveRiddenLineKey(
               line,

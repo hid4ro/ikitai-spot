@@ -9,6 +9,7 @@ import {
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
+  shouldMountLiveMap,
   stickyPaneVisibleTop,
   variantPaintOps,
 } from "./map-variant";
@@ -302,5 +303,43 @@ describe("lineRowForPaintedFeature (map line tap → ledger row, by service)", (
         serviceId: "jr-sobu-local",
       }),
     ).toBeNull();
+  });
+
+  test("a serviceId with no row of its own never falls back to the other service on the shared key (round 2)", () => {
+    /* The reviewer's shape: the feature carries 総武本線's
+       serviceId, but the ledger and the painted legs hold only
+       総武快速線. The key-only fallback would hand the tap to
+       the 快速 row — the mix-up the serviceId exists to
+       prevent — so the tap resolves to no row. */
+    const rapidOnlyRows = [rows[0]!];
+    const rapidOnlyLegs = new Map([
+      [
+        "jr-sobu-rapid",
+        { legs: [{ key: "総武線|東日本旅客鉄道" }], unknown: false },
+      ],
+    ]);
+    expect(
+      lineRowForPaintedFeature(rapidOnlyRows, rapidOnlyLegs, {
+        key: "総武線|東日本旅客鉄道",
+        serviceId: "jr-sobu-local",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("shouldMountLiveMap (the mount waits for something to show, round 2 high)", () => {
+  test("the reviewer's order: boundaries settle first, the only ride arrives later", () => {
+    /* 市区町村 0件 with the boundary data settled and no ride
+       record yet: the container is not rendered, so mounting
+       must not be attempted... */
+    expect(shouldMountLiveMap(false, true, false)).toBe(false);
+    /* ...and when the unlinked ride arrives and the frame
+       appears, the mount runs. */
+    expect(shouldMountLiveMap(false, true, true)).toBe(true);
+  });
+
+  test("an unsettled boundary set or a failed map never mounts", () => {
+    expect(shouldMountLiveMap(false, false, true)).toBe(false);
+    expect(shouldMountLiveMap(true, true, true)).toBe(false);
   });
 });

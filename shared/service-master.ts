@@ -897,6 +897,152 @@ export function serviceStationIds(serviceId: string): ReadonlySet<string> {
   return ids;
 }
 
+/* Both endpoints of a recorded section are stations the service
+   is known to serve — the one yardstick the link confirmation
+   (server), the coverage build and the link-review hint (client)
+   all judge a section's fit by (integrated review round 2,
+   medium: the hint used to look at boundary stations only, so it
+   refused sections the server accepts — 京王線's restored
+   府中→聖蹟桜ヶ丘 ends at a mid-segment station the migration
+   recorded, which is a known station but no block boundary). */
+export function sectionEndpointsKnownToService(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): boolean {
+  const known = serviceStationIds(serviceId);
+  return known.has(fromStationId) && known.has(toStationId);
+}
+
+/* The formal-line key sets a section between two stations can
+   run on, for one service, as the master alone can judge — one
+   set per way the section can be travelled (a loop service has
+   two arcs between the same stations). Null when the master
+   cannot judge: an endpoint is not a known station of the
+   service, an endpoint sits mid-block on a multi-line service
+   (its place on the boundary chain is unknown), or a block's
+   formal line cannot be pinned to exactly one segment. A
+   single-line service is trivial: every section runs on its one
+   formal line. On a multi-line service each block's formal line
+   is the one segment whose span covers the block — segments and
+   blocks are both authored in running order, so spans compare
+   directly on the boundary chain. */
+function sectionFormalLineKeySets(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): readonly (ReadonlySet<string>)[] | null {
+  const service = serviceById(serviceId);
+  if (!service) return null;
+  if (
+    !sectionEndpointsKnownToService(serviceId, fromStationId, toStationId)
+  ) {
+    return null;
+  }
+  const distinctKeys = [
+    ...new Set(service.segments.map((s) => s.formalLineKey)),
+  ];
+  if (distinctKeys.length === 1) return [new Set(distinctKeys)];
+  const boundaries = serviceBoundaryStations(serviceId);
+  const loop = serviceIsLoop(serviceId);
+  const chainLength = loop ? boundaries.length - 1 : boundaries.length;
+  const position = new Map<string, number>();
+  for (let i = 0; i < chainLength; i++) {
+    const id = boundaries[i]!.id;
+    if (!position.has(id)) position.set(id, i);
+  }
+  const fromPos = position.get(fromStationId);
+  const toPos = position.get(toStationId);
+  if (fromPos == null || toPos == null || fromPos === toPos) return null;
+  /* Forward distance along the chain (a loop wraps). */
+  const forward = (a: number, b: number) =>
+    loop ? (b - a + chainLength) % chainLength : b - a;
+  const blockKeys: string[] = [];
+  for (let i = 0; i < service.blocks.length; i++) {
+    const blockEnd = loop ? (i + 1) % chainLength : i + 1;
+    const covering = new Set<string>();
+    for (const segment of service.segments) {
+      const segFrom = position.get(segment.from.id);
+      const segTo = position.get(segment.to.id);
+      if (segFrom == null || segTo == null) continue;
+      const span = forward(segFrom, segTo);
+      if (span <= 0) continue;
+      const blockStart = forward(segFrom, i);
+      if (
+        blockStart >= 0 &&
+        blockStart < span &&
+        forward(segFrom, blockEnd) === blockStart + 1 &&
+        forward(segFrom, blockEnd) <= span
+      ) {
+        covering.add(segment.formalLineKey);
+      }
+    }
+    if (covering.size !== 1) return null;
+    blockKeys.push([...covering][0]!);
+  }
+  const runKeys = (start: number, end: number): ReadonlySet<string> => {
+    const keys = new Set<string>();
+    const steps = forward(start, end);
+    for (let step = 0; step < steps; step++) {
+      keys.add(blockKeys[(start + step) % chainLength]!);
+    }
+    return keys;
+  };
+  const runs = [runKeys(fromPos, toPos)];
+  if (loop) {
+    const otherWay = runKeys(toPos, fromPos);
+    const same = (a: ReadonlySet<string>, b: ReadonlySet<string>) =>
+      a.size === b.size && [...a].every((k) => b.has(k));
+    if (!same(runs[0]!, otherWay)) runs.push(otherWay);
+  }
+  return runs;
+}
+
+/* A primary section is route-ambiguous when the same endpoint
+   pair also runs on ANOTHER service over a different route:
+   the endpoints alone then cannot say which route was ridden,
+   so a record carrying only the pair must not be counted as
+   either service's achievement (integrated review round 2,
+   high: 中央線（快速）'s 東京→新宿 — a whole master block on
+   中央線 — was re-counted as 山手線's ~16.9 km after a relink,
+   because both services serve both endpoints). The pair runs
+   on the same route when one of this service's possible
+   formal-line key sets equals one of the other service's —
+   総武快速線 and 総武本線 share their pairs over the one
+   formal line 総武線， so their sections stay countable, and
+   pairs no other service serves both endpoints of are never
+   ambiguous. Unjudgeable pairs (the master cannot pin the
+   route) are NOT ambiguous: the conservative answer here is
+   the one that keeps existing records counting. */
+export function primarySectionRouteAmbiguous(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): boolean {
+  const own = sectionFormalLineKeySets(serviceId, fromStationId, toStationId);
+  if (!own) return false;
+  const sameRoute = (a: ReadonlySet<string>, b: ReadonlySet<string>) =>
+    a.size === b.size && [...a].every((k) => b.has(k));
+  for (const other of SERVICE_MASTER) {
+    if (other.id === serviceId) continue;
+    if (
+      !sectionEndpointsKnownToService(other.id, fromStationId, toStationId)
+    ) {
+      continue;
+    }
+    const otherSets = sectionFormalLineKeySets(
+      other.id,
+      fromStationId,
+      toStationId,
+    );
+    if (!otherSets) continue;
+    if (!own.some((a) => otherSets.some((b) => sameRoute(a, b)))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /* Whether a ledger row's service link can be confirmed by hand
    (subtask 1435): rows whose saved link disagrees with the current
    name rule (needsReview), plus rows a human already unlinked

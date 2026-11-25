@@ -13,6 +13,7 @@ import {
   isKnownMasterVersion,
   isN02StationId,
   isRiddenServiceLinkReviewable,
+  primarySectionRouteAmbiguous,
   resolveRiddenService,
   serviceById,
   serviceFullPathSnapshot,
@@ -267,7 +268,22 @@ export function isUniqueConstraintError(error: unknown): boolean {
      was cut from (the snapshot's pathId is the service's);
    - a partial ride (primary section and every added section)
      fits only when both endpoints are stations the chosen
-     service is known to serve (serviceStationIds).
+     service is known to serve (serviceStationIds);
+   - an added section that names a master block fits only when
+     that block belongs to the chosen service — the block ID is
+     the section's own record of which service it was ridden on,
+     and a block of the old service must not carry the section
+     onto the new one (integrated review round 2, high: a
+     総武本線 block's 東京→千葉 section completed 総武快速線）;
+   - the primary section fits only when its endpoints pin down
+     the route: when the same pair also runs on another service
+     over a different route (primarySectionRouteAmbiguous),
+     the pair alone cannot say which route was ridden, so the
+     section cannot be re-attributed by a relink (integrated
+     review round 2, high: 中央線（快速）'s 東京→新宿 counted
+     as 山手線's after a relink). Added sections are exempt —
+     they were validated against the row's service when added,
+     and a block ID pins them outright.
    Anything else cannot be judged from the record, so the
    confirmation is refused and the original row — link and ride
    alike — is left exactly as stored. Returns a problem phrase,
@@ -281,7 +297,11 @@ export function riddenLinkFitProblem(
     toStationId: string | null;
     pathSnapshot: string | null;
   },
-  sections: readonly { fromStationId: string; toStationId: string }[],
+  sections: readonly {
+    fromStationId: string;
+    toStationId: string;
+    blockId: string | null;
+  }[],
   targetServiceId: string | null,
 ): string | null {
   if (targetServiceId == null) return null;
@@ -323,6 +343,19 @@ export function riddenLinkFitProblem(
         return `the recorded section's station ${stationId} is not a known station of ${target.displayName}`;
       }
     }
+  }
+  for (const section of sections) {
+    if (section.blockId != null && !blockById(target.id, section.blockId)) {
+      return `the recorded section's block ${section.blockId} does not belong to ${target.displayName}`;
+    }
+  }
+  if (
+    state === "partial" &&
+    line.fromStationId &&
+    line.toStationId &&
+    primarySectionRouteAmbiguous(target.id, line.fromStationId, line.toStationId)
+  ) {
+    return `the recorded section's endpoints run on more than one route, so which route was ridden cannot be told from the record for ${target.displayName}`;
   }
   return null;
 }
@@ -1866,7 +1899,7 @@ export const Actions = {
      under the wrong service. */
   confirmRiddenServiceLink: defineAction({
     description:
-      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched. The choice must fit the recorded ride: a full ride's stored path belongs to its own service, and a partial section's endpoints must be stations of the chosen service — a choice that cannot carry the record is refused and the row is left unchanged.",
+      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched. The choice must fit the recorded ride: a full ride's stored path belongs to its own service, a partial section's endpoints must be stations of the chosen service, an added section's named block must belong to the chosen service, and a primary section whose endpoints run on more than one route cannot be re-attributed — a choice that cannot carry the record is refused and the row is left unchanged.",
     request: z.object({
       id: z.number().int().positive(),
       serviceId: z.string().max(100).nullable(),
@@ -1898,6 +1931,7 @@ export const Actions = {
         .select({
           fromStationId: schema.riddenLineSections.fromStationId,
           toStationId: schema.riddenLineSections.toStationId,
+          blockId: schema.riddenLineSections.blockId,
         })
         .from(schema.riddenLineSections)
         .where(eq(schema.riddenLineSections.riddenLineId, args.id));
@@ -2038,7 +2072,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row.",
+      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two boundary stations (stage 2, subtask 1421). The endpoints must be boundary stations of the row's service, in running order, with a direction on a loop service (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -2121,7 +2155,16 @@ export const Actions = {
          duplicating it. The check below stops a sequential double
          add; the unique index on the table (migration 0014) is
          what stops two calls racing past the check together — the
-         insert then fails and the winner's row is returned. */
+         insert then fails and the winner's row is returned. Either
+         way, a later call that names the master block must not
+         lose that link when the earlier call was a hand entry
+         without one: the surviving row adopts the block ID, the
+         runtime twin of migration 0014's dedupe rescue (integrated
+         review round 2, H-3) — without it the ledger could no
+         longer untick the block the section covers. The block was
+         already validated against this service and these very
+         endpoints above, and the duplicate shares the endpoints,
+         so adopting it cannot mislink the section. */
       const findDuplicate = async () => {
         const existing = await db
           .select()
@@ -2136,8 +2179,20 @@ export const Actions = {
             (s.direction ?? null) === direction,
         );
       };
+      const adoptBlockId = async (
+        existing: typeof schema.riddenLineSections.$inferSelect,
+      ) => {
+        if (blockId && !existing.blockId) {
+          await db
+            .update(schema.riddenLineSections)
+            .set({ blockId })
+            .where(eq(schema.riddenLineSections.id, existing.id));
+          ctx.invalidateQueries();
+        }
+      };
       const duplicate = await findDuplicate();
       if (duplicate) {
+        await adoptBlockId(duplicate);
         return { created: false, id: duplicate.id };
       }
       let insertedId: number | null;
@@ -2158,7 +2213,10 @@ export const Actions = {
       } catch (error) {
         if (isUniqueConstraintError(error)) {
           const winner = await findDuplicate();
-          if (winner) return { created: false, id: winner.id };
+          if (winner) {
+            await adoptBlockId(winner);
+            return { created: false, id: winner.id };
+          }
         }
         throw error;
       }

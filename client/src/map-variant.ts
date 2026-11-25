@@ -184,7 +184,13 @@ export function lineRowForPaintedKey<
    first. The service's row must actually paint the tapped key
    (a feature and the coverage are built from the same legs, so
    this is a consistency check, not a restriction). A feature
-   without a serviceId falls back to the key-only rule above. */
+   without a serviceId falls back to the key-only rule above.
+   A feature WITH a serviceId never falls back (integrated
+   review round 2, medium): when no row paints for that service
+   — the ledger holds only the OTHER service on the shared
+   formal line — the key-only rule would hand the tap to that
+   other service's row, the very mix-up the serviceId exists to
+   prevent, so the tap resolves to no row instead. */
 export function lineRowForPaintedFeature<
   Row extends RiddenServiceLink & { id: number },
 >(
@@ -204,8 +210,29 @@ export function lineRowForPaintedFeature<
         return row;
       }
     }
+    return null;
   }
   return lineRowForPaintedKey(rows, perServiceLegs, feature.key);
+}
+
+/* Whether the live map's mount effect should run. The mount
+   waits for the priority boundary set to settle, and — since
+   integrated review round 2 (high) — for there to be anything
+   to show at all: the map container only renders when
+   showLiveMap holds (a mappable municipality, or a ridden-lines
+   record), and a mount attempted while the container is absent
+   finds nothing and quietly does nothing. When the boundary set
+   settled first and an unlinked ride arrived afterwards, the
+   frame appeared (showLiveMap flipped) but no key the effect
+   watched had changed, so it never re-ran and the pane sat on
+   読み込み中 forever. showLiveMap is therefore one of the
+   effect's own conditions, and one of its dependencies. */
+export function shouldMountLiveMap(
+  mapFailed: boolean,
+  boundarySettled: boolean,
+  showLiveMap: boolean,
+): boolean {
+  return !mapFailed && boundarySettled && showLiveMap;
 }
 
 /* The ledger row a tap on a painted municipality shape belongs

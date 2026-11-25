@@ -21,7 +21,10 @@ import {
   isN02StationId,
   isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
+  primarySectionRouteAmbiguous,
   resolveRiddenService,
+  sectionEndpointsKnownToService,
+  serviceBoundaryStations,
   serviceById,
   serviceByLedgerName,
   serviceFullPathSnapshot,
@@ -818,5 +821,52 @@ describe("integrated review round 1: an explicit unlink is a confirmed answer", 
       expect(stations.has(ride.from.id)).toBe(true);
       expect(stations.has(ride.to.id)).toBe(true);
     }
+  });
+});
+
+describe("integrated review round 2: the fit yardsticks", () => {
+  test("sectionEndpointsKnownToService counts a restored mid-segment station as known", () => {
+    /* 京王線's 府中→聖蹟桜ヶ丘： 聖蹟桜ヶ丘 is no block boundary
+       (the boundary-only hint wrongly refused this section),
+       but the migration restored it, so the server's yardstick
+       — known stations — accepts it, and the hint now uses the
+       same one. */
+    expect(
+      serviceBoundaryStations("keio").some((s) => s.id === "003971"),
+    ).toBe(false);
+    expect(sectionEndpointsKnownToService("keio", "003821", "003971")).toBe(
+      true,
+    );
+    /* A station of another service is still foreign. */
+    expect(sectionEndpointsKnownToService("keio", "003821", "003634")).toBe(
+      false,
+    );
+  });
+
+  test("a primary section whose pair runs on another service over a different route is ambiguous", () => {
+    /* 東京→新宿 is 中央線（快速）'s first block — and also a
+       山手線 pair, over 山手線・東北線・東海道線. The endpoints
+       alone cannot say which route was ridden, from either
+       side. */
+    expect(primarySectionRouteAmbiguous("jr-chuo-rapid", "003766", "003700")).toBe(true);
+    expect(primarySectionRouteAmbiguous("yamanote", "003766", "003700")).toBe(true);
+  });
+
+  test("pairs no other service serves, or that share the one formal line, are not ambiguous", () => {
+    /* 国分寺 is 中央線's alone. */
+    expect(primarySectionRouteAmbiguous("jr-chuo-rapid", "003766", "003606")).toBe(false);
+    /* The restored 山手線 ride: 大崎・目黒 are mid-segment for
+       every other service too, so no rival route can be shown. */
+    expect(primarySectionRouteAmbiguous("yamanote", "004135", "004072")).toBe(false);
+    /* The restored 埼京線 ride runs on 山手線 trackage, the
+       same route 山手線 itself takes between the pair. */
+    expect(primarySectionRouteAmbiguous("jr-saikyo", "003700", "004135")).toBe(false);
+    /* 総武快速線・総武本線 share their pairs over the one
+       formal line 総武線 — the same route, not a rival one. */
+    expect(primarySectionRouteAmbiguous("jr-sobu-rapid", "003766", "004173")).toBe(false);
+    expect(primarySectionRouteAmbiguous("jr-sobu-local", "003531", "004173")).toBe(false);
+    /* 京王線's restored section: no other service serves
+       聖蹟桜ヶ丘 at all. */
+    expect(primarySectionRouteAmbiguous("keio", "003821", "003971")).toBe(false);
   });
 });
