@@ -1,6 +1,7 @@
-/* Hero / ghost switching for the split record map (subtask 1439).
-   The 市区町村 tab and the 路線 tab share ONE mounted map and ONE
-   load of every dataset (the reader's decision, 2026-11-25):
+/* Hero / ghost switching for the split record map (subtask 1439),
+   extended to the スポット tab by the unification (subtask 1460):
+   the スポット tab and the two record tabs share ONE mounted map
+   and ONE load of every dataset (the reader's decision, 2026-11-25):
    switching tabs only swaps which overlay family is the hero and
    which is the ghost underlay, by repainting the live layers in
    place — no remount, no refetch. The pure decisions live here so
@@ -10,24 +11,27 @@
 
    The hero values below are the mount's own paint specs in
    App.tsx (visited-areas-fill 0.38, the line casing / color /
-   unknown widths and opacities, the visited outline's zoom ramp)
-   — if a mount spec changes, its hero twin here must change with
-   it, or a tab switch would silently repaint the layer to the
-   stale value. The ghost values are deliberately far below the
-   hero ones: the ghost family must read as a thin underlay the
-   hero sits on, never compete with it. The municipality tap's
-   painted-name → ledger-row resolution (the line tap's twin)
-   and the sticky map pane's visible-range bound for the ledger
-   row scroll also live here, for the same testability. */
+   unknown widths and opacities, the visited outline's zoom ramp,
+   the spot dots' 0.6) — if a mount spec changes, its hero twin
+   here must change with it, or a tab switch would silently
+   repaint the layer to the stale value. The ghost values are
+   deliberately far below the hero ones: the ghost family must
+   read as a thin underlay the hero sits on, never compete with
+   it. The municipality tap's painted-name → ledger-row resolution
+   (the line tap's twin) and the sticky map pane's visible-range
+   bound for the ledger row scroll also live here, for the same
+   testability. */
 
 import {
   usableRiddenService,
   type RiddenServiceLink,
 } from "../../shared/service-master";
 
-/* Which record tab the shared map is showing: the municipality
-   ledger's tab, or the ridden lines' tab. */
-export type RecordMapVariant = "municipalities" | "lines";
+/* Which map tab the shared map is showing: the spot list's tab,
+   the municipality ledger's tab, or the ridden lines' tab. The
+   スポット tab joined the shared map in the unification
+   (subtask 1460); before that only the two record tabs shared it. */
+export type RecordMapVariant = "spots" | "municipalities" | "lines";
 
 export type LayerPaintOp = { layer: string; name: string; value: unknown };
 export type LayerLayoutOp = { layer: string; name: string; value: unknown };
@@ -41,17 +45,19 @@ const OUTLINE_OPACITY_GHOST = [
   "interpolate", ["linear"], ["zoom"], 7, 0.22, 10, 0.32,
 ];
 
-/* Every paint / layout value a variant pins down. Both variants
-   set the FULL set for both families, so a switch lands in the
-   target state regardless of what the previous variant (or a
+/* Every paint / layout value a variant pins down. All variants
+   set the FULL set for all three families, so a switch lands in
+   the target state regardless of what the previous variant (or a
    remount) left behind. Layers a mount may not have created
-   (no lines recorded, no shaped municipalities) are skipped by
-   applyVariantPaint. */
+   (no lines recorded, no shaped municipalities, no spots) are
+   skipped by applyVariantPaint. */
 export function variantPaintOps(variant: RecordMapVariant): {
   paint: LayerPaintOp[];
   layout: LayerLayoutOp[];
 } {
   const municipalitiesHero = variant === "municipalities";
+  const linesHero = variant === "lines";
+  const spotsHero = variant === "spots";
   return {
     paint: [
       /* Municipality fills + point circles. */
@@ -79,27 +85,38 @@ export function variantPaintOps(variant: RecordMapVariant): {
       {
         layer: "visited-lines-casing",
         name: "line-opacity",
-        value: municipalitiesHero ? 0.15 : 0.55,
+        value: linesHero ? 0.55 : 0.15,
       },
       {
         layer: "visited-lines-casing",
         name: "line-width",
-        value: municipalitiesHero ? 3 : 5.5,
+        value: linesHero ? 5.5 : 3,
       },
       {
         layer: "visited-lines-color",
         name: "line-opacity",
-        value: municipalitiesHero ? 0.32 : 0.95,
+        value: linesHero ? 0.95 : 0.32,
       },
       {
         layer: "visited-lines-color",
         name: "line-width",
-        value: municipalitiesHero ? 2 : 3.5,
+        value: linesHero ? 3.5 : 2,
       },
       {
         layer: "visited-lines-unknown",
         name: "line-opacity",
-        value: municipalitiesHero ? 0.28 : 0.6,
+        value: linesHero ? 0.6 : 0.28,
+      },
+      /* Spot dots: the hero paint is the mount spec (0.6) on the
+         スポット tab. On the record tabs the layer is hidden by
+         the layout op below, so the opacity stays pinned at the
+         mount value and a switch back restores the dots as they
+         were — the faint unvisited dots there come from the
+         ghost-spots layer instead, never from this one. */
+      {
+        layer: "list-spot-points-circle",
+        name: "circle-opacity",
+        value: 0.6,
       },
     ],
     layout: [
@@ -109,7 +126,24 @@ export function variantPaintOps(variant: RecordMapVariant): {
       {
         layer: "unridden-lines-ghost",
         name: "visibility",
-        value: municipalitiesHero ? "none" : "visible",
+        value: linesHero ? "visible" : "none",
+      },
+      /* The hero spot dots only on the スポット tab: on the
+         record tabs the ghost-spots layer carries the unvisited
+         dots, and showing this layer too would paint every
+         unvisited spot twice. */
+      {
+        layer: "list-spot-points-circle",
+        name: "visibility",
+        value: spotsHero ? "visible" : "none",
+      },
+      /* The ghost-spots underlay only on the record tabs: on the
+         スポット tab the hero dots show the same unvisited
+         spots, so the ghost would double them. */
+      {
+        layer: "ghost-spots-circle",
+        name: "visibility",
+        value: spotsHero ? "none" : "visible",
       },
     ],
   };
@@ -213,6 +247,93 @@ export function lineRowForPaintedFeature<
     return null;
   }
   return lineRowForPaintedKey(rows, perServiceLegs, feature.key);
+}
+
+/* The スポット tab's whole-country initial camera (review round 1,
+   finding 4): the mount opens on it, and entering the スポット tab
+   with no Pixel position restores it instead of keeping the record
+   tab's view. The zoom follows the pane width, exactly as the mount
+   computed it inline before this helper existed. */
+export function spotsInitialCamera(containerWidthPx: number): {
+  center: { lat: number; lng: number };
+  zoom: number;
+} {
+  return {
+    center: { lat: 37.6, lng: 138.4 },
+    zoom: containerWidthPx > 0 && containerWidthPx < 560 ? 3.2 : 4.2,
+  };
+}
+
+/* The mount effect's dependency snapshot, for the スポット-tab
+   remount skip below. */
+export type MapMountKeys = {
+  placesKey: string;
+  riddenLinesKey: string;
+  mapAttempt: number;
+  mapFailed: boolean;
+  boundarySettled: boolean;
+  showMapPane: boolean;
+};
+
+/* Whether a mount-effect re-run may skip rebuilding the map
+   (review round 1, finding 5): only when the ONLY thing that
+   changed since the last mount is the record data
+   (placesKey / riddenLinesKey), the スポット tab is showing, and
+   a live map exists to keep using. A retry, a failure flip, the
+   boundary set settling, or the pane appearing is never a
+   record-only change, so those still mount; with no previous
+   mount there is nothing to keep, so the first run mounts too.
+   The caller remembers the skipped data as stale and rebuilds on
+   the next record-tab entry. */
+export function shouldSkipSpotRemount(
+  lastKeys: MapMountKeys | null,
+  nextKeys: MapMountKeys,
+  variant: RecordMapVariant,
+  hasLiveMap: boolean,
+): boolean {
+  if (!lastKeys || !hasLiveMap || variant !== "spots") return false;
+  const recordDataChanged =
+    lastKeys.placesKey !== nextKeys.placesKey ||
+    lastKeys.riddenLinesKey !== nextKeys.riddenLinesKey;
+  if (!recordDataChanged) return false;
+  return (
+    lastKeys.mapAttempt === nextKeys.mapAttempt &&
+    lastKeys.mapFailed === nextKeys.mapFailed &&
+    lastKeys.boundarySettled === nextKeys.boundarySettled &&
+    lastKeys.showMapPane === nextKeys.showMapPane
+  );
+}
+
+/* The record-data arrival's verdict for the shared map (review
+   round 2, finding 5): the mount effect's own cleanup used to
+   destroy the map before the new run could decide to skip, so
+   the skip could never take effect — React runs the previous
+   run's cleanup first. The decision therefore lives in a
+   separate effect that watches only the record-data keys, and
+   the mount effect no longer watches them at all:
+   - "none": no previous mount yet, or the record data did not
+     change — nothing to do (a re-render alone must never bump
+     the retry nonce, or the mount would rebuild in a loop).
+   - "skip": a record-only arrival on the スポット tab with a
+     live map — remember the data as stale, rebuild on the next
+     record-tab entry instead.
+   - "remount": anything else that changed the record data —
+     bump the retry nonce so the mount effect rebuilds. */
+export type SpotDataRemountDecision = "none" | "skip" | "remount";
+export function decideSpotDataRemount(
+  lastKeys: MapMountKeys | null,
+  nextKeys: MapMountKeys,
+  variant: RecordMapVariant,
+  hasLiveMap: boolean,
+): SpotDataRemountDecision {
+  if (!lastKeys) return "none";
+  const recordDataChanged =
+    lastKeys.placesKey !== nextKeys.placesKey ||
+    lastKeys.riddenLinesKey !== nextKeys.riddenLinesKey;
+  if (!recordDataChanged) return "none";
+  return shouldSkipSpotRemount(lastKeys, nextKeys, variant, hasLiveMap)
+    ? "skip"
+    : "remount";
 }
 
 /* Whether the live map's mount effect should run. The mount

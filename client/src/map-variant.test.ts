@@ -6,16 +6,20 @@
    Run with: bun test client/src/map-variant.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
+  decideSpotDataRemount,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
+  shouldSkipSpotRemount,
+  spotsInitialCamera,
   stickyPaneVisibleTop,
   variantPaintOps,
+  type MapMountKeys,
 } from "./map-variant";
 
 const paintValue = (
-  variant: "municipalities" | "lines",
+  variant: "spots" | "municipalities" | "lines",
   layer: string,
   name: string,
 ) =>
@@ -23,7 +27,7 @@ const paintValue = (
     (op) => op.layer === layer && op.name === name,
   )?.value;
 const layoutValue = (
-  variant: "municipalities" | "lines",
+  variant: "spots" | "municipalities" | "lines",
   layer: string,
   name: string,
 ) =>
@@ -68,12 +72,45 @@ describe("variantPaintOps", () => {
   test("the unridden-line ghost shows only on the 路線 tab", () => {
     expect(layoutValue("lines", "unridden-lines-ghost", "visibility")).toBe("visible");
     expect(layoutValue("municipalities", "unridden-lines-ghost", "visibility")).toBe("none");
+    expect(layoutValue("spots", "unridden-lines-ghost", "visibility")).toBe("none");
   });
 
-  test("every op targets a layer the record map actually mounts", () => {
+  test("the spot dots are the hero only on the スポット tab (unification, subtask 1460)", () => {
+    /* Hero = the mount spec in App.tsx (circle-opacity 0.6).
+       On the record tabs the hero dots are hidden outright: the
+       ghost-spots layer already carries the unvisited dots there,
+       and showing both would paint every unvisited spot twice. */
+    expect(paintValue("spots", "list-spot-points-circle", "circle-opacity")).toBe(0.6);
+    expect(layoutValue("spots", "list-spot-points-circle", "visibility")).toBe("visible");
+    expect(layoutValue("municipalities", "list-spot-points-circle", "visibility")).toBe("none");
+    expect(layoutValue("lines", "list-spot-points-circle", "visibility")).toBe("none");
+    /* The ghost-spots underlay is the mirror: visible on the
+       record tabs, hidden on the スポット tab where the hero
+       dots show the same unvisited spots. */
+    expect(layoutValue("spots", "ghost-spots-circle", "visibility")).toBe("none");
+    expect(layoutValue("municipalities", "ghost-spots-circle", "visibility")).toBe("visible");
+    expect(layoutValue("lines", "ghost-spots-circle", "visibility")).toBe("visible");
+  });
+
+  test("on the スポット tab the municipality fills and the ridden lines are both ghosts", () => {
+    expect(paintValue("spots", "visited-areas-fill", "fill-opacity")).toBe(0.1);
+    expect(paintValue("spots", "visited-fill-circle", "circle-opacity")).toBe(0.07);
+    expect(paintValue("spots", "visited-lines-color", "line-opacity")).toBe(0.32);
+    expect(paintValue("spots", "visited-lines-color", "line-width")).toBe(2);
+    expect(paintValue("spots", "visited-lines-casing", "line-opacity")).toBe(0.15);
+    expect(paintValue("spots", "visited-lines-unknown", "line-opacity")).toBe(0.28);
+    expect(
+      paintValue("spots", "visited-areas-outline", "line-opacity"),
+    ).toEqual(["interpolate", ["linear"], ["zoom"], 7, 0.22, 10, 0.32]);
+  });
+
+  test("every op targets a layer the unified map actually mounts", () => {
     /* Layer ids as mounted in App.tsx. A typo here would
        silently no-op through applyVariantPaint's missing-layer
-       skip, so pin the op set to the mounted set. */
+       skip, so pin the op set to the mounted set. The
+       ghost-spots layer is added at runtime by
+       ensureGhostSpotPoints, not by the mount overlays, but it
+       is a real layer on the live map all the same. */
     const mounted = new Set([
       "visited-areas-fill",
       "visited-areas-hit",
@@ -87,8 +124,10 @@ describe("variantPaintOps", () => {
       "visited-lines-color",
       "visited-lines-unknown",
       "unridden-lines-ghost",
+      "list-spot-points-circle",
+      "ghost-spots-circle",
     ]);
-    for (const variant of ["municipalities", "lines"] as const) {
+    for (const variant of ["spots", "municipalities", "lines"] as const) {
       const ops = variantPaintOps(variant);
       for (const op of [...ops.paint, ...ops.layout]) {
         expect(mounted.has(op.layer)).toBe(true);
@@ -341,5 +380,186 @@ describe("shouldMountLiveMap (the mount waits for something to show, round 2 hig
   test("an unsettled boundary set or a failed map never mounts", () => {
     expect(shouldMountLiveMap(false, false, true)).toBe(false);
     expect(shouldMountLiveMap(true, true, true)).toBe(false);
+  });
+});
+
+describe("spotsInitialCamera (review round 1, finding 4)", () => {
+  test("the whole-country center, with the narrow-pane zoom under 560px", () => {
+    expect(spotsInitialCamera(0)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 4.2,
+    });
+    expect(spotsInitialCamera(559)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 3.2,
+    });
+    expect(spotsInitialCamera(560)).toEqual({
+      center: { lat: 37.6, lng: 138.4 },
+      zoom: 4.2,
+    });
+    expect(spotsInitialCamera(1200).zoom).toBe(4.2);
+  });
+});
+
+describe("shouldSkipSpotRemount (review round 1, finding 5)", () => {
+  const base: MapMountKeys = {
+    placesKey: "1g,2g",
+    riddenLinesKey: "[]",
+    mapAttempt: 0,
+    mapFailed: false,
+    boundarySettled: true,
+    showMapPane: true,
+  };
+
+  test("a record-data-only change on the スポット tab with a live map skips the rebuild", () => {
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, riddenLinesKey: "[x]" },
+        "spots",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  test("anything else still mounts", () => {
+    /* No previous mount: the first run mounts. */
+    expect(shouldSkipSpotRemount(null, base, "spots", true)).toBe(false);
+    /* No live map to keep: mount. */
+    expect(
+      shouldSkipSpotRemount(base, { ...base, placesKey: "1g" }, "spots", false),
+    ).toBe(false);
+    /* A record tab wants the fresh shapes: rebuild. */
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g" },
+        "municipalities",
+        true,
+      ),
+    ).toBe(false);
+    /* A retry, a failure flip, the boundary set settling, or the
+       pane appearing is never a record-only change. */
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", mapAttempt: 1 },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", mapFailed: true },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", boundarySettled: false },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSkipSpotRemount(
+        base,
+        { ...base, placesKey: "1g", showMapPane: false },
+        "spots",
+        true,
+      ),
+    ).toBe(false);
+    /* Nothing changed at all: no skip decision is needed (the
+       effect would not re-run), and the predicate says mount. */
+    expect(shouldSkipSpotRemount(base, base, "spots", true)).toBe(false);
+  });
+});
+
+describe("decideSpotDataRemount (review round 2, finding 5)", () => {
+  const base: MapMountKeys = {
+    placesKey: "1g,2g",
+    riddenLinesKey: "[]",
+    mapAttempt: 0,
+    mapFailed: false,
+    boundarySettled: true,
+    showMapPane: true,
+  };
+
+  test("no previous mount, or no record-data change, means nothing to do", () => {
+    /* The first run belongs to the mount effect, and a re-render
+       alone must never bump the retry nonce — or the mount
+       would rebuild in a loop. */
+    expect(decideSpotDataRemount(null, base, "spots", true)).toBe("none");
+    expect(decideSpotDataRemount(base, base, "spots", true)).toBe("none");
+    expect(
+      decideSpotDataRemount(base, { ...base, mapAttempt: 1 }, "spots", true),
+    ).toBe("none");
+  });
+
+  test("a record-only arrival on the スポット tab with a live map is skipped", () => {
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        true,
+      ),
+    ).toBe("skip");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, riddenLinesKey: "[x]" },
+        "spots",
+        true,
+      ),
+    ).toBe("skip");
+  });
+
+  test("the same arrival on a record tab, or without a live map, rebuilds", () => {
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "municipalities",
+        true,
+      ),
+    ).toBe("remount");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "lines",
+        true,
+      ),
+    ).toBe("remount");
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g,2g,3g" },
+        "spots",
+        false,
+      ),
+    ).toBe("remount");
+    /* A retry nonce moving at the same time is never a
+       record-only change, so it rebuilds too. */
+    expect(
+      decideSpotDataRemount(
+        base,
+        { ...base, placesKey: "1g", mapAttempt: 1 },
+        "spots",
+        true,
+      ),
+    ).toBe("remount");
   });
 });
