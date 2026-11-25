@@ -1221,17 +1221,16 @@ export function validateSectionEndpoints(
       return `${service.displayName} is a loop: a section needs a direction (inner/outer)`;
     }
     // Any two distinct stations join either way round a loop;
-    // the direction says which way. The blocks' own direction
-    // must agree when the section is a single block.
-    const blocks = blocksForService(serviceId);
-    const block = blocks.find(
-      (b) =>
-        (b.from.id === fromStationId && b.to.id === toStationId) ||
-        (b.from.id === toStationId && b.to.id === fromStationId),
-    );
-    if (block?.direction && block.direction !== direction) {
-      return `block ${block.from.name}〜${block.to.name} runs ${block.direction}, not ${direction}`;
-    }
+    // the direction says which way. No block is consulted: a
+    // single block can be ridden either way — 新宿→渋谷 inner
+    // runs yamanote/b2 （渋谷〜新宿) end to end, a real ride,
+    // while the same endpoints outer are the long way round
+    // the loop, which only shares the endpoints with b2
+    // (review round 2, medium — the old block-direction check
+    // rejected the inner ride for matching b2's endpoints).
+    // The direction, when given, is checked against a named
+    // blockId at the server instead (addRiddenSection), where
+    // the block the ride claims to be is known.
     return null;
   }
   /* A non-loop section is one stretch of the line, travelled

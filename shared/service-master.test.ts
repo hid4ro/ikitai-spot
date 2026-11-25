@@ -761,6 +761,25 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toBeNull();
   });
 
+  test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {
+    // 新宿→渋谷 inner runs yamanote/b2 （渋谷〜新宿) end to
+    // end — a real ride. The old block-direction check
+    // rejected it because the endpoints match b2, whose own
+    // direction is outer. The same endpoints outer are the
+    // long way round the loop, which only shares the endpoints
+    // with b2 — also a valid section, and the direction is
+    // what tells them apart, not the block.
+    expect(
+      validateSectionEndpoints("yamanote", "003700", "003922", "inner"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("yamanote", "003700", "003922", "outer"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("yamanote", "003922", "003700", "inner"),
+    ).toBeNull();
+  });
+
   test("serviceOrderedStations interleaves block stations in running order", () => {
     expect(
       serviceOrderedStations("jr-musashino").map((s) => s.id),
@@ -791,9 +810,17 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       validateSectionEndpoints("yamanote", "004095", "003922", "outer"),
     ).toBeNull();
+    /* 品川→渋谷 inner is the long way round the loop — a valid
+       section, not a wrong-direction block: the direction says
+       which way round, and a single block can be ridden either
+       way (review round 2, medium — the old check rejected it
+       for matching b1's endpoints). The block-direction
+       agreement now lives in the server's addRiddenSection,
+       where the block the ride claims to be is known (see
+       ridden-link.test.ts). */
     expect(
       validateSectionEndpoints("yamanote", "004095", "003922", "inner"),
-    ).toMatch(/runs outer, not inner/);
+    ).toBeNull();
     // A multi-block run round the loop still needs the direction.
     expect(
       validateSectionEndpoints("yamanote", "004095", "003335", "outer"),

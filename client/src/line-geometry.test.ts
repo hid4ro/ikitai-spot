@@ -281,6 +281,37 @@ describe("real asset: the migrated sections", () => {
       innerCoords.some((p) => haversineKm(p, [S.品川.lng, S.品川.lat]) < 0.5),
     ).toBe(true);
   });
+
+  test("a direction-less loop section is clipped the shorter-by-steps way (review round 2, medium)", () => {
+    /* Without a direction, the map must draw the same side
+       the block picker marks (the shorter way by station
+       steps — the picker's fallback). The old clip took the
+       [min, max] arc-kilometre range, which at the seam
+       station 品川 flips to the long way round: 大崎→田端
+       drew via 渋谷・新宿 (~18.5 km) while the picker marked
+       the 東京 side, and 品川→新宿 drew via 東京 (~23.6 km)
+       while the picker marked b1・b2. */
+    const path = servicePath("yamanote");
+    const osakiTabata = clipServicePath(path, S.大崎, S.田端)!;
+    expect(osakiTabata.lengthKm).toBeCloseTo(15.84, 1);
+    expect(
+      osakiTabata.legs
+        .flatMap((leg) => leg.coords)
+        .some((p) => haversineKm(p, [S.東京.lng, S.東京.lat]) < 0.5),
+    ).toBe(true);
+    const shinagawaShinjuku = clipServicePath(path, S.品川, S.新宿)!;
+    expect(shinagawaShinjuku.lengthKm).toBeCloseTo(10.68, 1);
+    expect(
+      shinagawaShinjuku.legs
+        .flatMap((leg) => leg.coords)
+        .some((p) => haversineKm(p, [S.渋谷.lng, S.渋谷.lat]) < 0.5),
+    ).toBe(true);
+    /* 品川→池袋 is unchanged by the fix: the step count
+       already tips it to the 東京 side (3 steps against 4),
+       and the clip stays on that side (~18.9 km). */
+    const shinagawaIkebukuro = clipServicePath(path, S.品川, S.池袋)!;
+    expect(shinagawaIkebukuro.lengthKm).toBeCloseTo(18.93, 1);
+  });
 });
 
 describe("real asset: the subtask-1455 estimated sections", () => {
@@ -728,6 +759,71 @@ describe("coveredBlockIds: whole-block coverage for the block picker", () => {
       },
     ]);
     expect([...covered].sort()).toEqual(["yamanote/b2"]);
+  });
+
+  test("a Yamanote outer section the long way round does not cover the block it never runs (review round 2, medium)", () => {
+    /* 新宿→渋谷 outer runs via 田端・東京・品川, so it never
+       runs yamanote/b2 （渋谷〜新宿) — but the old version
+       judged by the set of stations passed, and both of b2's
+       endpoints are passed (one at each end of the long way
+       round), so it marked all six blocks. The block is
+       covered only when the section runs over it end to end:
+       the five blocks the long way round actually traverses. */
+    const covered = coveredBlockIds("yamanote", [
+      {
+        serviceId: "yamanote",
+        from: S.新宿,
+        to: S.渋谷,
+        direction: "outer",
+      },
+    ]);
+    expect([...covered].sort()).toEqual([
+      "yamanote/b1",
+      "yamanote/b3",
+      "yamanote/b4",
+      "yamanote/b5",
+      "yamanote/b6",
+    ]);
+  });
+
+  test("several added sections jointly covering one block mark it (review round 2, low)", () => {
+    /* 北総線's single block hokuso/b1 is covered by two
+       sections together （京成高砂→東松戸 and
+       東松戸→印旛日本医大) — the old version judged each
+       section alone, so neither marked anything and the block
+       stayed pickable even though the whole block is ridden. */
+    const jointly = coveredBlockIds("hokuso", [
+      { serviceId: "hokuso", from: S.京成高砂, to: S.東松戸 },
+      { serviceId: "hokuso", from: S.東松戸, to: S.印旛日本医大 },
+    ]);
+    expect([...jointly].sort()).toEqual(["hokuso/b1"]);
+    const alone = coveredBlockIds("hokuso", [
+      { serviceId: "hokuso", from: S.京成高砂, to: S.東松戸 },
+    ]);
+    expect(alone.size).toBe(0);
+  });
+
+  test("direction-less loop sections use the shorter-by-steps way (review round 2, medium)", () => {
+    /* Without a direction, the shorter way by station steps
+       is taken — the same fallback the map's clip uses, so
+       the check column and the drawing agree. 大崎 counts as
+       a listed station on yamanote/b1, which is what tips
+       品川→池袋 to the 東京 side (3 steps against 4). */
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.品川, to: S.池袋 },
+      ])].sort(),
+    ).toEqual(["yamanote/b4", "yamanote/b5", "yamanote/b6"]);
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.大崎, to: S.田端 },
+      ])].sort(),
+    ).toEqual(["yamanote/b5", "yamanote/b6"]);
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.品川, to: S.新宿 },
+      ])].sort(),
+    ).toEqual(["yamanote/b1", "yamanote/b2"]);
   });
 });
 

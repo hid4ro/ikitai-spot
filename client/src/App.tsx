@@ -7469,6 +7469,15 @@ function RiddenLinesBlock({
             const handSections = (line.sections ?? []).filter(
               (s) => s.blockId == null,
             );
+            /* Either section mutation running blocks both the
+               hand-entry add and the per-section deletes: an
+               add and a delete overlapping can leave the row's
+               saved state disagreeing with the ledger (review
+               round 2, medium). The block toggles already
+               disable on either mutation. */
+            const sectionBusy =
+              addSectionMutation.isPending ||
+              deleteSectionMutation.isPending;
             /* Stations a hand-entered section may name for this
                row's service: boundaries plus the stations listed
                on its blocks (stage 3), de-duplicated — a loop
@@ -7887,7 +7896,7 @@ function RiddenLinesBlock({
                               onClick={() =>
                                 deleteSectionMutation.mutate(section.id)
                               }
-                              disabled={deleteSectionMutation.isPending}
+                              disabled={sectionBusy}
                               className="shrink-0 rounded-lg px-2 py-1 text-xs text-[var(--dim)] underline disabled:opacity-50"
                             >
                               削除
@@ -8004,7 +8013,7 @@ function RiddenLinesBlock({
                               blockId: null,
                             });
                           }}
-                          disabled={addSectionMutation.isPending}
+                          disabled={sectionBusy}
                           className="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-bold text-[var(--accent-ink)] disabled:opacity-50"
                         >
                           {addSectionMutation.isPending

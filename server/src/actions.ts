@@ -2045,7 +2045,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks — a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered. Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable.",
+      "Adds one section to a ridden-lines ledger row — a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks — a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered — the named block must agree with the direction given (review round 2). Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it — a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable. A duplicate add also repairs a row left unknown with a section on record (review round 2).",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -2112,6 +2112,20 @@ export const Actions = {
             `addRiddenSection: block "${blockId}" runs ${block.from.name}〜${block.to.name}, not the given section`,
           );
         }
+        /* A named block must agree with the direction given:
+           a long way round a loop section saved with a blockId
+           would make the block toggle and the coverage disagree
+           (review round 2, medium — the block's direction is
+           the running order, so a section the other way round
+           it cannot be that block). Hand entries never name a
+           block, and block picks always send the block's own
+           direction, so a mismatch is a caller error, not a
+           case to silently rewrite. */
+        if (block.direction && direction && block.direction !== direction) {
+          throw new Error(
+            `addRiddenSection: block "${blockId}" runs ${block.direction}, not ${direction}`,
+          );
+        }
       }
       // Station names come from the master when the caller omits
       // them (the block list always sends them; a hand-entered
@@ -2174,8 +2188,44 @@ export const Actions = {
         }
       };
       const duplicate = await findDuplicate();
+      /* A row with sections on record is never unknown. The
+         handler's opening read of the row predates the insert,
+         so deciding unknown→partial from it goes stale when a
+         delete of the last section lands in between (review
+         round 2, medium — the delete returns the row to
+         unknown, the add still succeeds, and the row stays
+         unknown with a section on record). Re-read the row and
+         the section count at the point of the decision instead;
+         the duplicate and unique-constraint-winner paths get
+         the same repair, because they return early without
+         touching the state at all and so leave an already
+         inconsistent row inconsistent. */
+      const repairRideState = async () => {
+        const [fresh] = await db
+          .select()
+          .from(schema.riddenLines)
+          .where(eq(schema.riddenLines.id, args.riddenLineId))
+          .limit(1);
+        if (!fresh || normalizeRideState(fresh.rideState) !== "unknown") {
+          return;
+        }
+        const sections = await db
+          .select({ id: schema.riddenLineSections.id })
+          .from(schema.riddenLineSections)
+          .where(
+            eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
+          )
+          .limit(1);
+        if (sections.length > 0) {
+          await db
+            .update(schema.riddenLines)
+            .set({ rideState: "partial" })
+            .where(eq(schema.riddenLines.id, args.riddenLineId));
+        }
+      };
       if (duplicate) {
         await adoptBlockId(duplicate);
+        await repairRideState();
         return { created: false, id: duplicate.id };
       }
       let insertedId: number | null;
@@ -2199,18 +2249,15 @@ export const Actions = {
           const winner = await findDuplicate();
           if (winner) {
             await adoptBlockId(winner);
+            await repairRideState();
             return { created: false, id: winner.id };
           }
         }
         throw error;
       }
-      // An unknown row that gains a section now pins one down.
-      if (normalizeRideState(line.rideState) === "unknown") {
-        await db
-          .update(schema.riddenLines)
-          .set({ rideState: "partial" })
-          .where(eq(schema.riddenLines.id, args.riddenLineId));
-      }
+      // An unknown row that gains a section now pins one down
+      // (re-read at this point — see repairRideState above).
+      await repairRideState();
       ctx.invalidateQueries();
       return { created: true, id: insertedId };
     },

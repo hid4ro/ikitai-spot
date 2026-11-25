@@ -5027,6 +5027,9 @@ function inArray(column, values) {
   }
   return sql`${column} in ${bindIfParam(values, column)}`;
 }
+function isNull(value) {
+  return sql`${value} is null`;
+}
 function isNotNull(value) {
   return sql`${value} is not null`;
 }
@@ -5046,6 +5049,801 @@ function desc(column) {
 function count(expression) {
   return sql`count(${expression || sql.raw("*")})`.mapWith(Number);
 }
+
+// ../shared/service-master.ts
+function isN02StationId(id) {
+  return /^\d{6}$/.test(id);
+}
+var SERVICE_MASTER_VERSION = "2026-11-24";
+var N02_SOURCE = "\u56FD\u571F\u6570\u5024\u60C5\u5831\u300C\u9244\u9053\u30C7\u30FC\u30BF\u300DN02\uFF082025\u5E74\u5EA6\u7248\uFF09";
+var LEDGER_SOURCE = "location-trivia/seen_lines.md\uFF08\u53F0\u5E33\u306E\u4E57\u8ECA\u8A18\u9332\uFF09";
+var SERVICE_MASTER = [
+  {
+    id: "jr-musashino",
+    pathId: "jr-musashino",
+    displayName: "JR\u6B66\u8535\u91CE\u7DDA",
+    ledgerNames: ["JR\u6B66\u8535\u91CE\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u6B66\u8535\u91CE\u7DDA",
+        formalLineKey: "\u6B66\u8535\u91CE\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003876", name: "\u5E9C\u4E2D\u672C\u753A", lng: 139.47718, lat: 35.66583 },
+        to: { id: "003547", name: "\u897F\u8239\u6A4B", lng: 139.95907, lat: 35.70737 }
+      }
+    ],
+    blocks: [
+      {
+        id: "jr-musashino/b1",
+        from: { id: "003876", name: "\u5E9C\u4E2D\u672C\u753A", lng: 139.47718, lat: 35.66583 },
+        to: { id: "003004", name: "\u5357\u6D66\u548C", lng: 139.66878, lat: 35.84796 },
+        stations: [
+          { id: "003771", name: "\u5317\u5E9C\u4E2D", lng: 139.47179, lat: 35.68086 }
+        ]
+      },
+      {
+        id: "jr-musashino/b2",
+        from: { id: "003004", name: "\u5357\u6D66\u548C", lng: 139.66878, lat: 35.84796 },
+        to: { id: "003547", name: "\u897F\u8239\u6A4B", lng: 139.95907, lat: 35.70737 },
+        stations: [
+          { id: "003187", name: "\u6771\u677E\u6238", lng: 139.94311, lat: 35.77013 }
+        ]
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "hokuso",
+    pathId: "hokuso",
+    displayName: "\u5317\u7DCF\u7DDA",
+    ledgerNames: ["\u5317\u7DCF\u7DDA"],
+    operator: "\u5317\u7DCF\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u5317\u7DCF\u7DDA",
+        formalLineKey: "\u5317\u7DCF\u7DDA|\u5317\u7DCF\u9244\u9053",
+        from: { id: "003248", name: "\u4EAC\u6210\u9AD8\u7802", lng: 139.86659, lat: 35.75087 },
+        to: { id: "003125", name: "\u5370\u65DB\u65E5\u672C\u533B\u5927", lng: 140.20276, lat: 35.78782 }
+      }
+    ],
+    blocks: [
+      {
+        id: "hokuso/b1",
+        from: { id: "003248", name: "\u4EAC\u6210\u9AD8\u7802", lng: 139.86659, lat: 35.75087 },
+        to: { id: "003125", name: "\u5370\u65DB\u65E5\u672C\u533B\u5927", lng: 140.20276, lat: 35.78782 },
+        stations: [
+          { id: "003187", name: "\u6771\u677E\u6238", lng: 139.94311, lat: 35.77013 },
+          { id: "003083", name: "\u5370\u897F\u7267\u306E\u539F", lng: 140.16713, lat: 35.80363 }
+        ]
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "jr-chuo-rapid",
+    pathId: "jr-chuo-rapid",
+    displayName: "JR\u4E2D\u592E\u7DDA\uFF08\u5FEB\u901F\uFF09",
+    ledgerNames: ["JR\u4E2D\u592E\u7DDA\uFF08\u5FEB\u901F\uFF09", "JR\u4E2D\u592E\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u4E2D\u592E\u7DDA",
+        formalLineKey: "\u4E2D\u592E\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003677", name: "\u795E\u7530", lng: 139.77088, lat: 35.69242 },
+        approximate: true,
+        note: "N02\u306E\u4E2D\u592E\u7DDA\u5F62\u72B6\u306F\u795E\u7530\u3067\u9014\u5207\u308C\u308B\uFF08\u5F62\u72B6\u306E\u6771\u7AEF\u306F\u795E\u7530\u4ED8\u8FD1\u3067\u3001\u6771\u4EAC\u99C5\u304B\u3089\u7D041.1km\uFF09\u3002\u6771\u4EAC\u301C\u795E\u7530\u306F\u904B\u884C\u533A\u9593\u3068\u3057\u3066\u660E\u793A\u3059\u308B\u304C\u3001N02\u306B\u5F62\u72B6\u304C\u7121\u3044\u305F\u3081\u63CF\u753B\u30FB\u8DDD\u96E2\u306F\u795E\u7530\u4EE5\u897F\u306E\u5F62\u72B6\u306B\u9650\u308B\uFF08\u8FD1\u4F3C\uFF09\u3002\u795E\u7530\u306E\u30B0\u30EB\u30FC\u30D7\u30B3\u30FC\u30C9003677\u306FN02\u306E\uFF08\u795E\u7530, \u4E2D\u592E\u7DDA\uFF09\u884C\u3067\u78BA\u8A8D\u6E08\u307F\u3002"
+      },
+      {
+        formalLineName: "\u4E2D\u592E\u7DDA",
+        formalLineKey: "\u4E2D\u592E\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003677", name: "\u795E\u7530", lng: 139.77088, lat: 35.69242 },
+        to: { id: "004029", name: "\u9AD8\u5C3E", lng: 139.28217, lat: 35.64202 },
+        note: "\u5FEB\u901F\u306E\u904B\u884C\u7BC4\u56F2\u306F\u6771\u4EAC\u301C\u9AD8\u5C3E\u3002N02\u306E\u4E2D\u592E\u7DDA\u5358\u4F4D\u306F\u3055\u3089\u306B\u5148\uFF08\u5869\u5C3B\u65B9\u9762\uFF09\u307E\u3067\u5EF6\u3073\u308B\u304C\u3001\u5FEB\u901F\u3068\u3057\u3066\u306F\u3053\u3053\u307E\u3067\u3002\u306A\u304AN02\u306E\u99C5\u30DD\u30A4\u30F3\u30C8\u306B\uFF08\u6771\u4EAC, \u4E2D\u592E\u7DDA\uFF09\u306E\u884C\u306F\u7121\u3044\uFF08\u6771\u4EAC\u99C5\u306E\u30B0\u30EB\u30FC\u30D7\u30B3\u30FC\u30C9003766\u306F\u4ED6\u306EJR\u7DDA\u306E\u884C\u3067\u78BA\u8A8D\u6E08\u307F\uFF09\u3002\u99C5ID\u306F\u7269\u7406\u99C5\u306E\u30B3\u30FC\u30C9\u3067\u3042\u308A\u3001\u4E2D\u592E\u7DDA\u304C\u6771\u4EAC\u99C5\u306B\u767A\u7740\u3059\u308B\u3053\u3068\u306B\u5909\u308F\u308A\u306F\u306A\u3044\u3002"
+      }
+    ],
+    blocks: [
+      {
+        id: "jr-chuo-rapid/b1",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 }
+      },
+      {
+        id: "jr-chuo-rapid/b2",
+        from: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003634", name: "\u7ACB\u5DDD", lng: 139.41396, lat: 35.69793 }
+      },
+      {
+        id: "jr-chuo-rapid/b3",
+        from: { id: "003634", name: "\u7ACB\u5DDD", lng: 139.41396, lat: 35.69793 },
+        to: { id: "004029", name: "\u9AD8\u5C3E", lng: 139.28217, lat: 35.64202 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "jr-sobu-rapid",
+    pathId: "jr-sobu-rapid",
+    displayName: "JR\u7DCF\u6B66\u5FEB\u901F\u7DDA",
+    ledgerNames: ["JR\u7DCF\u6B66\u5FEB\u901F\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u7DCF\u6B66\u7DDA",
+        formalLineKey: "\u7DCF\u6B66\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 }
+      }
+    ],
+    blocks: [
+      {
+        id: "jr-sobu-rapid/b1",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003589", name: "\u8239\u6A4B", lng: 139.98422, lat: 35.70195 }
+      },
+      {
+        id: "jr-sobu-rapid/b2",
+        from: { id: "003589", name: "\u8239\u6A4B", lng: 139.98422, lat: 35.70195 },
+        to: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "jr-sobu-local",
+    pathId: "jr-sobu-local",
+    displayName: "JR\u7DCF\u6B66\u672C\u7DDA",
+    ledgerNames: ["JR\u7DCF\u6B66\u672C\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u7DCF\u6B66\u7DDA",
+        formalLineKey: "\u7DCF\u6B66\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "003397", name: "\u929A\u5B50", lng: 140.82747, lat: 35.72933 }
+      }
+    ],
+    blocks: [
+      {
+        id: "jr-sobu-local/b1",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 }
+      },
+      {
+        id: "jr-sobu-local/b2",
+        from: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 },
+        to: { id: "003531", name: "\u4F50\u5009", lng: 140.22675, lat: 35.70974 }
+      },
+      {
+        id: "jr-sobu-local/b3",
+        from: { id: "003531", name: "\u4F50\u5009", lng: 140.22675, lat: 35.70974 },
+        to: { id: "003397", name: "\u929A\u5B50", lng: 140.82747, lat: 35.72933 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "keio",
+    pathId: "keio",
+    displayName: "\u4EAC\u738B\u7DDA",
+    ledgerNames: ["\u4EAC\u738B\u7DDA"],
+    operator: "\u4EAC\u738B\u96FB\u9244",
+    segments: [
+      {
+        formalLineName: "\u4EAC\u738B\u7DDA",
+        formalLineKey: "\u4EAC\u738B\u7DDA|\u4EAC\u738B\u96FB\u9244",
+        from: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003934", name: "\u4EAC\u738B\u516B\u738B\u5B50", lng: 139.34298, lat: 35.65805 }
+      }
+    ],
+    blocks: [
+      {
+        id: "keio/b1",
+        from: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003966", name: "\u8ABF\u5E03", lng: 139.54474, lat: 35.65177 }
+      },
+      {
+        id: "keio/b2",
+        from: { id: "003966", name: "\u8ABF\u5E03", lng: 139.54474, lat: 35.65177 },
+        to: { id: "003821", name: "\u5E9C\u4E2D", lng: 139.4801, lat: 35.67219 }
+      },
+      {
+        id: "keio/b3",
+        from: { id: "003821", name: "\u5E9C\u4E2D", lng: 139.4801, lat: 35.67219 },
+        to: { id: "003934", name: "\u4EAC\u738B\u516B\u738B\u5B50", lng: 139.34298, lat: 35.65805 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "jr-saikyo",
+    pathId: "jr-saikyo",
+    displayName: "JR\u57FC\u4EAC\u7DDA",
+    ledgerNames: ["JR\u57FC\u4EAC\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u5C71\u624B\u7DDA",
+        formalLineKey: "\u5C71\u624B\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 },
+        to: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        approximate: true,
+        direction: "outer",
+        note: "\u5C71\u624B\u8CA8\u7269\u7DDA\u306E\u533A\u9593\u3002N02 2025\u306B\u8CA8\u7269\u7DDA\u306E\u8DEF\u7DDA\u5358\u4F4D\u304C\u7121\u3044\u305F\u3081\u5C71\u624B\u7DDA\uFF08\u65C5\u5BA2\uFF09\u306E\u5F62\u72B6\u3067\u4EE3\u7528\u3057\u3001\u6982\u7B97\u3068\u3057\u3066\u6271\u3046\u3002\u5916\u56DE\u308A\u5074\uFF08\u5927\u5D0E\u2192\u4E94\u53CD\u7530\u2192\u76EE\u9ED2\u2192\u6E0B\u8C37\u2192\u65B0\u5BBF\u2192\u6C60\u888B\uFF09\u3092\u901A\u308B\u3002"
+      },
+      {
+        formalLineName: "\u8D64\u7FBD\u7DDA",
+        formalLineKey: "\u8D64\u7FBD\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003155", name: "\u8D64\u7FBD", lng: 139.72105, lat: 35.77754 }
+      },
+      {
+        formalLineName: "\u6771\u5317\u7DDA",
+        formalLineKey: "\u6771\u5317\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003155", name: "\u8D64\u7FBD", lng: 139.72105, lat: 35.77754 },
+        to: { id: "002914", name: "\u5927\u5BAE", lng: 139.62356, lat: 35.90653 },
+        note: "\u901A\u79F0\u30FB\u6771\u5317\u672C\u7DDA\u3002N02\u306E\u8DEF\u7DDA\u5358\u4F4D\u540D\u306F\u6771\u5317\u7DDA\u3002"
+      },
+      {
+        formalLineName: "\u5DDD\u8D8A\u7DDA",
+        formalLineKey: "\u5DDD\u8D8A\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "002914", name: "\u5927\u5BAE", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002909", name: "\u5DDD\u8D8A", lng: 139.48307, lat: 35.90705 }
+      }
+    ],
+    blocks: [
+      {
+        id: "jr-saikyo/b1",
+        from: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 },
+        to: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        direction: "outer"
+      },
+      {
+        id: "jr-saikyo/b2",
+        from: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003155", name: "\u8D64\u7FBD", lng: 139.72105, lat: 35.77754 }
+      },
+      {
+        id: "jr-saikyo/b3",
+        from: { id: "003155", name: "\u8D64\u7FBD", lng: 139.72105, lat: 35.77754 },
+        to: { id: "002914", name: "\u5927\u5BAE", lng: 139.62356, lat: 35.90653 }
+      },
+      {
+        id: "jr-saikyo/b4",
+        from: { id: "002914", name: "\u5927\u5BAE", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002909", name: "\u5DDD\u8D8A", lng: 139.48307, lat: 35.90705 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note: "N02 2025\u306B\u57FC\u4EAC\u7DDA\u306E\u8DEF\u7DDA\u5358\u4F4D\u306F\u5B58\u5728\u3057\u306A\u3044\uFF08\u533A\u9593\u30C7\u30FC\u30BF\u306B\u300C\u57FC\u4EAC\u300D\u306E\u6587\u5B57\u5217\u81EA\u4F53\u304C\u7121\u3044\uFF09\u3002\u5408\u6210\u30B8\u30AA\u30E1\u30C8\u30EA\u306F\u4F5C\u3089\u305A\u30014\u3064\u306E\u6B63\u5F0F\u7DDA\u3078\u306E\u5C55\u958B\u3067\u6271\u3046\u3002"
+  },
+  {
+    id: "rinkai",
+    pathId: "rinkai",
+    displayName: "\u308A\u3093\u304B\u3044\u7DDA",
+    ledgerNames: ["\u308A\u3093\u304B\u3044\u7DDA", "\u81E8\u6D77\u526F\u90FD\u5FC3\u7DDA"],
+    operator: "\u6771\u4EAC\u81E8\u6D77\u9AD8\u901F\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u81E8\u6D77\u526F\u90FD\u5FC3\u7DDA",
+        formalLineKey: "\u81E8\u6D77\u526F\u90FD\u5FC3\u7DDA|\u6771\u4EAC\u81E8\u6D77\u9AD8\u901F\u9244\u9053",
+        from: { id: "003997", name: "\u65B0\u6728\u5834", lng: 139.82668, lat: 35.64587 },
+        to: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 }
+      }
+    ],
+    blocks: [
+      {
+        id: "rinkai/b1",
+        from: { id: "003997", name: "\u65B0\u6728\u5834", lng: 139.82668, lat: 35.64587 },
+        to: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 }
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft"
+  },
+  {
+    id: "yamanote",
+    pathId: "yamanote",
+    displayName: "\u5C71\u624B\u7DDA",
+    ledgerNames: ["\u5C71\u624B\u7DDA"],
+    operator: "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+    segments: [
+      {
+        formalLineName: "\u5C71\u624B\u7DDA",
+        formalLineKey: "\u5C71\u624B\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "004095", name: "\u54C1\u5DDD", lng: 139.73896, lat: 35.62851 },
+        to: { id: "003335", name: "\u7530\u7AEF", lng: 139.76157, lat: 35.73748 },
+        direction: "outer",
+        note: "\u74B0\u72B6\u7DDA\u306E\u5916\u56DE\u308A\u5074\uFF08\u54C1\u5DDD\u2192\u5927\u5D0E\u2192\u6E0B\u8C37\u2192\u65B0\u5BBF\u2192\u6C60\u888B\u2192\u7530\u7AEF\uFF09\u3002\u7530\u7AEF\u306E\u30B0\u30EB\u30FC\u30D7\u30B3\u30FC\u30C9003335\u306FN02\u306E\uFF08\u7530\u7AEF, \u5C71\u624B\u7DDA\uFF09\u884C\u3067\u78BA\u8A8D\u6E08\u307F\u3002"
+      },
+      {
+        formalLineName: "\u6771\u5317\u7DDA",
+        formalLineKey: "\u6771\u5317\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003335", name: "\u7530\u7AEF", lng: 139.76157, lat: 35.73748 },
+        to: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        direction: "outer",
+        note: "\u901A\u79F0\u30FB\u6771\u5317\u672C\u7DDA\u3002N02\u306E\u8DEF\u7DDA\u5358\u4F4D\u540D\u306F\u6771\u5317\u7DDA\u3002"
+      },
+      {
+        formalLineName: "\u6771\u6D77\u9053\u7DDA",
+        formalLineKey: "\u6771\u6D77\u9053\u7DDA|\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004095", name: "\u54C1\u5DDD", lng: 139.73896, lat: 35.62851 },
+        direction: "outer"
+      }
+    ],
+    blocks: [
+      {
+        id: "yamanote/b1",
+        from: { id: "004095", name: "\u54C1\u5DDD", lng: 139.73896, lat: 35.62851 },
+        to: { id: "003922", name: "\u6E0B\u8C37", lng: 139.70165, lat: 35.65898 },
+        direction: "outer",
+        stations: [
+          { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 }
+        ]
+      },
+      {
+        id: "yamanote/b2",
+        from: { id: "003922", name: "\u6E0B\u8C37", lng: 139.70165, lat: 35.65898 },
+        to: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+        direction: "outer"
+      },
+      {
+        id: "yamanote/b3",
+        from: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        direction: "outer"
+      },
+      {
+        id: "yamanote/b4",
+        from: { id: "003390", name: "\u6C60\u888B", lng: 139.71108, lat: 35.72981 },
+        to: { id: "003335", name: "\u7530\u7AEF", lng: 139.76157, lat: 35.73748 },
+        direction: "outer"
+      },
+      {
+        id: "yamanote/b5",
+        from: { id: "003335", name: "\u7530\u7AEF", lng: 139.76157, lat: 35.73748 },
+        to: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        direction: "outer"
+      },
+      {
+        id: "yamanote/b6",
+        from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+        to: { id: "004095", name: "\u54C1\u5DDD", lng: 139.73896, lat: 35.62851 },
+        direction: "outer"
+      }
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note: "\u74B0\u72B6\u7DDA\u306E\u305F\u30813\u533A\u9593\u3067\u4E00\u5468\u3092\u8868\u3059\uFF08\u54C1\u5DDD\u2192\u7530\u7AEF\u2192\u6771\u4EAC\u2192\u54C1\u5DDD\u3001\u5916\u56DE\u308A\uFF09\u3002\u79FB\u884C\u3057\u305F\u4E57\u8ECA\uFF08\u5927\u5D0E\u2192\u76EE\u9ED2\uFF09\u306F\u5916\u56DE\u308A\u306E\u89B3\u6E2C\u9806\u3067\u3001\u7AEF\u70B9\u306F\u305D\u306E\u307E\u307E\u4F7F\u3048\u308B\u3002"
+  }
+];
+function serviceById(id) {
+  return SERVICE_MASTER.find((entry) => entry.id === id);
+}
+function stationRefById(stationId) {
+  for (const entry of SERVICE_MASTER) {
+    for (const segment of entry.segments) {
+      if (segment.from.id === stationId)
+        return segment.from;
+      if (segment.to.id === stationId)
+        return segment.to;
+    }
+    for (const block of entry.blocks) {
+      if (block.from.id === stationId)
+        return block.from;
+      if (block.to.id === stationId)
+        return block.to;
+      for (const station of block.stations ?? []) {
+        if (station.id === stationId)
+          return station;
+      }
+    }
+  }
+  for (const ride of Object.values(MIGRATED_RIDES)) {
+    if (ride.from?.id === stationId)
+      return ride.from;
+    if (ride.to?.id === stationId)
+      return ride.to;
+  }
+  return;
+}
+function normalizeParenthesisWidth(name) {
+  return name.trim().replace(/\(/g, "\uFF08").replace(/\)/g, "\uFF09").replace(/[ \u3000]+\uFF08/g, "\uFF08").replace(/\uFF09[ \u3000]+/g, "\uFF09");
+}
+function normalizeParentheses(name) {
+  return normalizeParenthesisWidth(name).replace(/\uFF08[ \u3000]+/g, "\uFF08").replace(/[ \u3000]+\uFF09/g, "\uFF09");
+}
+function bareLedgerName(name) {
+  return name.trim().replace(/^(?:JR|\uFF2A\uFF32)/, "");
+}
+function isRedundantQualifierFor(content, candidate) {
+  const q = content.trim();
+  if (!q)
+    return false;
+  const names = [candidate.displayName, ...candidate.ledgerNames];
+  if (names.some((n) => bareLedgerName(n) === bareLedgerName(q))) {
+    return true;
+  }
+  const company = q.replace(/^(?:JR|\uFF2A\uFF32)/, "");
+  if (!company)
+    return false;
+  return candidate.operator.startsWith(company) || company.startsWith(candidate.operator);
+}
+function canonicalLedgerName(name) {
+  const unified = normalizeParentheses(name).replace(/^(?:JR|\uFF2A\uFF32)/, "");
+  const m = unified.match(/\uFF08([^\uFF09]*)\uFF09$/);
+  if (!m)
+    return unified;
+  const outer = unified.slice(0, m.index);
+  const candidate = SERVICE_MASTER.find((entry) => [entry.displayName, ...entry.ledgerNames].some((n) => bareLedgerName(n) === bareLedgerName(outer)));
+  if (candidate && isRedundantQualifierFor(m[1], candidate)) {
+    return outer;
+  }
+  return unified;
+}
+var HISTORICAL_JR_OPERATOR = "\u6771\u65E5\u672C\u65C5\u5BA2\u9244\u9053";
+var HISTORICAL_SERVICE_ALIASES = [
+  { id: "jr-musashino", ledgerNames: ["JR\u6B66\u8535\u91CE\u7DDA"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "hokuso", ledgerNames: ["\u5317\u7DCF\u7DDA"], operator: "\u5317\u7DCF\u9244\u9053" },
+  { id: "jr-chuo-rapid", ledgerNames: ["JR\u4E2D\u592E\u7DDA\uFF08\u5FEB\u901F\uFF09", "JR\u4E2D\u592E\u7DDA"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "jr-sobu-rapid", ledgerNames: ["JR\u7DCF\u6B66\u5FEB\u901F\u7DDA"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "jr-sobu-local", ledgerNames: ["JR\u7DCF\u6B66\u672C\u7DDA"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "keio", ledgerNames: ["\u4EAC\u738B\u7DDA"], operator: "\u4EAC\u738B\u96FB\u9244" },
+  { id: "jr-saikyo", ledgerNames: ["JR\u57FC\u4EAC\u7DDA"], operator: HISTORICAL_JR_OPERATOR },
+  { id: "rinkai", ledgerNames: ["\u308A\u3093\u304B\u3044\u7DDA", "\u81E8\u6D77\u526F\u90FD\u5FC3\u7DDA"], operator: "\u6771\u4EAC\u81E8\u6D77\u9AD8\u901F\u9244\u9053" },
+  { id: "yamanote", ledgerNames: ["\u5C71\u624B\u7DDA"], operator: HISTORICAL_JR_OPERATOR }
+];
+function legacyCanonicalLedgerName(name) {
+  return name.trim().replace(/\uFF08[^\uFF09]*\uFF09$/, "").replace(/^(?:JR|\uFF2A\uFF32)/, "");
+}
+function legacyServiceIdByLedgerName(ledgerName) {
+  const name = ledgerName.trim();
+  const exact = HISTORICAL_SERVICE_ALIASES.find((entry) => entry.ledgerNames.includes(name));
+  if (exact)
+    return exact.id;
+  const stripped = name.replace(/\uFF08[^\uFF09]*\uFF09$/, "");
+  if (stripped !== name) {
+    const byStripped = HISTORICAL_SERVICE_ALIASES.find((entry) => entry.ledgerNames.includes(stripped));
+    if (byStripped)
+      return byStripped.id;
+  }
+  const canonical = legacyCanonicalLedgerName(name);
+  return HISTORICAL_SERVICE_ALIASES.find((entry) => entry.ledgerNames.some((ledgerName) => legacyCanonicalLedgerName(ledgerName) === canonical))?.id;
+}
+function round4CanonicalLedgerName(name) {
+  const unified = bareLedgerName(normalizeParenthesisWidth(name));
+  const match = unified.match(/\uFF08([^\uFF09]*)\uFF09$/);
+  if (!match)
+    return unified;
+  const qualifier = match[1].trim();
+  const company = bareLedgerName(qualifier);
+  const knownQualifier = HISTORICAL_SERVICE_ALIASES.some((entry) => entry.ledgerNames.some((alias) => bareLedgerName(alias) === company) || company && (entry.operator.startsWith(company) || company.startsWith(entry.operator)));
+  return knownQualifier ? unified.slice(0, match.index) : unified;
+}
+function round4ServiceIdByLedgerName(ledgerName) {
+  const name = normalizeParenthesisWidth(ledgerName);
+  const exact = HISTORICAL_SERVICE_ALIASES.find((entry) => entry.ledgerNames.includes(name));
+  if (exact)
+    return exact.id;
+  const canonical = round4CanonicalLedgerName(name);
+  return HISTORICAL_SERVICE_ALIASES.find((entry) => entry.ledgerNames.some((alias) => round4CanonicalLedgerName(alias) === canonical))?.id;
+}
+function serviceByLedgerName(ledgerName) {
+  const name = normalizeParentheses(ledgerName);
+  const exact = SERVICE_MASTER.find((entry) => entry.ledgerNames.includes(name));
+  if (exact)
+    return exact;
+  const canonical = canonicalLedgerName(name);
+  return SERVICE_MASTER.find((entry) => entry.ledgerNames.some((ledgerName) => canonicalLedgerName(ledgerName) === canonical));
+}
+var SERVICE_MATCH_VERSION = "3";
+function resolveRiddenService(row) {
+  if (row.serviceId == null) {
+    if (row.serviceLinkSource === "explicit") {
+      return { service: undefined, needsReview: false };
+    }
+    return { service: serviceByLedgerName(row.name), needsReview: false };
+  }
+  const saved = serviceById(row.serviceId);
+  if (saved && (row.serviceLinkSource === "explicit" || serviceByLedgerName(row.name)?.id === saved.id)) {
+    return { service: saved, needsReview: false };
+  }
+  const historicalAutoMatchVersions = [];
+  if (row.serviceLinkSource !== "explicit") {
+    if ((!row.serviceMatchVersion || row.serviceMatchVersion === "1") && legacyServiceIdByLedgerName(row.name) === row.serviceId) {
+      historicalAutoMatchVersions.push("1");
+    }
+    if ((!row.serviceMatchVersion || row.serviceMatchVersion === "2") && round4ServiceIdByLedgerName(row.name) === row.serviceId) {
+      historicalAutoMatchVersions.push("2");
+    }
+  }
+  return { service: undefined, needsReview: true, historicalAutoMatchVersions };
+}
+function usableRiddenService(row) {
+  return row.serviceId ? resolveRiddenService(row).service : undefined;
+}
+function isExplicitlyUnlinked(row) {
+  return row.serviceId == null && row.serviceLinkSource === "explicit";
+}
+function serviceStationIds(serviceId) {
+  const ids = new Set;
+  const service = serviceById(serviceId);
+  if (service) {
+    for (const segment of service.segments) {
+      ids.add(segment.from.id);
+      ids.add(segment.to.id);
+    }
+    for (const block of service.blocks) {
+      ids.add(block.from.id);
+      ids.add(block.to.id);
+      for (const station of block.stations ?? [])
+        ids.add(station.id);
+    }
+  }
+  for (const ride of Object.values(MIGRATED_RIDES)) {
+    if (ride.serviceId !== serviceId)
+      continue;
+    if (ride.from)
+      ids.add(ride.from.id);
+    if (ride.to)
+      ids.add(ride.to.id);
+  }
+  return ids;
+}
+function sectionEndpointsKnownToService(serviceId, fromStationId, toStationId) {
+  const known = serviceStationIds(serviceId);
+  return known.has(fromStationId) && known.has(toStationId);
+}
+function sectionRoute(service, fromStationId, toStationId, direction) {
+  const loop = serviceIsLoop(service.id);
+  const distinctKeys = [...new Set(service.segments.map((s) => s.formalLineKey))];
+  if (!loop && distinctKeys.length === 1)
+    return distinctKeys;
+  if (loop && (!direction || distinctKeys.length === 1))
+    return null;
+  const boundaries = serviceBoundaryStations(service.id);
+  const chainLength = loop ? boundaries.length - 1 : boundaries.length;
+  const position = new Map;
+  for (let i = 0;i < chainLength; i++) {
+    const id = boundaries[i].id;
+    if (!position.has(id))
+      position.set(id, i);
+  }
+  const fromPos = position.get(fromStationId);
+  const toPos = position.get(toStationId);
+  if (fromPos == null || toPos == null || fromPos === toPos)
+    return null;
+  const reverse = loop ? direction === "inner" : toPos < fromPos;
+  const [start, end] = reverse ? [toPos, fromPos] : [fromPos, toPos];
+  const forward = (a, b) => loop ? (b - a + chainLength) % chainLength : b - a;
+  const route = [];
+  const steps = forward(start, end);
+  for (let step = 0;step < steps; step++) {
+    const blockStart = (start + step) % chainLength;
+    const blockEnd = loop ? (blockStart + 1) % chainLength : blockStart + 1;
+    const covering = new Set;
+    for (const segment of service.segments) {
+      const segFrom = position.get(segment.from.id);
+      const segTo = position.get(segment.to.id);
+      if (segFrom == null || segTo == null)
+        continue;
+      const span = forward(segFrom, segTo);
+      const offset = forward(segFrom, blockStart);
+      if (offset >= 0 && offset < span && forward(segFrom, blockEnd) === offset + 1) {
+        covering.add(segment.formalLineKey);
+      }
+    }
+    if (covering.size !== 1)
+      return null;
+    const key = [...covering][0];
+    if (route.at(-1) !== key) {
+      if (route.length > 0)
+        route.push(boundaries[blockStart].id);
+      route.push(key);
+    }
+  }
+  return reverse ? route.reverse() : route;
+}
+function sectionRouteAmbiguous(serviceId, fromStationId, toStationId, direction = null) {
+  const service = serviceById(serviceId);
+  if (!service || fromStationId === toStationId)
+    return true;
+  if (serviceIsLoop(serviceId) && !direction)
+    return true;
+  const own = sectionRoute(service, fromStationId, toStationId, direction);
+  for (const other of SERVICE_MASTER) {
+    if (other.id === serviceId)
+      continue;
+    if (!sectionEndpointsKnownToService(other.id, fromStationId, toStationId)) {
+      continue;
+    }
+    const rival = sectionRoute(other, fromStationId, toStationId, direction);
+    if (!own || !rival || own.length !== rival.length || own.some((part, index) => part !== rival[index])) {
+      return true;
+    }
+  }
+  return false;
+}
+function recordedSectionFitsService(serviceId, section) {
+  const { fromStationId, toStationId, direction, blockId, recordedServiceId } = section;
+  if (fromStationId === toStationId || !sectionEndpointsKnownToService(serviceId, fromStationId, toStationId)) {
+    return false;
+  }
+  if (blockId != null) {
+    const block = blockById(serviceId, blockId);
+    return block != null && (block.from.id === fromStationId && block.to.id === toStationId || block.from.id === toStationId && block.to.id === fromStationId);
+  }
+  return recordedServiceId === serviceId || !sectionRouteAmbiguous(serviceId, fromStationId, toStationId, direction);
+}
+function isRiddenServiceLinkReviewable(row) {
+  if (resolveRiddenService(row).needsReview)
+    return true;
+  return row.serviceId == null && row.serviceLinkSource === "explicit";
+}
+function blocksForService(serviceId) {
+  return serviceById(serviceId)?.blocks ?? [];
+}
+function blockById(serviceId, blockId) {
+  return blocksForService(serviceId).find((block) => block.id === blockId);
+}
+function serviceBoundaryStations(serviceId) {
+  const blocks = blocksForService(serviceId);
+  if (blocks.length === 0)
+    return [];
+  const stations = [blocks[0].from];
+  for (const block of blocks)
+    stations.push(block.to);
+  return stations;
+}
+function serviceOrderedStations(serviceId) {
+  const blocks = blocksForService(serviceId);
+  if (blocks.length === 0)
+    return [];
+  const stations = [];
+  const push = (station) => {
+    if (stations[stations.length - 1]?.id !== station.id) {
+      stations.push(station);
+    }
+  };
+  for (const block of blocks) {
+    push(block.from);
+    for (const station of block.stations ?? [])
+      push(station);
+    push(block.to);
+  }
+  return stations;
+}
+function serviceIsLoop(serviceId) {
+  const boundaries = serviceBoundaryStations(serviceId);
+  return boundaries.length > 1 && boundaries[0].id === boundaries[boundaries.length - 1].id;
+}
+function validateSectionEndpoints(serviceId, fromStationId, toStationId, direction) {
+  const service = serviceById(serviceId);
+  if (!service)
+    return `unknown service "${serviceId}"`;
+  if (fromStationId === toStationId) {
+    return "a section needs two different stations";
+  }
+  const ordered = serviceOrderedStations(serviceId);
+  const fromIndex = ordered.findIndex((s) => s.id === fromStationId);
+  const toIndex = ordered.findIndex((s) => s.id === toStationId);
+  if (fromIndex < 0) {
+    return `"${fromStationId}" is not a station of ${service.displayName}`;
+  }
+  if (toIndex < 0) {
+    return `"${toStationId}" is not a station of ${service.displayName}`;
+  }
+  if (serviceIsLoop(serviceId)) {
+    if (!direction) {
+      return `${service.displayName} is a loop: a section needs a direction (inner/outer)`;
+    }
+    return null;
+  }
+  return null;
+}
+function serviceFullPathSnapshot(serviceId) {
+  const service = serviceById(serviceId);
+  if (!service)
+    return null;
+  return {
+    pathId: service.pathId,
+    masterVersion: SERVICE_MASTER_VERSION,
+    segments: service.segments.map((segment) => ({
+      formalLineKey: segment.formalLineKey,
+      from: segment.from,
+      to: segment.to,
+      ...segment.direction ? { direction: segment.direction } : {},
+      ...segment.approximate ? { approximate: true } : {}
+    }))
+  };
+}
+var MIGRATED_MASTER_VERSION = "2026-11-24";
+function isKnownMasterVersion(version) {
+  const v = version.trim();
+  return v === SERVICE_MASTER_VERSION || v === MIGRATED_MASTER_VERSION;
+}
+var MIGRATED_RIDES = {
+  "JR\u6B66\u8535\u91CE\u7DDA": {
+    serviceId: "jr-musashino",
+    rideState: "unknown",
+    from: null,
+    to: null,
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "\u5317\u7DCF\u7DDA": {
+    serviceId: "hokuso",
+    rideState: "unknown",
+    from: null,
+    to: null,
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "JR\u4E2D\u592E\u7DDA\uFF08\u5FEB\u901F\uFF09": {
+    serviceId: "jr-chuo-rapid",
+    rideState: "partial",
+    from: { id: "003606", name: "\u56FD\u5206\u5BFA", lng: 139.48013, lat: 35.70045 },
+    to: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "JR\u7DCF\u6B66\u5FEB\u901F\u7DDA": {
+    serviceId: "jr-sobu-rapid",
+    rideState: "partial",
+    from: { id: "003766", name: "\u6771\u4EAC", lng: 139.76675, lat: 35.68128 },
+    to: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "JR\u7DCF\u6B66\u672C\u7DDA": {
+    serviceId: "jr-sobu-local",
+    rideState: "partial",
+    from: { id: "003531", name: "\u4F50\u5009", lng: 140.22675, lat: 35.70974 },
+    to: { id: "004173", name: "\u5343\u8449", lng: 140.1136, lat: 35.61275 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "\u4EAC\u738B\u7DDA": {
+    serviceId: "keio",
+    rideState: "partial",
+    from: { id: "003821", name: "\u5E9C\u4E2D", lng: 139.4801, lat: 35.67219 },
+    to: { id: "003971", name: "\u8056\u8E5F\u685C\u30F6\u4E18", lng: 139.44687, lat: 35.65079 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "JR\u57FC\u4EAC\u7DDA": {
+    serviceId: "jr-saikyo",
+    rideState: "partial",
+    from: { id: "003700", name: "\u65B0\u5BBF", lng: 139.69993, lat: 35.6898 },
+    to: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "\u308A\u3093\u304B\u3044\u7DDA": {
+    serviceId: "rinkai",
+    rideState: "partial",
+    from: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 },
+    to: { id: "004182", name: "\u54C1\u5DDD\u30B7\u30FC\u30B5\u30A4\u30C9", lng: 139.7498, lat: 35.60979 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  },
+  "\u5C71\u624B\u7DDA": {
+    serviceId: "yamanote",
+    rideState: "partial",
+    from: { id: "004135", name: "\u5927\u5D0E", lng: 139.72807, lat: 35.61985 },
+    to: { id: "004072", name: "\u76EE\u9ED2", lng: 139.71568, lat: 35.63272 },
+    masterVersion: MIGRATED_MASTER_VERSION
+  }
+};
 
 // ../node_modules/drizzle-orm/sqlite-core/foreign-keys.js
 class ForeignKeyBuilder {
@@ -5580,6 +6378,49 @@ var sqliteTable = (name, columns, extraConfig) => {
   return sqliteTableBase(name, columns, extraConfig);
 };
 
+// ../node_modules/drizzle-orm/sqlite-core/indexes.js
+class IndexBuilderOn {
+  constructor(name, unique) {
+    this.name = name;
+    this.unique = unique;
+  }
+  static [entityKind] = "SQLiteIndexBuilderOn";
+  on(...columns) {
+    return new IndexBuilder(this.name, columns, this.unique);
+  }
+}
+
+class IndexBuilder {
+  static [entityKind] = "SQLiteIndexBuilder";
+  config;
+  constructor(name, columns, unique) {
+    this.config = {
+      name,
+      columns,
+      unique,
+      where: undefined
+    };
+  }
+  where(condition) {
+    this.config.where = condition;
+    return this;
+  }
+  build(table) {
+    return new Index(this.config, table);
+  }
+}
+
+class Index {
+  static [entityKind] = "SQLiteIndex";
+  config;
+  constructor(config, table) {
+    this.config = { ...config, table };
+  }
+}
+function uniqueIndex(name) {
+  return new IndexBuilderOn(name, true);
+}
+
 // src/schema.ts
 var spots = sqliteTable("spots", {
   id: integer2("id").primaryKey({ autoIncrement: true }),
@@ -5613,8 +6454,33 @@ var riddenLines = sqliteTable("ridden_lines", {
   firstRiddenOn: text("first_ridden_on").notNull(),
   note: text("note"),
   context: text("context"),
+  serviceId: text("service_id"),
+  recordedServiceId: text("recorded_service_id"),
+  serviceLinkSource: text("service_link_source", { enum: ["auto", "explicit"] }),
+  serviceMatchVersion: text("service_match_version"),
+  rideState: text("ride_state").notNull().default("unknown"),
+  fromStationId: text("from_station_id"),
+  fromStationName: text("from_station_name"),
+  toStationId: text("to_station_id"),
+  toStationName: text("to_station_name"),
+  masterVersion: text("master_version"),
+  pathSnapshot: text("path_snapshot"),
   createdAt: integer2("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
+var riddenLineSections = sqliteTable("ridden_line_sections", {
+  id: integer2("id").primaryKey({ autoIncrement: true }),
+  riddenLineId: integer2("ridden_line_id").notNull(),
+  fromStationId: text("from_station_id").notNull(),
+  fromStationName: text("from_station_name"),
+  toStationId: text("to_station_id").notNull(),
+  toStationName: text("to_station_name"),
+  direction: text("direction"),
+  blockId: text("block_id"),
+  recordedServiceId: text("recorded_service_id"),
+  createdAt: integer2("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+}, (t) => [
+  uniqueIndex("ridden_line_sections_unique_section").on(t.riddenLineId, t.fromStationId, t.toStationId, sql`COALESCE(${t.direction}, '')`)
+]);
 var settings = sqliteTable("settings", {
   id: integer2("id").primaryKey(),
   radiusM: integer2("radius_m").notNull().default(500),
@@ -5626,6 +6492,177 @@ var settings = sqliteTable("settings", {
 });
 
 // src/actions.ts
+var rideStateSchema = _enum(["unknown", "partial", "full"]);
+var riddenSectionSchema = object({
+  id: number2(),
+  fromStationId: string2(),
+  fromStationName: string2().nullable(),
+  toStationId: string2(),
+  toStationName: string2().nullable(),
+  direction: _enum(["inner", "outer"]).nullable(),
+  blockId: string2().nullable(),
+  recordedServiceId: string2().nullable()
+});
+var rideFieldsSchema = object({
+  serviceId: string2().max(100).nullable().optional(),
+  rideState: rideStateSchema.nullable().optional(),
+  fromStationId: string2().max(20).nullable().optional(),
+  fromStationName: string2().max(100).nullable().optional(),
+  toStationId: string2().max(20).nullable().optional(),
+  toStationName: string2().max(100).nullable().optional(),
+  masterVersion: string2().max(50).nullable().optional()
+});
+function resolveRideFields(name, supplied) {
+  const { service } = resolveRiddenService({
+    name,
+    serviceId: supplied.serviceId
+  });
+  if (supplied.serviceId != null && !service) {
+    if (!serviceById(supplied.serviceId)) {
+      throw new Error(`resolveRideFields: unknown serviceId "${supplied.serviceId}" for "${name}"`);
+    }
+    throw new Error(`resolveRideFields: serviceId "${supplied.serviceId}" does not match "${name}"`);
+  }
+  const link = {
+    serviceId: service?.id ?? null,
+    serviceLinkSource: supplied.serviceId != null ? "explicit" : "auto",
+    serviceMatchVersion: supplied.serviceId != null ? null : SERVICE_MATCH_VERSION
+  };
+  const rideState = supplied.rideState ?? (supplied.fromStationId?.trim() && supplied.toStationId?.trim() ? "partial" : "unknown");
+  const masterVersion = supplied.masterVersion != null ? supplied.masterVersion.trim() : service ? SERVICE_MASTER_VERSION : null;
+  if (rideState === "unknown") {
+    return {
+      ...link,
+      recordedServiceId: null,
+      rideState: "unknown",
+      fromStationId: null,
+      fromStationName: null,
+      toStationId: null,
+      toStationName: null,
+      masterVersion,
+      pathSnapshot: null
+    };
+  }
+  if (rideState === "partial") {
+    if (!service) {
+      throw new Error(`resolveRideFields: partial ride for "${name}" needs a known service`);
+    }
+    if (!supplied.fromStationId?.trim() || !supplied.toStationId?.trim()) {
+      throw new Error(`resolveRideFields: partial ride for "${name}" needs both endpoint station IDs`);
+    }
+    const fromStationId = supplied.fromStationId.trim();
+    const toStationId = supplied.toStationId.trim();
+    if (!isN02StationId(fromStationId) || !isN02StationId(toStationId)) {
+      throw new Error(`resolveRideFields: partial ride for "${name}" needs N02 station IDs (six-digit group codes)`);
+    }
+    if (fromStationId === toStationId) {
+      throw new Error(`resolveRideFields: partial ride for "${name}" needs two different stations`);
+    }
+    return {
+      ...link,
+      recordedServiceId: service.id,
+      rideState: "partial",
+      fromStationId,
+      fromStationName: supplied.fromStationName?.trim() || null,
+      toStationId,
+      toStationName: supplied.toStationName?.trim() || null,
+      masterVersion,
+      pathSnapshot: null
+    };
+  }
+  if (!service) {
+    throw new Error(`resolveRideFields: full ride for "${name}" needs a known service`);
+  }
+  if (!masterVersion || !isKnownMasterVersion(masterVersion)) {
+    throw new Error(`resolveRideFields: full ride for "${name}" needs a known master version (got ${JSON.stringify(masterVersion)})`);
+  }
+  const snapshot = masterVersion === SERVICE_MASTER_VERSION ? serviceFullPathSnapshot(service.id) : null;
+  return {
+    ...link,
+    recordedServiceId: service.id,
+    rideState: "full",
+    fromStationId: null,
+    fromStationName: null,
+    toStationId: null,
+    toStationName: null,
+    masterVersion,
+    pathSnapshot: snapshot ? JSON.stringify(snapshot) : null
+  };
+}
+function riddenServiceBackfill(name) {
+  const link = resolveRideFields(name, {});
+  if (!link.serviceId)
+    return;
+  return {
+    serviceId: link.serviceId,
+    serviceLinkSource: link.serviceLinkSource,
+    serviceMatchVersion: link.serviceMatchVersion,
+    masterVersion: sql`coalesce(${riddenLines.masterVersion}, ${link.masterVersion})`
+  };
+}
+function isUniqueConstraintError(error) {
+  let current = error;
+  for (let depth = 0;depth < 8 && current != null; depth++) {
+    if (current instanceof Error && current.message.includes("UNIQUE constraint failed")) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+function riddenLinkFitProblem(line, sections, targetServiceId) {
+  if (targetServiceId == null)
+    return null;
+  const target = serviceById(targetServiceId);
+  if (!target)
+    return null;
+  const state = normalizeRideState(line.rideState);
+  if (state === "full") {
+    let snapshotPathId = null;
+    if (line.pathSnapshot) {
+      try {
+        const parsed = JSON.parse(line.pathSnapshot);
+        if (typeof parsed?.pathId === "string")
+          snapshotPathId = parsed.pathId;
+      } catch {}
+    }
+    const fits = snapshotPathId ? snapshotPathId === target.pathId : (line.recordedServiceId ?? line.serviceId) === target.id;
+    return fits ? null : `the recorded full ride's path cannot be attributed to ${target.displayName}`;
+  }
+  const pairs = sections.map((section) => ({
+    ...section,
+    direction: normalizeSectionDirection(section.direction)
+  }));
+  if (state === "partial" && line.fromStationId && line.toStationId) {
+    pairs.unshift({
+      fromStationId: line.fromStationId,
+      toStationId: line.toStationId,
+      direction: null,
+      blockId: null,
+      recordedServiceId: line.recordedServiceId
+    });
+  }
+  for (const section of pairs) {
+    if (recordedSectionFitsService(target.id, section))
+      continue;
+    if (!sectionEndpointsKnownToService(target.id, section.fromStationId, section.toStationId)) {
+      return `the recorded section's endpoints are not known stations of ${target.displayName}`;
+    }
+    if (section.blockId != null) {
+      return `the recorded section's block ${section.blockId} does not fit ${target.displayName}`;
+    }
+    return `the recorded section's route cannot be determined for ${target.displayName} from its endpoints and direction`;
+  }
+  return null;
+}
+function normalizeRideState(raw) {
+  if (raw === "partial" || raw === "full")
+    return raw;
+  return "unknown";
+}
+function normalizeSectionDirection(raw) {
+  return raw === "inner" || raw === "outer" ? raw : null;
+}
 var spotSchema = object({
   id: number2(),
   name: string2(),
@@ -5936,6 +6973,17 @@ var Actions = {
         })),
         total
       };
+    }
+  }),
+  getSpot: defineAction({
+    description: "Returns one spot by id (null when it does not exist). The spot list's pinned map plots only the lean point payload, so a tap on a plotted spot resolves its full row through here before the detail opens \u2014 the detail's edit form must never be seeded from the point payload, whose memo is truncated.",
+    request: object({ id: number2().int() }),
+    response: object({ spot: spotSchema.nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const rows = await db.select().from(spots).where(eq(spots.id, args.id));
+      const row = rows[0];
+      return { spot: row ? toSpot(row) : null };
     }
   }),
   listWatchSpots: defineAction({
@@ -6628,7 +7676,7 @@ var Actions = {
     }
   }),
   listRiddenLines: defineAction({
-    description: "Lists the ridden-railway-line ledger (\u8DEF\u7DDA the user rode and got a line-trivia delivery for), oldest first-ride date first. Shown alongside the \u5E02\u533A\u753A\u6751\u30FB\u8DEF\u7DDA as its companion collection.",
+    description: "Lists the ridden-railway-line ledger (\u8DEF\u7DDA the user rode and got a line-trivia delivery for), oldest first-ride date first. Shown alongside the \u5E02\u533A\u753A\u6751\u30FB\u8DEF\u7DDA as its companion collection. Each row also carries its service-master linkage (serviceId, rideState, restored from/to stations) \u2014 stage 1, subtask 1420.",
     request: object({}),
     response: object({
       lines: array(object({
@@ -6636,45 +7684,92 @@ var Actions = {
         name: string2(),
         firstRiddenOn: string2(),
         note: string2().nullable(),
-        context: string2().nullable()
+        context: string2().nullable(),
+        serviceId: string2().nullable(),
+        recordedServiceId: string2().nullable(),
+        serviceLinkSource: _enum(["auto", "explicit"]).nullable(),
+        serviceMatchVersion: string2().nullable(),
+        rideState: rideStateSchema,
+        fromStationId: string2().nullable(),
+        fromStationName: string2().nullable(),
+        toStationId: string2().nullable(),
+        toStationName: string2().nullable(),
+        masterVersion: string2().nullable(),
+        pathSnapshot: string2().nullable(),
+        sections: array(riddenSectionSchema)
       })),
       total: number2()
     }),
     async handler(ctx) {
       const db = ctx.db();
       const rows = await db.select().from(riddenLines).orderBy(asc(riddenLines.firstRiddenOn), asc(riddenLines.name));
+      const sectionRows = rows.length > 0 ? await db.select().from(riddenLineSections).where(inArray(riddenLineSections.riddenLineId, rows.map((r) => r.id))).orderBy(asc(riddenLineSections.id)) : [];
+      const sectionsByLine = new Map;
+      for (const section of sectionRows) {
+        const list = sectionsByLine.get(section.riddenLineId) ?? [];
+        list.push(section);
+        sectionsByLine.set(section.riddenLineId, list);
+      }
       return {
         lines: rows.map((r) => ({
           id: r.id,
           name: r.name,
           firstRiddenOn: r.firstRiddenOn,
           note: r.note,
-          context: r.context
+          context: r.context,
+          serviceId: r.serviceId,
+          recordedServiceId: r.recordedServiceId,
+          serviceLinkSource: r.serviceLinkSource,
+          serviceMatchVersion: r.serviceMatchVersion,
+          rideState: normalizeRideState(r.rideState),
+          fromStationId: r.fromStationId,
+          fromStationName: r.fromStationName,
+          toStationId: r.toStationId,
+          toStationName: r.toStationName,
+          masterVersion: r.masterVersion,
+          pathSnapshot: r.pathSnapshot,
+          sections: (sectionsByLine.get(r.id) ?? []).map((s) => ({
+            id: s.id,
+            fromStationId: s.fromStationId,
+            fromStationName: s.fromStationName,
+            toStationId: s.toStationId,
+            toStationName: s.toStationName,
+            direction: normalizeSectionDirection(s.direction),
+            blockId: s.blockId,
+            recordedServiceId: s.recordedServiceId
+          }))
         })),
         total: rows.length
       };
     }
   }),
   addRiddenLine: defineAction({
-    description: "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet (backfill, never an overwrite).",
+    description: "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet. An explicit serviceId on a new row must match the service named by the entry. The ride fields are validated per state (unknown carries no section, partial needs both endpoint station IDs and a known service, full needs a known service and a master version); by default the row links by name and starts unknown.",
     request: object({
       name: string2().min(1).max(100),
       firstRiddenOn: string2().regex(/^\d{4}-\d{2}-\d{2}$/, "firstRiddenOn must be YYYY-MM-DD"),
       note: string2().max(1000).nullable().optional(),
       context: string2().max(500).nullable().optional()
-    }),
+    }).merge(rideFieldsSchema),
     response: object({ created: boolean2(), id: number2().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db();
       const name = args.name.trim();
       const existing = await db.select({
         id: riddenLines.id,
-        context: riddenLines.context
+        context: riddenLines.context,
+        serviceId: riddenLines.serviceId,
+        serviceLinkSource: riddenLines.serviceLinkSource
       }).from(riddenLines).where(eq(riddenLines.name, name));
       if (existing[0]) {
         const context = args.context?.trim() || null;
         if (context && !existing[0].context) {
           await db.update(riddenLines).set({ context }).where(eq(riddenLines.id, existing[0].id));
+          ctx.invalidateQueries();
+        }
+        const link = existing[0].serviceId || isExplicitlyUnlinked({ name, ...existing[0] }) ? undefined : riddenServiceBackfill(name);
+        if (link) {
+          await db.update(riddenLines).set(link).where(and(eq(riddenLines.id, existing[0].id), isNull(riddenLines.serviceId)));
           ctx.invalidateQueries();
         }
         return { created: false, id: existing[0].id };
@@ -6683,7 +7778,8 @@ var Actions = {
         name,
         firstRiddenOn: args.firstRiddenOn,
         note: args.note?.trim() || null,
-        context: args.context?.trim() || null
+        context: args.context?.trim() || null,
+        ...resolveRideFields(name, args)
       }).returning({ id: riddenLines.id });
       ctx.invalidateQueries();
       return { created: true, id: inserted[0]?.id ?? null };
@@ -6703,8 +7799,51 @@ var Actions = {
       return { ok: true };
     }
   }),
+  confirmRiddenServiceLink: defineAction({
+    description: "Confirms, changes or clears a ridden-lines ledger row's service link. The original recorded service and ride details are kept. The target must fit the full ride's path or every recorded section. Sections without a matching recorded service or block require endpoints and direction that identify the route.",
+    request: object({
+      id: number2().int().positive(),
+      serviceId: string2().max(100).nullable()
+    }),
+    response: object({ ok: literal(true), serviceId: string2().nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const rows = await db.select().from(riddenLines).where(eq(riddenLines.id, args.id));
+      const line = rows[0];
+      if (!line) {
+        throw new Error(`confirmRiddenServiceLink: unknown ridden line ${args.id}`);
+      }
+      if (!isRiddenServiceLinkReviewable(line)) {
+        throw new Error(`confirmRiddenServiceLink: "${line.name}" does not need a link confirmation`);
+      }
+      if (args.serviceId != null && !serviceById(args.serviceId)) {
+        throw new Error(`confirmRiddenServiceLink: unknown service "${args.serviceId}"`);
+      }
+      const sectionRows = await db.select({
+        fromStationId: riddenLineSections.fromStationId,
+        toStationId: riddenLineSections.toStationId,
+        direction: riddenLineSections.direction,
+        blockId: riddenLineSections.blockId,
+        recordedServiceId: riddenLineSections.recordedServiceId
+      }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.id));
+      const fitProblem = riddenLinkFitProblem(line, sectionRows, args.serviceId);
+      if (fitProblem) {
+        throw new Error(`confirmRiddenServiceLink: "${line.name}" cannot be linked there \u2014 ${fitProblem}; the recorded link was left unchanged`);
+      }
+      const updated = await db.update(riddenLines).set({
+        serviceId: args.serviceId,
+        serviceLinkSource: "explicit",
+        serviceMatchVersion: null
+      }).where(and(eq(riddenLines.id, args.id), sql`${riddenLines.serviceId} IS ${line.serviceId}`, sql`${riddenLines.serviceLinkSource} IS ${line.serviceLinkSource}`)).returning({ id: riddenLines.id });
+      if (updated.length === 0) {
+        throw new Error(`confirmRiddenServiceLink: the link for "${line.name}" changed during confirmation`);
+      }
+      ctx.invalidateQueries();
+      return { ok: true, serviceId: args.serviceId };
+    }
+  }),
   importRiddenLines: defineAction({
-    description: "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet.",
+    description: "Bulk-imports the existing line-trivia log (from location-trivia/seen_lines.md) into the ridden-lines table. Idempotent: lines already recorded (same name) are skipped, so re-running never duplicates rows or changes first-ride dates. An entry's trip context is backfilled onto an already-recorded row only when that row has none yet. Fresh rows link to their service and start unknown (a fresh registration never inherits a restored section \u2014 that belongs to the SQL migration); already-recorded rows with no service linkage yet get the service link only, never an overwrite of their ride state or section.",
     request: object({
       entries: array(object({
         name: string2().min(1).max(100),
@@ -6719,11 +7858,22 @@ var Actions = {
       const existing = await db.select({
         id: riddenLines.id,
         name: riddenLines.name,
-        context: riddenLines.context
+        context: riddenLines.context,
+        serviceId: riddenLines.serviceId,
+        serviceLinkSource: riddenLines.serviceLinkSource
       }).from(riddenLines);
-      const seen = new Map(existing.map((r) => [r.name, { id: r.id, hasContext: !!r.context }]));
+      const seen = new Map(existing.map((r) => [
+        r.name,
+        {
+          id: r.id,
+          hasContext: !!r.context,
+          serviceId: r.serviceId,
+          serviceLinkSource: r.serviceLinkSource
+        }
+      ]));
       const fresh = [];
       const contextUpdates = [];
+      const rideUpdates = [];
       let skipped = 0;
       for (const entry of args.entries) {
         const name = entry.name.trim();
@@ -6740,19 +7890,34 @@ var Actions = {
           } else {
             skipped++;
           }
+          if (!known.serviceId && known.serviceLinkSource !== "explicit" && known.id > 0) {
+            const link = riddenServiceBackfill(name);
+            if (link) {
+              rideUpdates.push(db.update(riddenLines).set(link).where(and(eq(riddenLines.id, known.id), isNull(riddenLines.serviceId))));
+              known.serviceId = link.serviceId;
+            }
+          }
           continue;
         }
-        seen.set(name, { id: -1, hasContext: !!entry.context?.trim() });
+        const ride = resolveRideFields(name, {});
+        seen.set(name, {
+          id: -1,
+          hasContext: !!entry.context?.trim(),
+          serviceId: ride.serviceId,
+          serviceLinkSource: ride.serviceLinkSource
+        });
         fresh.push({
           name,
           firstRiddenOn: entry.firstRiddenOn,
           note: entry.note?.trim() || null,
-          context: entry.context?.trim() || null
+          context: entry.context?.trim() || null,
+          ...ride
         });
       }
       const statements = [
         ...fresh.map((row) => db.insert(riddenLines).values(row)),
-        ...contextUpdates
+        ...contextUpdates,
+        ...rideUpdates
       ];
       if (statements.length > 0) {
         const [first, ...rest] = statements;
@@ -6763,12 +7928,149 @@ var Actions = {
       return { inserted: fresh.length, skipped };
     }
   }),
+  addRiddenSection: defineAction({
+    description: "Adds one section to a ridden-lines ledger row \u2014 a block pick from the in-page block list, or a hand-entered section between two stations the service is known to serve (stage 2, subtask 1421; stage 3, subtask 1455: a boundary station, or a station listed on one of the service's blocks \u2014 a mid-block station counts as an endpoint, a station known only from a migrated ride does not). On a non-loop service the pair may run either way (a section is one stretch of the line, travelled in either direction); on a loop service a direction is required (validateSectionEndpoints); a section that is exactly one master block may name it with blockId, so the client can mark the block covered \u2014 the named block must agree with the direction given (review round 2). Adding a section to an unknown row makes it partial (it now pins down a section); a full ride already covers the whole service, so sections cannot be added to it. Adding the same section twice returns the existing row instead of duplicating it \u2014 a unique index on the table (migration 0014) backs the check, so two calls racing each other still land on one row; when the later call names a block and the surviving row has none, the row adopts the block ID so the block stays untickable. A duplicate add also repairs a row left unknown with a section on record (review round 2).",
+    request: object({
+      riddenLineId: number2().int().positive(),
+      fromStationId: string2().max(20),
+      fromStationName: string2().max(100).nullable().optional(),
+      toStationId: string2().max(20),
+      toStationName: string2().max(100).nullable().optional(),
+      direction: _enum(["inner", "outer"]).nullable().optional(),
+      blockId: string2().max(100).nullable().optional()
+    }),
+    response: object({ created: boolean2(), id: number2().nullable() }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const rows = await db.select().from(riddenLines).where(eq(riddenLines.id, args.riddenLineId));
+      const line = rows[0];
+      if (!line) {
+        throw new Error(`addRiddenSection: unknown ridden line ${args.riddenLineId}`);
+      }
+      if (!line.serviceId) {
+        throw new Error(`addRiddenSection: "${line.name}" is not linked to a service yet`);
+      }
+      const service = usableRiddenService(line);
+      if (!service) {
+        throw new Error(`addRiddenSection: service link for "${line.name}" needs confirmation`);
+      }
+      if (normalizeRideState(line.rideState) === "full") {
+        throw new Error(`addRiddenSection: "${line.name}" is a full ride \u2014 it already covers the whole service`);
+      }
+      const fromStationId = args.fromStationId.trim();
+      const toStationId = args.toStationId.trim();
+      const direction = args.direction ?? null;
+      const problem = validateSectionEndpoints(service.id, fromStationId, toStationId, direction);
+      if (problem) {
+        throw new Error(`addRiddenSection: ${problem}`);
+      }
+      const blockId = args.blockId?.trim() || null;
+      if (blockId) {
+        const block = blockById(service.id, blockId);
+        if (!block) {
+          throw new Error(`addRiddenSection: unknown block "${blockId}" for "${line.name}"`);
+        }
+        const endpointsMatch = block.from.id === fromStationId && block.to.id === toStationId || block.from.id === toStationId && block.to.id === fromStationId;
+        if (!endpointsMatch) {
+          throw new Error(`addRiddenSection: block "${blockId}" runs ${block.from.name}\u301C${block.to.name}, not the given section`);
+        }
+        if (block.direction && direction && block.direction !== direction) {
+          throw new Error(`addRiddenSection: block "${blockId}" runs ${block.direction}, not ${direction}`);
+        }
+      }
+      const fromName = args.fromStationName?.trim() || stationRefById(fromStationId)?.name || null;
+      const toName = args.toStationName?.trim() || stationRefById(toStationId)?.name || null;
+      const findDuplicate = async () => {
+        const existing = await db.select().from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.riddenLineId));
+        return existing.find((s) => s.fromStationId === fromStationId && s.toStationId === toStationId && (s.direction ?? null) === direction);
+      };
+      const adoptBlockId = async (existing) => {
+        if (blockId && !existing.blockId) {
+          if (!recordedSectionFitsService(service.id, {
+            ...existing,
+            direction: normalizeSectionDirection(existing.direction)
+          })) {
+            throw new Error(`addRiddenSection: the existing section's recorded route cannot be attributed to ${service.displayName}`);
+          }
+          await db.update(riddenLineSections).set({ blockId }).where(and(eq(riddenLineSections.id, existing.id), isNull(riddenLineSections.blockId)));
+          ctx.invalidateQueries();
+        }
+      };
+      const duplicate = await findDuplicate();
+      const repairRideState = async () => {
+        const [fresh] = await db.select().from(riddenLines).where(eq(riddenLines.id, args.riddenLineId)).limit(1);
+        if (!fresh || normalizeRideState(fresh.rideState) !== "unknown") {
+          return;
+        }
+        const sections = await db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.riddenLineId)).limit(1);
+        if (sections.length > 0) {
+          await db.update(riddenLines).set({ rideState: "partial" }).where(eq(riddenLines.id, args.riddenLineId));
+        }
+      };
+      if (duplicate) {
+        await adoptBlockId(duplicate);
+        await repairRideState();
+        return { created: false, id: duplicate.id };
+      }
+      let insertedId;
+      try {
+        const inserted = await db.insert(riddenLineSections).values({
+          riddenLineId: args.riddenLineId,
+          fromStationId,
+          fromStationName: fromName,
+          toStationId,
+          toStationName: toName,
+          direction,
+          blockId,
+          recordedServiceId: service.id
+        }).returning({ id: riddenLineSections.id });
+        insertedId = inserted[0]?.id ?? null;
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          const winner = await findDuplicate();
+          if (winner) {
+            await adoptBlockId(winner);
+            await repairRideState();
+            return { created: false, id: winner.id };
+          }
+        }
+        throw error;
+      }
+      await repairRideState();
+      ctx.invalidateQueries();
+      return { created: true, id: insertedId };
+    }
+  }),
+  deleteRiddenSection: defineAction({
+    description: "Removes one added section from a ridden-lines ledger row (stage 2, subtask 1421). Removing the row's last section when it has no primary section returns it to unknown \u2014 a ride with no section on record must not claim a partial one.",
+    request: object({ id: number2().int().positive() }),
+    response: okResponse,
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const sections = await db.select().from(riddenLineSections).where(eq(riddenLineSections.id, args.id));
+      const section = sections[0];
+      if (!section)
+        return { ok: true };
+      await db.delete(riddenLineSections).where(eq(riddenLineSections.id, args.id));
+      const remaining = await db.select({ id: riddenLineSections.id }).from(riddenLineSections).where(eq(riddenLineSections.riddenLineId, section.riddenLineId));
+      if (remaining.length === 0) {
+        const lines = await db.select().from(riddenLines).where(eq(riddenLines.id, section.riddenLineId));
+        const line = lines[0];
+        if (line && normalizeRideState(line.rideState) === "partial" && !line.fromStationId && !line.toStationId) {
+          await db.update(riddenLines).set({ rideState: "unknown" }).where(eq(riddenLines.id, line.id));
+        }
+      }
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   deleteRiddenLine: defineAction({
     description: "Removes one railway line from the ridden-lines ledger (for correcting a wrong record).",
     request: object({ id: number2().int().positive() }),
     response: okResponse,
     async handler(ctx, args) {
       const db = ctx.db();
+      await db.delete(riddenLineSections).where(eq(riddenLineSections.riddenLineId, args.id));
       await db.delete(riddenLines).where(eq(riddenLines.id, args.id));
       ctx.invalidateQueries();
       return { ok: true };
@@ -6776,5 +8078,8 @@ var Actions = {
   })
 };
 export {
-  Actions
+  Actions,
+  isUniqueConstraintError,
+  resolveRideFields,
+  riddenLinkFitProblem
 };

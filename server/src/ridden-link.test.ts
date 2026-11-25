@@ -639,3 +639,73 @@ test("a duplicate section registration adopts the later call's block_id (integra
     ]);
   });
 });
+
+test("a duplicate add repairs a row left unknown with a section on record (review round 2, medium)", async () => {
+  await withLedger(async (_, ctx) => {
+    /* The inconsistent state the review reproduced: a section
+       is on record, but the row says unknown (an add that read
+       the row before a delete of the last section landed).
+       A duplicate add returns the existing row — and must now
+       repair the state to partial instead of returning early
+       without touching it. */
+    const before = (await Actions.listRiddenLines.handler(ctx, {})).lines[0];
+    expect(before).toMatchObject({ rideState: "unknown" });
+    expect(before?.sections).toHaveLength(1);
+    const existingId = before?.sections[0]?.id;
+    if (existingId == null) throw new Error("Missing seeded section");
+    const result = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before!.id,
+      fromStationId: "003700",
+      toStationId: "003922",
+      direction: "outer",
+    });
+    expect(result.created).toBe(false);
+    expect(result.id).toBe(existingId);
+    const after = (await Actions.listRiddenLines.handler(ctx, {})).lines[0];
+    expect(after).toMatchObject({ rideState: "partial" });
+    expect(after?.sections).toHaveLength(1);
+  }, undefined, (client) => client.executeMultiple(`
+    INSERT INTO ridden_lines (id, name, first_ridden_on, service_id, service_link_source, ride_state, created_at)
+    VALUES (1, '山手線', '2026-11-24', 'yamanote', 'explicit', 'unknown', 0);
+    INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id, direction, created_at)
+    VALUES (1, '003700', '003922', 'outer', 0);
+  `));
+});
+
+test("a named block must agree with the direction given (review round 2, medium)", async () => {
+  await withLedger(async (_, ctx) => {
+    const yamanote = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "山手線",
+    });
+    if (yamanote.id == null) throw new Error("Missing 山手線 row");
+    /* 新宿→渋谷 inner is a real ride (it runs yamanote/b2
+       end to end), but it cannot be saved AS yamanote/b2:
+       the block runs outer, so naming it would make the
+       toggle and the coverage disagree. The same endpoints
+       the outer way round are that block. */
+    await expect(
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: yamanote.id,
+        fromStationId: "003700",
+        toStationId: "003922",
+        direction: "inner",
+        blockId: "yamanote/b2",
+      }),
+    ).rejects.toThrow(/runs outer, not inner/);
+    const blockFirst = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: yamanote.id,
+      fromStationId: "003700",
+      toStationId: "003922",
+      direction: "outer",
+      blockId: "yamanote/b2",
+    });
+    expect(blockFirst.created).toBe(true);
+    const row = (await Actions.listRiddenLines.handler(ctx, {})).lines.find(
+      (line) => line.name === "山手線",
+    );
+    expect(row?.sections).toEqual([
+      expect.objectContaining({ id: blockFirst.id, blockId: "yamanote/b2" }),
+    ]);
+  });
+});
