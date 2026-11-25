@@ -17,6 +17,7 @@ import {
   computeRiddenLineCoverage,
   coveredBlockIds,
   EdgeCoverage,
+  fullyPaintedLineKeys,
   graphSectionLegs,
   haversineKm,
   parseFullPathSnapshot,
@@ -882,5 +883,114 @@ describe("rides whose route the record cannot pin down (integrated review round 
     /* 船橋→千葉 plus the block's 東京→船橋： the whole
        東京→千葉 range. */
     expect(coverage.perService.get("jr-sobu-rapid")!.riddenKm).toBeGreaterThan(35);
+  });
+});
+
+describe("fullyPaintedLineKeys: the 路線 tab's ghost exclusion (subtask 1456)", () => {
+  const YAMA_KEY = "山手線|東日本旅客鉄道";
+  const TOHOKU_KEY = "東北線|東日本旅客鉄道";
+  const TOKAIDO_KEY = "東海道線|東日本旅客鉄道";
+  const KEIO_KEY = "京王線|京王電鉄";
+  const CHUO_KEY = "中央線|東日本旅客鉄道";
+  const AKABANE_KEY = "赤羽線|東日本旅客鉄道";
+
+  function coverageFor(
+    intervals: ReadonlyMap<string, readonly RideInterval[]>,
+    full: ReadonlySet<string>,
+  ) {
+    const ids = new Set<string>([...intervals.keys(), ...full]);
+    const paths = new Map([...ids].map((id) => [id, servicePath(id)]));
+    return computeLineCoverage(intervals, full, paths, GEOMETRIES, 597);
+  }
+
+  test("a partially ridden Yamanote keeps its whole route as the ghost underlay", () => {
+    /* The bug: any leg on the 山手線 key excluded the whole key
+       from the ghost, so after the 新宿〜大崎 ride the unridden
+       arcs of the loop showed nothing and the loop read as
+       gapped. A partial ride paints 8.58 of the key's 20.8 km. */
+    const coverage = coverageFor(
+      new Map([
+        [
+          "yamanote",
+          [
+            {
+              serviceId: "yamanote",
+              from: S.新宿,
+              to: S.大崎,
+              direction: "inner" as const,
+            },
+          ],
+        ],
+      ]),
+      new Set(),
+    );
+    expect(coverage.perKeyKm.get(YAMA_KEY)).toBeCloseTo(8.58, 1);
+    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(YAMA_KEY)).toBe(
+      false,
+    );
+  });
+
+  test("a full Yamanote lap leaves the ghost on the 山手線 key only", () => {
+    const coverage = coverageFor(new Map(), new Set(["yamanote"]));
+    const fully = fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM);
+    expect(fully.has(YAMA_KEY)).toBe(true);
+    /* The same lap paints only short stretches of the 東北線 /
+       東海道線 keys the loop also runs on — most of those lines
+       is unridden, so their ghosts stay. */
+    expect(fully.has(TOHOKU_KEY)).toBe(false);
+    expect(fully.has(TOKAIDO_KEY)).toBe(false);
+  });
+
+  test("a full Saikyo ride does not kill the Yamanote ghost", () => {
+    /* 埼京線 shares the 山手線 key but runs only part of it
+       (大崎〜池袋, 13.18 of 20.8 km): completing the service
+       must not exclude the key — the per-service `complete`
+       flag would have done exactly that. */
+    const coverage = coverageFor(new Map(), new Set(["jr-saikyo"]));
+    expect(coverage.perKeyKm.get(YAMA_KEY)).toBeCloseTo(13.18, 1);
+    const fully = fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM);
+    expect(fully.has(YAMA_KEY)).toBe(false);
+    /* The same ride DOES complete the 赤羽線 key end to end
+       (池袋〜赤羽 is the service's own stretch, and its union
+       spans 0.904 of the key — above the 0.85 span gate), so
+       that key leaves the ghost. */
+    expect(fully.has(AKABANE_KEY)).toBe(true);
+  });
+
+  test("a full Keio ride leaves the ghost on the 京王線 key", () => {
+    const coverage = coverageFor(new Map(), new Set(["keio"]));
+    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(KEIO_KEY)).toBe(
+      true,
+    );
+  });
+
+  test("a complete service covering only part of its line keeps the ghost", () => {
+    /* 中央線（快速） complete is 東京〜高尾, 51.77 of the
+       中央線 key's 221.1 km — the line is far from fully
+       painted even though the service is complete. */
+    const coverage = coverageFor(new Map(), new Set(["jr-chuo-rapid"]));
+    expect(coverage.perService.get("jr-chuo-rapid")!.complete).toBe(true);
+    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(CHUO_KEY)).toBe(
+      false,
+    );
+  });
+
+  test("an unknown ride paints nothing countable, so the ghost stays", () => {
+    /* A row with no section paints its whole path dashed and
+       counts zero kilometres: the key never reaches perKeyKm,
+       so it is never fully painted. */
+    const paths = new Map([["yamanote", servicePath("yamanote")]]);
+    const coverage = computeLineCoverage(
+      new Map(),
+      new Set(),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.perServiceLegs.get("yamanote")!.unknown).toBe(true);
+    expect(coverage.perKeyKm.has(YAMA_KEY)).toBe(false);
+    expect(fullyPaintedLineKeys(coverage, GEOMETRIES, LINE_TOTAL_KM).has(YAMA_KEY)).toBe(
+      false,
+    );
   });
 });
