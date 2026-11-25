@@ -68,12 +68,20 @@ export type StationRef = {
    line shape. The endpoints are station IDs — the saved record —
    and the geometry/distance are derived at draw time. `direction`
    only loop services carry: it says which side of the loop the
-   block runs on. */
+   block runs on. `stations` (stage 3, subtask 1455) lists the
+   stations the block passes between its endpoints, in running
+   order — stations the service is known to serve that are no
+   block boundary, so a ride between two of them can be recorded
+   as a section without splitting the block (splitting would bake
+   one ride into the input granularity for every later ride).
+   Only stations listed here count as section endpoints; a
+   station merely known from a migrated ride does not. */
 export type ServiceBlock = {
   id: string;
   from: StationRef;
   to: StationRef;
   direction?: "inner" | "outer";
+  stations?: StationRef[];
 };
 
 /* An N02 station group code is six digits — the only station
@@ -171,11 +179,30 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "jr-musashino/b1",
         from: { id: "003876", name: "府中本町", lng: 139.47718, lat: 35.66583 },
         to: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
+        /* Stage 3 (subtask 1455): the 2026-11-12 return ride
+           東松戸〜北府中, estimated from the return-trip record
+           （印西牧の原での実習への行き帰り) — 北府中 sits inside
+           this block, so it is listed here rather than splitting
+           it. 東松戸 belongs to b2 （南浦和〜西船橋), not here:
+           the running order is 府中本町→北府中→…→南浦和→…→
+           東松戸→…→西船橋 (review round 1, high — the first
+           version listed 東松戸 on b1 ahead of 北府中, which put
+           it before 南浦和 and rejected the return ride).
+           Coordinates are the N02 station-point centroids (mean
+           over the station's N02_005 features). */
+        stations: [
+          { id: "003771", name: "北府中", lng: 139.47179, lat: 35.68086 },
+        ],
       },
       {
         id: "jr-musashino/b2",
         from: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
         to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
+        /* Stage 3 (subtask 1455): 東松戸 sits inside this block
+           (see the b1 note for the running order). */
+        stations: [
+          { id: "003187", name: "東松戸", lng: 139.94311, lat: 35.77013 },
+        ],
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -201,6 +228,17 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "hokuso/b1",
         from: { id: "003248", name: "京成高砂", lng: 139.86659, lat: 35.75087 },
         to: { id: "003125", name: "印旛日本医大", lng: 140.20276, lat: 35.78782 },
+        /* Stage 3 (subtask 1455): the 2026-11-12 ride
+           東松戸〜印西牧の原, estimated from the itinerary the
+           user specified that day （印西牧の原での実習への行き帰
+           り). The service has a single block, so both stations
+           are listed on it. 東松戸 003187 uses the same
+           group-code centroid as on 武蔵野線 (one code, one
+           physical station, one point). */
+        stations: [
+          { id: "003187", name: "東松戸", lng: 139.94311, lat: 35.77013 },
+          { id: "003083", name: "印西牧の原", lng: 140.16713, lat: 35.80363 },
+        ],
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -486,6 +524,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         from: { id: "004095", name: "品川", lng: 139.73896, lat: 35.62851 },
         to: { id: "003922", name: "渋谷", lng: 139.70165, lat: 35.65898 },
         direction: "outer",
+        /* Stage 3 (subtask 1455): 大崎 sits inside this block, so
+           the 2026-11-25 morning ride 新宿→大崎 （府中→新宿→山手
+           線→大崎, 内回り) can be recorded without widening the
+           section to 品川. 大崎's coordinates are the master's
+           existing value (also a segment end on 埼京線・りんかい
+           線). */
+        stations: [
+          { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+        ],
       },
       {
         id: "yamanote/b2",
@@ -534,11 +581,12 @@ export function serviceById(id: string): ServiceMasterEntry | undefined {
    resolves a ledger row's stored station ids through this (its
    primary section carries ids and names, but no coordinates),
    and the server fills in station names for an added section.
-   Segments carry every terminus, blocks every boundary, and
-   the migrated rides carry their restored endpoints （国分寺・
-   聖蹟桜ヶ丘・品川シーサイド・目黒 are no block boundary) — all
-   three are searched, first match wins. One code names one
-   physical station, wherever it appears, so the matches agree. */
+   Segments carry every terminus, blocks every boundary and
+   (stage 3) their listed mid-block stations, and the migrated
+   rides carry their restored endpoints （国分寺・聖蹟桜ヶ丘・
+   品川シーサイド・目黒 are no block boundary) — all four are
+   searched, first match wins. One code names one physical
+   station, wherever it appears, so the matches agree. */
 export function stationRefById(stationId: string): StationRef | undefined {
   for (const entry of SERVICE_MASTER) {
     for (const segment of entry.segments) {
@@ -548,6 +596,9 @@ export function stationRefById(stationId: string): StationRef | undefined {
     for (const block of entry.blocks) {
       if (block.from.id === stationId) return block.from;
       if (block.to.id === stationId) return block.to;
+      for (const station of block.stations ?? []) {
+        if (station.id === stationId) return station;
+      }
     }
   }
   for (const ride of Object.values(MIGRATED_RIDES)) {
@@ -866,11 +917,12 @@ export function isExplicitlyUnlinked(row: RiddenServiceLink): boolean {
 }
 
 /* The station IDs a service is known to serve, from the master
-   alone: every segment endpoint and block boundary, plus the
-   endpoints of the rides the SQL migration restored for this
-   service (the only record of mid-segment stations like 国分寺
-   on 中央線（快速）). A recorded section whose endpoints are not
-   in this set cannot belong to the service — the test the link
+   alone: every segment endpoint and block boundary, the stations
+   listed on the service's blocks (stage 3), plus the endpoints
+   of the rides the SQL migration restored for this service (the
+   only record of mid-segment stations like 国分寺 on 中央線
+   （快速）). A recorded section whose endpoints are not in this
+   set cannot belong to the service — the test the link
    confirmation (server) and the coverage build (client) use to
    keep one service's ride from being counted as another's
    (integrated review round 1, high). Deliberately conservative:
@@ -887,6 +939,7 @@ export function serviceStationIds(serviceId: string): ReadonlySet<string> {
     for (const block of service.blocks) {
       ids.add(block.from.id);
       ids.add(block.to.id);
+      for (const station of block.stations ?? []) ids.add(station.id);
     }
   }
   for (const ride of Object.values(MIGRATED_RIDES)) {
@@ -1089,6 +1142,29 @@ export function serviceBoundaryStations(
   return stations;
 }
 
+/* Every station a section endpoint may name, in running order
+   (stage 3, subtask 1455): the boundary stations interleaved
+   with the stations listed on each block. A loop's last entry is
+   its first station again, like serviceBoundaryStations. */
+export function serviceOrderedStations(
+  serviceId: string,
+): readonly StationRef[] {
+  const blocks = blocksForService(serviceId);
+  if (blocks.length === 0) return [];
+  const stations: StationRef[] = [];
+  const push = (station: StationRef) => {
+    if (stations[stations.length - 1]?.id !== station.id) {
+      stations.push(station);
+    }
+  };
+  for (const block of blocks) {
+    push(block.from);
+    for (const station of block.stations ?? []) push(station);
+    push(block.to);
+  }
+  return stations;
+}
+
 /* Is this service a loop (its last block returns to its first
    station)? Only loops need a direction to tell which side a
    section runs on. */
@@ -1100,16 +1176,26 @@ export function serviceIsLoop(serviceId: string): boolean {
   );
 }
 
-/* Validates a section (an added ride between two stations) for the
-   stage-2 block input. The endpoints must be boundary stations of
-   the service, in running order — a section may span several whole
-   blocks, but it may not start or end mid-block (arbitrary
-   stations are stage 3). On a loop the caller must also give the
-   direction, since the same two stations can be joined either way
-   round. Returns an error string, or null when the section is
-   valid. This is the rule the server's addRiddenSection enforces;
-   the client checks it first so a bad tap never reaches the
-   server. */
+/* Validates a section (an added ride between two stations) for
+   the stage-2 block input, extended in stage 3 (subtask 1455)
+   to any two stations the service is known to serve. The
+   endpoints must be stations of the service — a boundary
+   station, or a station listed on one of its blocks (a section
+   may span several whole blocks, and may start or end at a
+   listed mid-block station, but it may not start or end at a
+   station the master only knows from a migrated ride). On a
+   non-loop service the pair may run either way: a section is
+   one stretch of the line, and a real ride can travel it
+   against the running order （東松戸→北府中 on the 武蔵野線
+   return, review round 1, high) — the pair is stored as
+   travelled, and the geometry treats it as undirected (the
+   clip swaps it into running order, the route check reads it
+   either way). On a loop the caller must also give the
+   direction, since the same two stations can be joined either
+   way round. Returns an error string, or null when the section
+   is valid. This is the rule the server's addRiddenSection
+   enforces; the client checks it first so a bad tap never
+   reaches the server. */
 export function validateSectionEndpoints(
   serviceId: string,
   fromStationId: string,
@@ -1121,36 +1207,34 @@ export function validateSectionEndpoints(
   if (fromStationId === toStationId) {
     return "a section needs two different stations";
   }
-  const boundaries = serviceBoundaryStations(serviceId);
-  const fromIndex = boundaries.findIndex((s) => s.id === fromStationId);
-  const toIndex = boundaries.findIndex((s) => s.id === toStationId);
+  const ordered = serviceOrderedStations(serviceId);
+  const fromIndex = ordered.findIndex((s) => s.id === fromStationId);
+  const toIndex = ordered.findIndex((s) => s.id === toStationId);
   if (fromIndex < 0) {
-    return `"${fromStationId}" is not a boundary station of ${service.displayName}`;
+    return `"${fromStationId}" is not a station of ${service.displayName}`;
   }
   if (toIndex < 0) {
-    return `"${toStationId}" is not a boundary station of ${service.displayName}`;
+    return `"${toStationId}" is not a station of ${service.displayName}`;
   }
   if (serviceIsLoop(serviceId)) {
     if (!direction) {
       return `${service.displayName} is a loop: a section needs a direction (inner/outer)`;
     }
-    // Any two distinct boundaries join either way round a loop;
-    // the direction says which way. The blocks' own direction
-    // must agree when the section is a single block.
-    const blocks = blocksForService(serviceId);
-    const block = blocks.find(
-      (b) =>
-        (b.from.id === fromStationId && b.to.id === toStationId) ||
-        (b.from.id === toStationId && b.to.id === fromStationId),
-    );
-    if (block?.direction && block.direction !== direction) {
-      return `block ${block.from.name}〜${block.to.name} runs ${block.direction}, not ${direction}`;
-    }
+    // Any two distinct stations join either way round a loop;
+    // the direction says which way. No block is consulted: a
+    // single block can be ridden either way — 新宿→渋谷 inner
+    // runs yamanote/b2 （渋谷〜新宿) end to end, a real ride,
+    // while the same endpoints outer are the long way round
+    // the loop, which only shares the endpoints with b2
+    // (review round 2, medium — the old block-direction check
+    // rejected the inner ride for matching b2's endpoints).
+    // The direction, when given, is checked against a named
+    // blockId at the server instead (addRiddenSection), where
+    // the block the ride claims to be is known.
     return null;
   }
-  if (fromIndex >= toIndex) {
-    return "the section runs against the service's running order";
-  }
+  /* A non-loop section is one stretch of the line, travelled
+     either way — no running-order check (see the comment above). */
   return null;
 }
 

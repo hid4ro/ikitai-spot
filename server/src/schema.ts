@@ -119,7 +119,7 @@ export const riddenLines = sqliteTable("ridden_lines", {
 
 // Added sections of a ridden line (stage 2, subtask 1421): one row
 // per extra section a block pick (or a hand-entered section between
-// two boundary stations) adds to the ledger row. The station pair is
+// two stations the service is known to serve) adds to the ledger row. The station pair is
 // the saved record; the geometry and the distance are derived at
 // draw time. direction is 'inner' | 'outer' on a loop service, null
 // elsewhere. blockId names the master block the section covers, when

@@ -42,9 +42,9 @@ import {
   SERVICE_MASTER,
   blocksForService,
   recordedSectionFitsService,
-  serviceBoundaryStations,
   serviceById,
   serviceIsLoop,
+  serviceOrderedStations,
   stationRefById,
   usableRiddenService,
   type FullPathSnapshot,
@@ -638,9 +638,40 @@ export function clipServicePath(
   direction?: "inner" | "outer" | null,
 ): { legs: PathLeg[]; lengthKm: number; approximate: boolean } | null {
   const isLoop = serviceIsLoop(path.serviceId);
+  /* A direction-less loop section has no recorded way round:
+     resolve it the same way coveredBlockIds does — the shorter
+     way by station steps — so the drawing and the block
+     picker's check column agree (review round 2, medium). The
+     old code took the [min, max] arc-kilometre range, which at
+     the seam station （品川, projected at either end of the
+     path) flips to the long way round: 大崎→田端 drew via
+     渋谷・新宿 while the picker marked the 東京 side, and
+     品川→新宿 drew via 東京 while the picker marked b1・b2.
+     Endpoints the master does not list keep the old behaviour
+     (a migrated section like 大崎→目黒, whose far end is no
+     ordered station). */
+  let resolvedDirection = direction ?? null;
+  if (isLoop && !resolvedDirection) {
+    const ordered = serviceOrderedStations(path.serviceId);
+    const n = ordered.length - 1;
+    const indexOf = (station: StationRef): number => {
+      const idx = ordered.findIndex((s) => s.id === station.id);
+      if (idx < 0) return -1;
+      return idx === ordered.length - 1 ? 0 : idx;
+    };
+    const fromIdx = indexOf(from);
+    const toIdx = indexOf(to);
+    if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx && n > 0) {
+      const forward = (((toIdx - fromIdx) % n) + n) % n;
+      const backward = (((fromIdx - toIdx) % n) + n) % n;
+      resolvedDirection = forward <= backward ? "outer" : "inner";
+    }
+  }
   /* Arc positions of both stations on the oriented path. */
   const oriented =
-    isLoop && direction === "inner" ? reverseServicePath(path) : path;
+    isLoop && resolvedDirection === "inner"
+      ? reverseServicePath(path)
+      : path;
   const fromArc = projectOnServicePath(oriented, [from.lng, from.lat]);
   const toArc = projectOnServicePath(oriented, [to.lng, to.lat]);
   if (!fromArc || !toArc) return null;
@@ -662,17 +693,39 @@ export function clipServicePath(
   if (toKm > oriented.totalKm - END_SNAP_KM) toKm = oriented.totalKm;
   let startKm = fromKm;
   let endKm = toKm;
-  if (isLoop && direction) {
+  if (isLoop && resolvedDirection) {
     /* Running order on the oriented path; wrap past the seam. */
     if (endKm <= startKm) endKm += oriented.totalKm;
   } else if (endKm < startKm) {
     /* A section is undirected off a loop: take it in running
-       order. */
+       order. The same branch covers a loop section whose
+       endpoints the master does not list (no step count to
+       resolve a direction from). */
     [startKm, endKm] = [endKm, startKm];
   }
   if (endKm - startKm < 1e-9) return null;
   const legs = sliceServicePath(oriented, startKm, endKm);
   if (legs.length === 0) return null;
+  if (isLoop && resolvedDirection === "inner") {
+    /* The legs above were sliced off the REVERSED path, so
+       their fromT/toT run in the reversed frame (t = 0 at the
+       edge's far end). Coverage merges ranges per graph edge
+       (EdgeCoverage), so a reversed leg's range must be mapped
+       back to the edge's own frame — otherwise a stretch the
+       inner clip shares with an outer clip counts twice: the
+       same edge span arrives as [0, 0.5] from one side and
+       [0.5, 1] from the other, and the union keeps both
+       (review round 1, medium: 新宿→大崎 inner + 大崎→目黒
+       counted 8.686 km for an 8.578 km stretch). The coords
+       stay as sliced — a polyline paints the same backwards —
+       only the t frame is canonicalised. */
+    for (const leg of legs) {
+      const fromT = 1 - leg.toT;
+      const toT = 1 - leg.fromT;
+      leg.fromT = fromT;
+      leg.toT = toT;
+    }
+  }
   return {
     legs,
     lengthKm: legs.reduce((sum, leg) => sum + leg.lengthKm, 0),
@@ -1175,29 +1228,68 @@ export function parseFullPathSnapshot(
 }
 
 /* The blocks of a service the given intervals cover WHOLE: the
-   block picker's toggle state. A block counts when an interval
-   runs over it end to end — a primary section that only clips a
+   block picker's toggle state. A block counts when the intervals
+   run over it end to end — a primary section that only clips a
    block （府中→聖蹟桜ヶ丘 inside 京王線 b3) marks nothing, which
-   is honest: the block is not fully ridden. Intervals are
-   located by their endpoints' boundary indices: on a plain
-   service the interval runs from the lower index to the higher
-   one (stored sections are in ride order, not running order);
-   on a loop the direction says which way round, and without
-   one the shorter way is taken (the same fallback
-   clipServicePath uses). Intervals with an endpoint that is no
-   boundary station are skipped. */
+   is honest: the block is not fully ridden. Coverage is judged
+   on the directed edges between consecutive ordered stations
+   (boundaries interleaved with the stations listed on each
+   block), not on the set of stations passed: on a loop, the long
+   way round 新宿→渋谷 outer passes both ends of yamanote/b2
+   （渋谷〜新宿) without ever running it, so a station set would
+   wrongly mark all six blocks (review round 2, medium) — the
+   block's single edge （渋谷→新宿) is what the section never
+   traverses. The edges are unioned over ALL intervals, so two
+   sections that jointly cover a block mark it （京成高砂→東松戸
+   plus 東松戸→印旛日本医大 cover hokuso/b1 together, review
+   round 2, low). An endpoint the ordered stations do not know
+   （聖蹟桜ヶ丘, known only from a migrated ride) still skips
+   the interval. On a plain service the interval runs from the
+   lower index to the higher one (stored sections are in ride
+   order, not running order); on a loop the direction says which
+   way round, and without one the shorter way by station steps
+   is taken (the same fallback clipServicePath uses, so the
+   check column and the drawing agree — review round 2,
+   medium). */
 export function coveredBlockIds(
   serviceId: string,
   intervals: readonly RideInterval[],
 ): ReadonlySet<string> {
   const blocks = blocksForService(serviceId);
-  const boundaries = serviceBoundaryStations(serviceId);
+  const ordered = serviceOrderedStations(serviceId);
   const covered = new Set<string>();
-  if (blocks.length === 0 || boundaries.length === 0) return covered;
+  if (blocks.length === 0 || ordered.length === 0) return covered;
   const isLoop = serviceIsLoop(serviceId);
-  const blockCount = blocks.length;
-  const indexOf = (station: StationRef): number =>
-    boundaries.findIndex((s) => s.id === station.id);
+  /* A loop's ordered stations close on the first station, so
+     the distinct positions are ordered.length - 1; the closing
+     entry is the same station as position 0. */
+  const n = isLoop ? ordered.length - 1 : ordered.length;
+  /* Where each block starts and ends in the ordered stations:
+     block i runs from its from-boundary to its to-boundary,
+     with the block's listed stations between them. Its edges
+     are the steps blockStart..blockEnd-1, each numbered by its
+     start position (modulo n on a loop, where the last block's
+     final step returns to position 0). */
+  const blockStart: number[] = [];
+  const blockEnd: number[] = [];
+  {
+    let pos = 0;
+    for (const block of blocks) {
+      blockStart.push(pos);
+      pos += 1 + (block.stations?.length ?? 0);
+      blockEnd.push(pos);
+    }
+  }
+  const indexOf = (station: StationRef): number => {
+    const idx = ordered.findIndex((s) => s.id === station.id);
+    if (idx < 0) return -1;
+    return isLoop && idx === ordered.length - 1 ? 0 : idx;
+  };
+  /* The directed edges the intervals traverse, unioned over
+     all of them. An outer walk from fromIdx covers the edges
+     starting at fromIdx, fromIdx+1, ...; an inner walk covers
+     the edges ending at fromIdx, fromIdx-1, ... */
+  const traversed = new Set<number>();
   for (const interval of intervals) {
     const fromIdx = indexOf(interval.from);
     const toIdx = indexOf(interval.to);
@@ -1205,32 +1297,31 @@ export function coveredBlockIds(
     if (!isLoop) {
       const lo = Math.min(fromIdx, toIdx);
       const hi = Math.max(fromIdx, toIdx);
-      for (let i = lo; i < hi && i < blockCount; i++) {
-        covered.add(blocks[i]!.id);
+      for (let e = lo; e < hi; e++) traversed.add(e);
+    } else {
+      const forward = (((toIdx - fromIdx) % n) + n) % n;
+      const backward = (((fromIdx - toIdx) % n) + n) % n;
+      const direction =
+        interval.direction ?? (forward <= backward ? "outer" : "inner");
+      const steps = direction === "outer" ? forward : backward;
+      for (let step = 0; step < steps; step++) {
+        traversed.add(
+          direction === "outer"
+            ? (fromIdx + step) % n
+            : (((fromIdx - 1 - step) % n) + n) % n,
+        );
       }
-      continue;
     }
-    /* A loop's boundaries close on the first station, so the
-       block count is boundaries.length - 1 and indices wrap
-       modulo it. */
-    const n = blockCount;
-    const forward = (((toIdx - fromIdx) % n) + n) % n;
-    const backward = (((fromIdx - toIdx) % n) + n) % n;
-    const direction =
-      interval.direction ?? (forward <= backward ? "outer" : "inner");
-    const steps = direction === "outer" ? forward : backward;
-    if (steps === 0) continue;
-    /* The first block of the walk: outward it is the block
-       starting at fromIdx; inward it is the block ending at
-       fromIdx (block i runs boundaries[i]→boundaries[i+1]). */
-    let i =
-      direction === "outer"
-        ? fromIdx % n
-        : (((fromIdx - 1) % n) + n) % n;
-    for (let step = 0; step < steps; step++) {
-      covered.add(blocks[i]!.id);
-      i = direction === "outer" ? (i + 1) % n : (i - 1 + n) % n;
+  }
+  for (let i = 0; i < blocks.length; i++) {
+    let whole = true;
+    for (let e = blockStart[i]!; e < blockEnd[i]!; e++) {
+      if (!traversed.has(((e % n) + n) % n)) {
+        whole = false;
+        break;
+      }
     }
+    if (whole) covered.add(blocks[i]!.id);
   }
   return covered;
 }

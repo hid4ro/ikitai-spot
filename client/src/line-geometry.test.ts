@@ -74,6 +74,11 @@ const S = {
   西船橋: station("003547", "西船橋", 139.95907, 35.70737),
   京成高砂: station("003248", "京成高砂", 139.86659, 35.75087),
   印旛日本医大: station("003125", "印旛日本医大", 140.20276, 35.78782),
+  東松戸: station("003187", "東松戸", 139.94311, 35.77013),
+  北府中: station("003771", "北府中", 139.47179, 35.68086),
+  印西牧の原: station("003083", "印西牧の原", 140.16713, 35.80363),
+  新松戸: station("003045", "新松戸", 139.92111, 35.82549),
+  新鎌ヶ谷: station("003146", "新鎌ヶ谷", 139.99836, 35.77961),
 };
 
 function servicePath(serviceId: string): ServicePath {
@@ -239,8 +244,11 @@ describe("real asset: the migrated sections", () => {
   test("the Yamanote section takes the outer side, not the long way round", () => {
     const path = servicePath("yamanote");
     const outer = clipServicePath(path, S.大崎, S.目黒, "outer")!;
-    /* 大崎→目黒 is ~2.9 km outer (via 五反田); the inner way
-       round is the rest of the 34.5 km loop. */
+    /* 大崎→目黒 is 2.1 km outer, published (via 五反田); the
+       asset measures ~1.85 km, inside the loose 1.5–2.5 band
+       (review round 1, low — the old comment's 2.9 km was
+       wrong). The inner way round is the rest of the 34.5 km
+       loop. */
     expect(outer.lengthKm).toBeGreaterThan(1.5);
     expect(outer.lengthKm).toBeLessThan(2.5);
     const inner = clipServicePath(path, S.大崎, S.目黒, "inner")!;
@@ -272,6 +280,195 @@ describe("real asset: the migrated sections", () => {
     expect(
       innerCoords.some((p) => haversineKm(p, [S.品川.lng, S.品川.lat]) < 0.5),
     ).toBe(true);
+  });
+
+  test("a direction-less loop section is clipped the shorter-by-steps way (review round 2, medium)", () => {
+    /* Without a direction, the map must draw the same side
+       the block picker marks (the shorter way by station
+       steps — the picker's fallback). The old clip took the
+       [min, max] arc-kilometre range, which at the seam
+       station 品川 flips to the long way round: 大崎→田端
+       drew via 渋谷・新宿 (~18.5 km) while the picker marked
+       the 東京 side, and 品川→新宿 drew via 東京 (~23.6 km)
+       while the picker marked b1・b2. */
+    const path = servicePath("yamanote");
+    const osakiTabata = clipServicePath(path, S.大崎, S.田端)!;
+    expect(osakiTabata.lengthKm).toBeCloseTo(15.84, 1);
+    expect(
+      osakiTabata.legs
+        .flatMap((leg) => leg.coords)
+        .some((p) => haversineKm(p, [S.東京.lng, S.東京.lat]) < 0.5),
+    ).toBe(true);
+    const shinagawaShinjuku = clipServicePath(path, S.品川, S.新宿)!;
+    expect(shinagawaShinjuku.lengthKm).toBeCloseTo(10.68, 1);
+    expect(
+      shinagawaShinjuku.legs
+        .flatMap((leg) => leg.coords)
+        .some((p) => haversineKm(p, [S.渋谷.lng, S.渋谷.lat]) < 0.5),
+    ).toBe(true);
+    /* 品川→池袋 is unchanged by the fix: the step count
+       already tips it to the 東京 side (3 steps against 4),
+       and the clip stays on that side (~18.9 km). */
+    const shinagawaIkebukuro = clipServicePath(path, S.品川, S.池袋)!;
+    expect(shinagawaIkebukuro.lengthKm).toBeCloseTo(18.93, 1);
+  });
+});
+
+describe("real asset: the subtask-1455 estimated sections", () => {
+  test("the two single-line sections measure their published rail kilometres", () => {
+    /* 武蔵野線 東松戸 64.0 km − 北府中 1.7 km = 62.3 km;
+       北総線 印西牧の原 28.5 km − 東松戸 7.5 km = 21.0 km
+       (Wikipedia station distances from 府中本町 / 京成高砂).
+       The ±10% band is the same one the migrated sections use. */
+    const cases: [string, StationRef, StationRef, number][] = [
+      ["jr-musashino", S.東松戸, S.北府中, 62.3],
+      ["hokuso", S.東松戸, S.印西牧の原, 21.0],
+    ];
+    for (const [serviceId, from, to, railKm] of cases) {
+      const path = servicePath(serviceId);
+      const clip = clipServicePath(path, from, to)!;
+      expect(clip).not.toBeNull();
+      expect(clip.approximate).toBe(false);
+      expect(clip.lengthKm).toBeGreaterThan(railKm * 0.9);
+      expect(clip.lengthKm).toBeLessThan(railKm * 1.1);
+    }
+    /* The clips follow the line through the stations between:
+       南浦和・新松戸 on 武蔵野線, 新鎌ヶ谷 on 北総線. */
+    const musashino = clipServicePath(
+      servicePath("jr-musashino"),
+      S.東松戸,
+      S.北府中,
+    )!;
+    const musashinoCoords = musashino.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.南浦和, S.新松戸]) {
+      expect(
+        musashinoCoords.some(
+          (p) => haversineKm(p, [via.lng, via.lat]) < 0.5,
+        ),
+      ).toBe(true);
+    }
+    const hokuso = clipServicePath(
+      servicePath("hokuso"),
+      S.東松戸,
+      S.印西牧の原,
+    )!;
+    const hokusoCoords = hokuso.legs.flatMap((leg) => leg.coords);
+    expect(
+      hokusoCoords.some(
+        (p) => haversineKm(p, [S.新鎌ヶ谷.lng, S.新鎌ヶ谷.lat]) < 0.5,
+      ),
+    ).toBe(true);
+  });
+
+  test("the Yamanote section takes the inner side, via 渋谷・目黒", () => {
+    const path = servicePath("yamanote");
+    const inner = clipServicePath(path, S.新宿, S.大崎, "inner")!;
+    /* Published 8.6 km; the asset measures 8.58 km, matching
+       the published figure to the first decimal (review round
+       1, low — the old comment's 9.8 km was wrong, and so was
+       the 7–10 km band it justified). What matters is that it
+       is the short way, via 渋谷・目黒, and not the long way
+       round via 田端・東京. */
+    expect(inner.lengthKm).toBeCloseTo(8.6, 1);
+    const innerCoords = inner.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.渋谷, S.目黒]) {
+      expect(
+        innerCoords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.5),
+      ).toBe(true);
+    }
+    for (const notVia of [S.田端, S.東京]) {
+      expect(
+        innerCoords.some(
+          (p) => haversineKm(p, [notVia.lng, notVia.lat]) < 0.5,
+        ),
+      ).toBe(false);
+    }
+    const outer = clipServicePath(path, S.新宿, S.大崎, "outer")!;
+    expect(outer.lengthKm).toBeGreaterThan(20);
+  });
+
+  test("ledger rows carrying the three sections count their union", () => {
+    /* The live rows as they will stand after registration:
+       武蔵野線・北総線 move from unknown to partial with one
+       added section each; 山手線 keeps its primary 大崎→目黒
+       and gains 新宿→大崎 (inner). The Yamanote overlap
+       （目黒→大崎 is inside the new section) counts once. */
+    const rows = [
+      {
+        name: "JR武蔵野線",
+        serviceId: "jr-musashino",
+        serviceLinkSource: null,
+        fromStationId: null,
+        toStationId: null,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.東松戸.id,
+            toStationId: S.北府中.id,
+            direction: null,
+            blockId: null,
+            recordedServiceId: "jr-musashino",
+          },
+        ],
+      },
+      {
+        name: "北総線",
+        serviceId: "hokuso",
+        serviceLinkSource: null,
+        fromStationId: null,
+        toStationId: null,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.東松戸.id,
+            toStationId: S.印西牧の原.id,
+            direction: null,
+            blockId: null,
+            recordedServiceId: "hokuso",
+          },
+        ],
+      },
+      {
+        name: "山手線",
+        serviceId: "yamanote",
+        serviceLinkSource: null,
+        recordedServiceId: "yamanote",
+        fromStationId: S.大崎.id,
+        toStationId: S.目黒.id,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.新宿.id,
+            toStationId: S.大崎.id,
+            direction: "inner" as const,
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ],
+      },
+    ];
+    const coverage = computeRiddenLineCoverage(rows, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-musashino")!.riddenKm).toBeCloseTo(
+      62.3,
+      0,
+    );
+    expect(coverage.perService.get("hokuso")!.riddenKm).toBeCloseTo(21.0, 0);
+    /* 山手線's union is the inner section alone (8.58 km): the
+       primary 大崎→目黒 sits inside it, and the row carries
+       its recordedServiceId so the primary is attributed at
+       all — without it the overlap would never be counted
+       twice and this test would be vacuous (review round 1,
+       medium). The tight precision is the point: the
+       double-count measured 8.686 km before the fix. */
+    expect(coverage.perService.get("yamanote")!.riddenKm).toBeCloseTo(
+      8.58,
+      1,
+    );
+    expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
+    expect(coverage.completeServiceIds).toEqual([]);
   });
 });
 
@@ -542,6 +739,91 @@ describe("coveredBlockIds: whole-block coverage for the block picker", () => {
       { serviceId: "yamanote", from: S.田端, to: S.品川 },
     ]);
     expect([...covered].sort()).toEqual(["yamanote/b5", "yamanote/b6"]);
+  });
+
+  test("a Yamanote inner section ending at a non-boundary station covers the block it runs over whole", () => {
+    /* 新宿→大崎 inner (review round 1, medium): 大崎 is no
+       boundary station, but the section runs yamanote/b2
+       （渋谷〜新宿) end to end, so the block is covered and
+       cannot be picked again — the old version located
+       endpoints among boundary stations only and marked
+       nothing, leaving the same range re-registerable.
+       yamanote/b1 （品川〜渋谷) is only partly ridden
+       （渋谷→大崎), so it stays open. */
+    const covered = coveredBlockIds("yamanote", [
+      {
+        serviceId: "yamanote",
+        from: S.新宿,
+        to: S.大崎,
+        direction: "inner",
+      },
+    ]);
+    expect([...covered].sort()).toEqual(["yamanote/b2"]);
+  });
+
+  test("a Yamanote outer section the long way round does not cover the block it never runs (review round 2, medium)", () => {
+    /* 新宿→渋谷 outer runs via 田端・東京・品川, so it never
+       runs yamanote/b2 （渋谷〜新宿) — but the old version
+       judged by the set of stations passed, and both of b2's
+       endpoints are passed (one at each end of the long way
+       round), so it marked all six blocks. The block is
+       covered only when the section runs over it end to end:
+       the five blocks the long way round actually traverses. */
+    const covered = coveredBlockIds("yamanote", [
+      {
+        serviceId: "yamanote",
+        from: S.新宿,
+        to: S.渋谷,
+        direction: "outer",
+      },
+    ]);
+    expect([...covered].sort()).toEqual([
+      "yamanote/b1",
+      "yamanote/b3",
+      "yamanote/b4",
+      "yamanote/b5",
+      "yamanote/b6",
+    ]);
+  });
+
+  test("several added sections jointly covering one block mark it (review round 2, low)", () => {
+    /* 北総線's single block hokuso/b1 is covered by two
+       sections together （京成高砂→東松戸 and
+       東松戸→印旛日本医大) — the old version judged each
+       section alone, so neither marked anything and the block
+       stayed pickable even though the whole block is ridden. */
+    const jointly = coveredBlockIds("hokuso", [
+      { serviceId: "hokuso", from: S.京成高砂, to: S.東松戸 },
+      { serviceId: "hokuso", from: S.東松戸, to: S.印旛日本医大 },
+    ]);
+    expect([...jointly].sort()).toEqual(["hokuso/b1"]);
+    const alone = coveredBlockIds("hokuso", [
+      { serviceId: "hokuso", from: S.京成高砂, to: S.東松戸 },
+    ]);
+    expect(alone.size).toBe(0);
+  });
+
+  test("direction-less loop sections use the shorter-by-steps way (review round 2, medium)", () => {
+    /* Without a direction, the shorter way by station steps
+       is taken — the same fallback the map's clip uses, so
+       the check column and the drawing agree. 大崎 counts as
+       a listed station on yamanote/b1, which is what tips
+       品川→池袋 to the 東京 side (3 steps against 4). */
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.品川, to: S.池袋 },
+      ])].sort(),
+    ).toEqual(["yamanote/b4", "yamanote/b5", "yamanote/b6"]);
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.大崎, to: S.田端 },
+      ])].sort(),
+    ).toEqual(["yamanote/b5", "yamanote/b6"]);
+    expect(
+      [...coveredBlockIds("yamanote", [
+        { serviceId: "yamanote", from: S.品川, to: S.新宿 },
+      ])].sort(),
+    ).toEqual(["yamanote/b1", "yamanote/b2"]);
   });
 });
 

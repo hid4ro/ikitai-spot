@@ -61,7 +61,10 @@ import {
   resolveRiddenService,
   sectionEndpointsKnownToService,
   serviceById,
+  serviceIsLoop,
+  serviceOrderedStations,
   usableRiddenService,
+  validateSectionEndpoints,
 } from "../../shared/service-master";
 import {
   computeRiddenLineCoverage,
@@ -940,6 +943,17 @@ function riddenLineRideLabel(line: RiddenLine): string | null {
   if (line.rideState === "partial") {
     if (line.fromStationName && line.toStationName) {
       return `区間：${line.fromStationName}→${line.toStationName}`;
+    }
+    /* A partial row with no primary section can still pin down
+       sections added by hand (stage 3, subtask 1455): show the
+       first one instead of claiming no section is recorded. */
+    const added = line.sections ?? [];
+    if (added.length > 0) {
+      const first = added[0]!;
+      const label = `区間：${first.fromStationName ?? first.fromStationId}→${first.toStationName ?? first.toStationId}`;
+      return added.length > 1
+        ? `${label} ほか${added.length - 1}区間`
+        : label;
     }
     return "区間指定（区間の記録なし）";
   }
@@ -6463,8 +6477,19 @@ function VisitedMapSection({
                       finding 9): with no spots and no records it
                       would present the stored 35-municipality image
                       as if it were the reader's own record. The
-                      loading text below stays either way. */}
-                  {(totalVisited > 0 || hasRiddenLines) && (
+                      loading text below stays either way. The image
+                      itself only belongs on the 市区町村 tab
+                      (subtask 1465, reader report 2026-11-25): it
+                      paints the municipalities at full hero
+                      strength, which is that tab's presentation —
+                      on the スポット and 路線 tabs the same
+                      municipalities are a faint ghost underlay on
+                      the live map, so the cover showed them far
+                      darker than the tab's own design for the whole
+                      first load. Those tabs keep the plain cover
+                      (background + loading text) instead. */}
+                  {variant === "municipalities" &&
+                    (totalVisited > 0 || hasRiddenLines) && (
                     <img
                       src={visitedMapFallbackUrl}
                       alt=""
@@ -7246,6 +7271,15 @@ function RiddenLinesBlock({
      is already covered. */
   const [blockPickerLineId, setBlockPickerLineId] = useState<number | null>(null);
   const [blockPickerError, setBlockPickerError] = useState<string | null>(null);
+  /* Hand-entered section (stage 3, subtask 1455): the stations
+     of a mid-block section the block list cannot offer — the
+     form lives in the same picker panel, and only one picker is
+     open at a time, so one set of drafts is enough. */
+  const [handSectionFrom, setHandSectionFrom] = useState("");
+  const [handSectionTo, setHandSectionTo] = useState("");
+  const [handSectionDirection, setHandSectionDirection] = useState<
+    "inner" | "outer" | ""
+  >("");
   const addSectionMutation = useMutation({
     mutationFn: async (args: {
       riddenLineId: number;
@@ -7254,10 +7288,17 @@ function RiddenLinesBlock({
       toStationId: string;
       toStationName: string;
       direction: "inner" | "outer" | null;
-      blockId: string;
+      blockId: string | null;
     }) => await api.addRiddenSection(args),
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       setBlockPickerError(null);
+      /* A hand-entered add clears the form for the next one; a
+         block pick leaves the drafts alone. */
+      if (variables.blockId == null) {
+        setHandSectionFrom("");
+        setHandSectionTo("");
+        setHandSectionDirection("");
+      }
       invalidateLines();
     },
     onError: () => setBlockPickerError("区間の追加に失敗しました"),
@@ -7432,6 +7473,33 @@ function RiddenLinesBlock({
                 )
               : null;
             const pickerOpen = blockPickerLineId === line.id;
+            /* Sections added by hand or by API (no blockId), for
+               the picker panel's own delete buttons — a block
+               pick's section is deleted from its block toggle
+               instead (stage 3, subtask 1455). */
+            const handSections = (line.sections ?? []).filter(
+              (s) => s.blockId == null,
+            );
+            /* Either section mutation running blocks both the
+               hand-entry add and the per-section deletes: an
+               add and a delete overlapping can leave the row's
+               saved state disagreeing with the ledger (review
+               round 2, medium). The block toggles already
+               disable on either mutation. */
+            const sectionBusy =
+              addSectionMutation.isPending ||
+              deleteSectionMutation.isPending;
+            /* Stations a hand-entered section may name for this
+               row's service: boundaries plus the stations listed
+               on its blocks (stage 3), de-duplicated — a loop
+               closes on its first station, so it appears twice
+               in the ordered list. */
+            const handStations = usableService
+              ? serviceOrderedStations(usableService.id).filter(
+                  (s, i, all) =>
+                    all.findIndex((t) => t.id === s.id) === i,
+                )
+              : [];
             return (
             <li
               key={line.id}
@@ -7739,15 +7807,26 @@ function RiddenLinesBlock({
                 <div data-map-no-fly="" className="mt-1.5">
                   <button
                     type="button"
-                    onClick={() =>
-                      setBlockPickerLineId(pickerOpen ? null : line.id)
-                    }
+                    onClick={() => {
+                      if (pickerOpen) {
+                        setBlockPickerLineId(null);
+                      } else {
+                        /* Opening a picker starts a fresh hand
+                           entry for this row. */
+                        setBlockPickerError(null);
+                        setHandSectionFrom("");
+                        setHandSectionTo("");
+                        setHandSectionDirection("");
+                        setBlockPickerLineId(line.id);
+                      }
+                    }}
                     aria-expanded={pickerOpen}
                     className="rounded-lg px-2 py-1 text-xs text-[var(--dim)] underline"
                   >
                     区間を選ぶ{pickerOpen ? "（閉じる）" : ""}
                   </button>
-                  {pickerOpen && (
+                  {pickerOpen && usableService && (
+                    <>
                     <ul className="mt-1 space-y-1">
                       {blocks.map((block) => {
                         const covered = coveredBlocks.has(block.id);
@@ -7795,6 +7874,166 @@ function RiddenLinesBlock({
                         );
                       })}
                     </ul>
+                    {/* Hand-entered sections (stage 3, subtask
+                        1455): the block list above only offers
+                        whole blocks, so a section between listed
+                        mid-block stations （東松戸→北府中) is added
+                        here — and sections added this way, or by
+                        API, are listed here with their own delete
+                        button, so they can be removed one by one
+                        instead of only through the block toggles
+                        (review round 1, medium). */}
+                    {handSections.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {handSections.map((section) => (
+                          <li
+                            key={section.id}
+                            className="flex items-center gap-2 text-xs"
+                          >
+                            <span className="min-w-0 flex-1">
+                              {section.fromStationName ??
+                                section.fromStationId}
+                              →
+                              {section.toStationName ??
+                                section.toStationId}
+                              {section.direction === "inner"
+                                ? "（内回り）"
+                                : section.direction === "outer"
+                                  ? "（外回り）"
+                                  : ""}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                deleteSectionMutation.mutate(section.id)
+                              }
+                              disabled={sectionBusy}
+                              className="shrink-0 rounded-lg px-2 py-1 text-xs text-[var(--dim)] underline disabled:opacity-50"
+                            >
+                              削除
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="mt-2">
+                      <p className="text-xs text-[var(--dim)]">
+                        区間を手入力で追加
+                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <label
+                          className="sr-only"
+                          htmlFor={`hand-from-${line.id}`}
+                        >
+                          出発駅
+                        </label>
+                        <select
+                          id={`hand-from-${line.id}`}
+                          value={handSectionFrom}
+                          onChange={(e) =>
+                            setHandSectionFrom(e.target.value)
+                          }
+                          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-[var(--text)]"
+                        >
+                          <option value="">出発駅</option>
+                          {handStations.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        <span aria-hidden="true" className="text-xs">
+                          →
+                        </span>
+                        <label
+                          className="sr-only"
+                          htmlFor={`hand-to-${line.id}`}
+                        >
+                          到着駅
+                        </label>
+                        <select
+                          id={`hand-to-${line.id}`}
+                          value={handSectionTo}
+                          onChange={(e) =>
+                            setHandSectionTo(e.target.value)
+                          }
+                          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-[var(--text)]"
+                        >
+                          <option value="">到着駅</option>
+                          {handStations.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        {serviceIsLoop(usableService.id) && (
+                          <select
+                            value={handSectionDirection}
+                            onChange={(e) =>
+                              setHandSectionDirection(
+                                e.target.value as "inner" | "outer" | "",
+                              )
+                            }
+                            aria-label="方向"
+                            className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-xs text-[var(--text)]"
+                          >
+                            <option value="">方向</option>
+                            <option value="inner">内回り</option>
+                            <option value="outer">外回り</option>
+                          </select>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!handSectionFrom || !handSectionTo) {
+                              setBlockPickerError(
+                                "出発駅と到着駅を選んでください",
+                              );
+                              return;
+                            }
+                            /* The server enforces the same rule;
+                               checking first keeps a bad pick from
+                               ever leaving the page. */
+                            const problem = validateSectionEndpoints(
+                              usableService.id,
+                              handSectionFrom,
+                              handSectionTo,
+                              handSectionDirection || null,
+                            );
+                            if (problem) {
+                              setBlockPickerError(problem);
+                              return;
+                            }
+                            const from = handStations.find(
+                              (s) => s.id === handSectionFrom,
+                            )!;
+                            const to = handStations.find(
+                              (s) => s.id === handSectionTo,
+                            )!;
+                            addSectionMutation.mutate({
+                              riddenLineId: line.id,
+                              fromStationId: from.id,
+                              fromStationName: from.name,
+                              toStationId: to.id,
+                              toStationName: to.name,
+                              direction: serviceIsLoop(usableService.id)
+                                ? handSectionDirection === ""
+                                  ? null
+                                  : handSectionDirection
+                                : null,
+                              blockId: null,
+                            });
+                          }}
+                          disabled={sectionBusy}
+                          className="rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-xs font-bold text-[var(--accent-ink)] disabled:opacity-50"
+                        >
+                          {addSectionMutation.isPending
+                            ? "追加中…"
+                            : "追加する"}
+                        </button>
+                      </div>
+                    </div>
+                    </>
                   )}
                   {blockPickerError && pickerOpen && (
                     <p className="mt-1 text-xs text-[var(--signal)]">{blockPickerError}</p>
