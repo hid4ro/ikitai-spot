@@ -21,9 +21,9 @@ import {
   isN02StationId,
   isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
-  primarySectionRouteAmbiguous,
   resolveRiddenService,
   sectionEndpointsKnownToService,
+  sectionRouteAmbiguous,
   serviceBoundaryStations,
   serviceById,
   serviceByLedgerName,
@@ -848,25 +848,37 @@ describe("integrated review round 2: the fit yardsticks", () => {
        山手線 pair, over 山手線・東北線・東海道線. The endpoints
        alone cannot say which route was ridden, from either
        side. */
-    expect(primarySectionRouteAmbiguous("jr-chuo-rapid", "003766", "003700")).toBe(true);
-    expect(primarySectionRouteAmbiguous("yamanote", "003766", "003700")).toBe(true);
+    expect(sectionRouteAmbiguous("jr-chuo-rapid", "003766", "003700")).toBe(true);
+    expect(sectionRouteAmbiguous("yamanote", "003766", "003700")).toBe(true);
   });
 
   test("pairs no other service serves, or that share the one formal line, are not ambiguous", () => {
     /* 国分寺 is 中央線's alone. */
-    expect(primarySectionRouteAmbiguous("jr-chuo-rapid", "003766", "003606")).toBe(false);
-    /* The restored 山手線 ride: 大崎・目黒 are mid-segment for
-       every other service too, so no rival route can be shown. */
-    expect(primarySectionRouteAmbiguous("yamanote", "004135", "004072")).toBe(false);
-    /* The restored 埼京線 ride runs on 山手線 trackage, the
-       same route 山手線 itself takes between the pair. */
-    expect(primarySectionRouteAmbiguous("jr-saikyo", "003700", "004135")).toBe(false);
+    expect(sectionRouteAmbiguous("jr-chuo-rapid", "003766", "003606")).toBe(false);
     /* 総武快速線・総武本線 share their pairs over the one
        formal line 総武線 — the same route, not a rival one. */
-    expect(primarySectionRouteAmbiguous("jr-sobu-rapid", "003766", "004173")).toBe(false);
-    expect(primarySectionRouteAmbiguous("jr-sobu-local", "003531", "004173")).toBe(false);
+    expect(sectionRouteAmbiguous("jr-sobu-rapid", "003766", "004173")).toBe(false);
+    expect(sectionRouteAmbiguous("jr-sobu-local", "003531", "004173")).toBe(false);
     /* 京王線's restored section: no other service serves
        聖蹟桜ヶ丘 at all. */
-    expect(primarySectionRouteAmbiguous("keio", "003821", "003971")).toBe(false);
+    expect(sectionRouteAmbiguous("keio", "003821", "003971")).toBe(false);
+  });
+
+  test("a loop direction selects an arc but cannot rule out a different service's route", () => {
+    // No other known service serves both 渋谷 and 東京.
+    expect(sectionRouteAmbiguous("yamanote", "003922", "003766")).toBe(true);
+    expect(sectionRouteAmbiguous("yamanote", "003922", "003766", "inner")).toBe(false);
+    expect(sectionRouteAmbiguous("yamanote", "003922", "003766", "outer")).toBe(false);
+    // 中央線（快速） is a separate route even when the loop arc is known.
+    expect(sectionRouteAmbiguous("yamanote", "003766", "003700", "inner")).toBe(true);
+    expect(sectionRouteAmbiguous("yamanote", "003766", "003700", "outer")).toBe(true);
+  });
+
+  test("endpoints alone cannot identify the restored loop and shared sections", () => {
+    // 大崎→目黒 on 山手線 has two arcs without a recorded direction.
+    expect(sectionRouteAmbiguous("yamanote", "004135", "004072")).toBe(true);
+    // 新宿 and 大崎 are known to both services, but one endpoint
+    // sits mid-block on each chain.
+    expect(sectionRouteAmbiguous("jr-saikyo", "003700", "004135")).toBe(true);
   });
 });

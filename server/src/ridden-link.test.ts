@@ -2,17 +2,24 @@ import { createClient } from "@libsql/client";
 import { expect, test } from "bun:test";
 import { drizzle } from "drizzle-orm/libsql";
 import { readdir } from "node:fs/promises";
+import { RIDDEN_LINE_GEOMETRIES } from "../../client/src/assets/visited-lines";
+import {
+  computeRiddenLineCoverage,
+  type LineGeometryMap,
+} from "../../client/src/line-geometry";
 import { serviceFullPathSnapshot } from "../../shared/service-master";
 import { Actions, isUniqueConstraintError } from "./actions";
 import * as schema from "./schema";
 
 const aRide = { firstRiddenOn: "2026-11-24" };
+const GEOMETRIES = RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
 type ActionContext = Parameters<typeof Actions.addRiddenLine.handler>[0];
 type TestDatabase = ReturnType<typeof createClient>;
 
 async function withLedger(
   verify: (client: TestDatabase, ctx: ActionContext) => Promise<void>,
   seedBeforeStage2?: (client: TestDatabase) => Promise<unknown>,
+  seedBeforeRecordedService?: (client: TestDatabase) => Promise<unknown>,
 ) {
   const directory = new URL("../../drizzle/", import.meta.url);
   const migrations = (await readdir(directory))
@@ -22,6 +29,7 @@ async function withLedger(
   try {
     for (const file of migrations) {
       if (file.startsWith("0012_")) await seedBeforeStage2?.(client);
+      if (file.startsWith("0015_")) await seedBeforeRecordedService?.(client);
       await client.executeMultiple(await Bun.file(new URL(file, directory)).text());
     }
     const db = drizzle(client, { schema });
@@ -387,7 +395,7 @@ test("isUniqueConstraintError sees through Drizzle's error wrapping (integrated 
   expect(isUniqueConstraintError(undefined)).toBe(false);
 });
 
-test("relinking a primary section whose endpoints run on another route is refused (integrated review round 2, high)", async () => {
+test("an ambiguous primary section can return to its original link after unlinking", async () => {
   await withLedger(async (_, ctx) => {
     const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
     if (!before) throw new Error("Missing seeded ledger row");
@@ -404,15 +412,133 @@ test("relinking a primary section whose endpoints run on another route is refuse
     ).rejects.toThrow(/cannot be linked/);
     const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
     expect(after).toEqual(before);
-    /* Confirming the service the ride was recorded on fits. */
+    expect(
+      await Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: null,
+      }),
+    ).toEqual({ ok: true, serviceId: null });
+    const [unlinked] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(unlinked).toMatchObject({
+      serviceId: null,
+      recordedServiceId: "jr-chuo-rapid",
+    });
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: before.id,
+        serviceId: "yamanote",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
     expect(
       await Actions.confirmRiddenServiceLink.handler(ctx, {
         id: before.id,
         serviceId: "jr-chuo-rapid",
       }),
     ).toEqual({ ok: true, serviceId: "jr-chuo-rapid" });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      recordedServiceId: "jr-chuo-rapid",
+    });
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-chuo-rapid")?.riddenKm).toBeCloseTo(9.1, 1);
   }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
     VALUES ('中央線（各駅停車）', '2026-11-23', 'jr-chuo-rapid', 'partial', '003766', '003700', 'historical-master', 0)`));
+});
+
+test("a new explicitly recorded Chuo Rapid primary section counts Tokyo to Shinjuku", async () => {
+  await withLedger(async (_, ctx) => {
+    await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "JR中央線（快速）",
+      serviceId: "jr-chuo-rapid",
+      rideState: "partial",
+      fromStationId: "003766",
+      toStationId: "003700",
+    });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      serviceLinkSource: "explicit",
+      recordedServiceId: "jr-chuo-rapid",
+    });
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-chuo-rapid")?.riddenKm).toBeCloseTo(9.1, 1);
+    expect(coverage.networkRiddenKm).toBeCloseTo(9.1, 1);
+    expect(coverage.perService.has("yamanote")).toBe(false);
+  });
+});
+
+test("a legacy blockless Tokyo to Shinjuku section cannot be relinked to Yamanote", async () => {
+  await withLedger(async (_, ctx) => {
+    const { lines: before } = await Actions.listRiddenLines.handler(ctx, {});
+    const [line] = before;
+    if (!line) throw new Error("Missing seeded ledger row");
+    expect(line).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      fromStationId: null,
+      toStationId: null,
+      sections: [
+        { fromStationId: "003766", toStationId: "003700", blockId: null },
+      ],
+    });
+    await expect(
+      Actions.confirmRiddenServiceLink.handler(ctx, {
+        id: line.id,
+        serviceId: "yamanote",
+      }),
+    ).rejects.toThrow(/cannot be linked/);
+    expect((await Actions.listRiddenLines.handler(ctx, {})).lines).toEqual(before);
+  }, undefined, (client) => client.executeMultiple(`
+    INSERT INTO ridden_lines (id, name, first_ridden_on, service_id, ride_state, created_at)
+    VALUES (1, '中央線（各駅停車）', '2026-11-23', 'jr-chuo-rapid', 'partial', 0);
+    INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id, created_at)
+    VALUES (1, '003766', '003700', 0);
+  `));
+});
+
+test("an already relinked legacy blockless section contributes no Yamanote distance", async () => {
+  await withLedger(async (_, ctx) => {
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      serviceId: "yamanote",
+      serviceLinkSource: "explicit",
+      sections: [{ blockId: null, recordedServiceId: null }],
+    });
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("yamanote")?.riddenKm).toBe(0);
+    expect(coverage.networkRiddenKm).toBe(0);
+  }, undefined, (client) => client.executeMultiple(`
+    INSERT INTO ridden_lines (id, name, first_ridden_on, service_id, service_link_source, ride_state, created_at)
+    VALUES (1, '中央線（各駅停車）', '2026-11-23', 'yamanote', 'explicit', 'partial', 0);
+    INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id, created_at)
+    VALUES (1, '003766', '003700', 0);
+  `));
+});
+
+test("a new blockless section keeps the service and direction it was recorded on", async () => {
+  await withLedger(async (_, ctx) => {
+    const { id } = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "山手線",
+    });
+    if (id == null) throw new Error("Missing 山手線 row");
+    await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: id,
+      fromStationId: "003766",
+      toStationId: "003700",
+      direction: "inner",
+    });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      rideState: "partial",
+      sections: [
+        { blockId: null, direction: "inner", recordedServiceId: "yamanote" },
+      ],
+    });
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("yamanote")?.riddenKm).toBeCloseTo(16.93, 1);
+  });
 });
 
 test("relinking a row whose added section names another service's block is refused (integrated review round 2, high)", async () => {

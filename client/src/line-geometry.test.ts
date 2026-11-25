@@ -715,13 +715,12 @@ describe("rides whose route the record cannot pin down (integrated review round 
     sections: [] as never[],
   };
 
-  test("a primary section shared with another service over a different route counts for neither", () => {
+  test("an ambiguous primary section with no recorded service counts for neither", () => {
     /* 東京→新宿 is 中央線（快速）'s first block — and also a
        山手線 pair, over a different route. Relinked to 山手線,
        the record's ~9.1 km came back as 山手線's ~16.9 km. The
-       endpoints cannot tell the routes apart, so the section
-       counts for neither service; it takes a block section to
-       pin the route. */
+       endpoints cannot tell the routes apart without the
+       service the section was recorded on. */
     for (const [name, serviceId] of [
       ["山手線", "yamanote"],
       ["JR中央線（快速）", "jr-chuo-rapid"],
@@ -746,28 +745,28 @@ describe("rides whose route the record cannot pin down (integrated review round 
     }
   });
 
-  test("primary sections only one route can claim still count", () => {
+  test("primary sections count when the recording or endpoints identify the route", () => {
     const cases = [
-      /* The restored 山手線 ride — no rival route can be shown
-         for 大崎→目黒. */
-      ["山手線", "yamanote", "004135", "004072"],
-      /* The restored 埼京線 ride, on 山手線 trackage — the same
-         route 山手線 itself takes between the pair. */
-      ["JR埼京線", "jr-saikyo", "003700", "004135"],
+      /* The migration supplies the source of the 山手線 and
+         埼京線 sections, which each have an alternative route
+         around the loop without that evidence. */
+      ["山手線", "yamanote", "004135", "004072", "yamanote"],
+      ["JR埼京線", "jr-saikyo", "003700", "004135", "jr-saikyo"],
       /* 総武快速線 and 総武本線 share 東京→千葉 over the one
          formal line 総武線. */
-      ["JR総武快速線", "jr-sobu-rapid", "003766", "004173"],
+      ["JR総武快速線", "jr-sobu-rapid", "003766", "004173", null],
       /* 京王線's restored section, ending at a mid-segment
          station no other service serves. */
-      ["京王線", "keio", "003821", "003971"],
+      ["京王線", "keio", "003821", "003971", null],
     ] as const;
-    for (const [name, serviceId, fromStationId, toStationId] of cases) {
+    for (const [name, serviceId, fromStationId, toStationId, recordedServiceId] of cases) {
       const coverage = computeRiddenLineCoverage(
         [
           {
             ...base,
             name,
             serviceId,
+            recordedServiceId,
             rideState: "partial" as const,
             fromStationId,
             toStationId,
@@ -777,6 +776,38 @@ describe("rides whose route the record cannot pin down (integrated review round 
         597,
       );
       expect(coverage.perService.get(serviceId)!.riddenKm).toBeGreaterThan(0);
+    }
+  });
+
+  test("an ambiguous blockless section uses its own recorded service", () => {
+    const row = {
+      ...base,
+      name: "山手線",
+      serviceId: "yamanote",
+      recordedServiceId: "yamanote",
+      rideState: "partial" as const,
+    };
+    const section = {
+      fromStationId: "003766",
+      toStationId: "003700",
+      direction: "inner" as const,
+      blockId: null,
+    };
+    for (const [recordedServiceId, expectedKm] of [
+      [null, 0],
+      ["jr-chuo-rapid", 0],
+      ["yamanote", 16.93],
+    ] as const) {
+      const coverage = computeRiddenLineCoverage(
+        [{ ...row, sections: [{ ...section, recordedServiceId }] }],
+        GEOMETRIES,
+        597,
+      );
+      expect(coverage.perService.get("yamanote")?.riddenKm).toBeCloseTo(
+        expectedKm,
+        1,
+      );
+      expect(coverage.networkRiddenKm).toBeCloseTo(expectedKm, 1);
     }
   });
 

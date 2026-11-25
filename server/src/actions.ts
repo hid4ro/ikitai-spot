@@ -13,11 +13,11 @@ import {
   isKnownMasterVersion,
   isN02StationId,
   isRiddenServiceLinkReviewable,
-  primarySectionRouteAmbiguous,
+  recordedSectionFitsService,
   resolveRiddenService,
   serviceById,
   serviceFullPathSnapshot,
-  serviceStationIds,
+  sectionEndpointsKnownToService,
   SERVICE_MASTER_VERSION,
   SERVICE_MATCH_VERSION,
   stationRefById,
@@ -43,6 +43,7 @@ const riddenSectionSchema = z.object({
   toStationName: z.string().nullable(),
   direction: z.enum(["inner", "outer"]).nullable(),
   blockId: z.string().nullable(),
+  recordedServiceId: z.string().nullable(),
 });
 
 /* The ridden-lines ride fields (stage 1, subtask 1420): which
@@ -66,6 +67,7 @@ const rideFieldsSchema = z.object({
 
 type RideFields = {
   serviceId: string | null;
+  recordedServiceId: string | null;
   serviceLinkSource: ServiceLinkSource;
   serviceMatchVersion: string | null;
   rideState: RideState;
@@ -143,6 +145,7 @@ export function resolveRideFields(
   if (rideState === "unknown") {
     return {
       ...link,
+      recordedServiceId: null,
       rideState: "unknown",
       fromStationId: null,
       fromStationName: null,
@@ -177,6 +180,7 @@ export function resolveRideFields(
     }
     return {
       ...link,
+      recordedServiceId: service.id,
       rideState: "partial",
       fromStationId,
       fromStationName: supplied.fromStationName?.trim() || null,
@@ -210,6 +214,7 @@ export function resolveRideFields(
       : null;
   return {
     ...link,
+    recordedServiceId: service.id,
     rideState: "full",
     fromStationId: null,
     fromStationName: null,
@@ -253,45 +258,13 @@ export function isUniqueConstraintError(error: unknown): boolean {
   return false;
 }
 
-/* Whether a link confirmation's chosen service can honestly
-   carry the row's recorded ride (integrated review round 1,
-   high): relinking used to change only the link columns, so a
-   full ride recorded on 中央線（快速） became 京王線's full ride
-   (its stored snapshot painted and counted under the new
-   service), and a partial section's endpoints were projected
-   onto the new service's path wherever they landed. The fit is
-   judged from the master alone:
-   - unlinking always fits (nothing is aggregated);
-   - confirming the saved service always fits (the ride was
-     recorded under that very link);
-   - a full ride fits only the service its stored path snapshot
-     was cut from (the snapshot's pathId is the service's);
-   - a partial ride (primary section and every added section)
-     fits only when both endpoints are stations the chosen
-     service is known to serve (serviceStationIds);
-   - an added section that names a master block fits only when
-     that block belongs to the chosen service — the block ID is
-     the section's own record of which service it was ridden on,
-     and a block of the old service must not carry the section
-     onto the new one (integrated review round 2, high: a
-     総武本線 block's 東京→千葉 section completed 総武快速線）;
-   - the primary section fits only when its endpoints pin down
-     the route: when the same pair also runs on another service
-     over a different route (primarySectionRouteAmbiguous),
-     the pair alone cannot say which route was ridden, so the
-     section cannot be re-attributed by a relink (integrated
-     review round 2, high: 中央線（快速）'s 東京→新宿 counted
-     as 山手線's after a relink). Added sections are exempt —
-     they were validated against the row's service when added,
-     and a block ID pins them outright.
-   Anything else cannot be judged from the record, so the
-   confirmation is refused and the original row — link and ride
-   alike — is left exactly as stored. Returns a problem phrase,
-   or null when the choice fits. Exported for the regression
-   tests. */
+/* Check every recorded section before changing the link. A full ride uses
+   its recorded path or service, while a partial ride uses the same section
+   attribution as coverage. */
 export function riddenLinkFitProblem(
   line: {
     serviceId: string | null;
+    recordedServiceId: string | null;
     rideState: string | null;
     fromStationId: string | null;
     toStationId: string | null;
@@ -300,12 +273,13 @@ export function riddenLinkFitProblem(
   sections: readonly {
     fromStationId: string;
     toStationId: string;
+    direction: string | null;
     blockId: string | null;
+    recordedServiceId: string | null;
   }[],
   targetServiceId: string | null,
 ): string | null {
   if (targetServiceId == null) return null;
-  if (targetServiceId === line.serviceId) return null;
   const target = serviceById(targetServiceId);
   if (!target) return null;
   const state = normalizeRideState(line.rideState);
@@ -313,49 +287,39 @@ export function riddenLinkFitProblem(
     let snapshotPathId: string | null = null;
     if (line.pathSnapshot) {
       try {
-        const parsed: unknown = JSON.parse(line.pathSnapshot);
-        if (
-          typeof parsed === "object" &&
-          parsed !== null &&
-          typeof (parsed as { pathId?: unknown }).pathId === "string"
-        ) {
-          snapshotPathId = (parsed as { pathId: string }).pathId;
-        }
+        const parsed = JSON.parse(line.pathSnapshot) as { pathId?: unknown } | null;
+        if (typeof parsed?.pathId === "string") snapshotPathId = parsed.pathId;
       } catch {
-        snapshotPathId = null;
+        // Fall back to the recorded service when the snapshot cannot be read.
       }
     }
-    if (snapshotPathId !== target.pathId) {
-      return `a full ride's recorded path belongs to another service, not ${target.displayName}`;
-    }
-    return null;
+    const fits = snapshotPathId
+      ? snapshotPathId === target.pathId
+      : (line.recordedServiceId ?? line.serviceId) === target.id;
+    return fits ? null : `the recorded full ride's path cannot be attributed to ${target.displayName}`;
   }
-  const knownStations = serviceStationIds(target.id);
-  const pairs: { fromStationId: string; toStationId: string }[] = [
-    ...(state === "partial" && line.fromStationId && line.toStationId
-      ? [{ fromStationId: line.fromStationId, toStationId: line.toStationId }]
-      : []),
-    ...sections,
-  ];
-  for (const pair of pairs) {
-    for (const stationId of [pair.fromStationId, pair.toStationId]) {
-      if (!knownStations.has(stationId)) {
-        return `the recorded section's station ${stationId} is not a known station of ${target.displayName}`;
-      }
-    }
+  const pairs = sections.map((section) => ({
+    ...section,
+    direction: normalizeSectionDirection(section.direction),
+  }));
+  if (state === "partial" && line.fromStationId && line.toStationId) {
+    pairs.unshift({
+      fromStationId: line.fromStationId,
+      toStationId: line.toStationId,
+      direction: null,
+      blockId: null,
+      recordedServiceId: line.recordedServiceId,
+    });
   }
-  for (const section of sections) {
-    if (section.blockId != null && !blockById(target.id, section.blockId)) {
-      return `the recorded section's block ${section.blockId} does not belong to ${target.displayName}`;
+  for (const section of pairs) {
+    if (recordedSectionFitsService(target.id, section)) continue;
+    if (!sectionEndpointsKnownToService(target.id, section.fromStationId, section.toStationId)) {
+      return `the recorded section's endpoints are not known stations of ${target.displayName}`;
     }
-  }
-  if (
-    state === "partial" &&
-    line.fromStationId &&
-    line.toStationId &&
-    primarySectionRouteAmbiguous(target.id, line.fromStationId, line.toStationId)
-  ) {
-    return `the recorded section's endpoints run on more than one route, so which route was ridden cannot be told from the record for ${target.displayName}`;
+    if (section.blockId != null) {
+      return `the recorded section's block ${section.blockId} does not fit ${target.displayName}`;
+    }
+    return `the recorded section's route cannot be determined for ${target.displayName} from its endpoints and direction`;
   }
   return null;
 }
@@ -1702,6 +1666,7 @@ export const Actions = {
           note: z.string().nullable(),
           context: z.string().nullable(),
           serviceId: z.string().nullable(),
+          recordedServiceId: z.string().nullable(),
           serviceLinkSource: z.enum(["auto", "explicit"]).nullable(),
           serviceMatchVersion: z.string().nullable(),
           rideState: rideStateSchema,
@@ -1755,6 +1720,7 @@ export const Actions = {
           note: r.note,
           context: r.context,
           serviceId: r.serviceId,
+          recordedServiceId: r.recordedServiceId,
           serviceLinkSource: r.serviceLinkSource,
           serviceMatchVersion: r.serviceMatchVersion,
           rideState: normalizeRideState(r.rideState),
@@ -1772,6 +1738,7 @@ export const Actions = {
             toStationName: s.toStationName,
             direction: normalizeSectionDirection(s.direction),
             blockId: s.blockId,
+            recordedServiceId: s.recordedServiceId,
           })),
         })),
         total: rows.length,
@@ -1889,17 +1856,11 @@ export const Actions = {
      serviceMatchVersion null); the ride state, section, note,
      context and dates are untouched. An explicit unlink can be
      confirmed again, so a mistaken unlink is reversible.
-     The choice must also FIT the recorded ride (integrated
-     review round 1, high — see riddenLinkFitProblem): a full
-     ride's stored path belongs to the service it was recorded
-     on, and a partial section's endpoints must be stations of
-     the chosen service. A choice that cannot carry the record
-     is refused, leaving the row exactly as stored — the
-     original record is preserved and nothing is aggregated
-     under the wrong service. */
+     The recorded service stays available after unlinking. A
+     different target must fit every recorded section. */
   confirmRiddenServiceLink: defineAction({
     description:
-      "Records a human's confirmation of one ridden-lines ledger row's service link: the row showed 「系統の連携を要確認」 because its saved service ID disagrees with the current name rule, and the caller picks the service actually ridden — the saved one (confirm), a different one (relink), or none (unlink with null). Only the three link columns change; the ride state, section, note, context and dates are untouched. The choice must fit the recorded ride: a full ride's stored path belongs to its own service, a partial section's endpoints must be stations of the chosen service, an added section's named block must belong to the chosen service, and a primary section whose endpoints run on more than one route cannot be re-attributed — a choice that cannot carry the record is refused and the row is left unchanged.",
+      "Confirms, changes or clears a ridden-lines ledger row's service link. The original recorded service and ride details are kept. The target must fit the full ride's path or every recorded section. Sections without a matching recorded service or block require endpoints and direction that identify the route.",
     request: z.object({
       id: z.number().int().positive(),
       serviceId: z.string().max(100).nullable(),
@@ -1931,7 +1892,9 @@ export const Actions = {
         .select({
           fromStationId: schema.riddenLineSections.fromStationId,
           toStationId: schema.riddenLineSections.toStationId,
+          direction: schema.riddenLineSections.direction,
           blockId: schema.riddenLineSections.blockId,
+          recordedServiceId: schema.riddenLineSections.recordedServiceId,
         })
         .from(schema.riddenLineSections)
         .where(eq(schema.riddenLineSections.riddenLineId, args.id));
@@ -1941,14 +1904,22 @@ export const Actions = {
           `confirmRiddenServiceLink: "${line.name}" cannot be linked there — ${fitProblem}; the recorded link was left unchanged`,
         );
       }
-      await db
+      const updated = await db
         .update(schema.riddenLines)
         .set({
           serviceId: args.serviceId,
           serviceLinkSource: "explicit",
           serviceMatchVersion: null,
         })
-        .where(eq(schema.riddenLines.id, args.id));
+        .where(and(
+          eq(schema.riddenLines.id, args.id),
+          sql`${schema.riddenLines.serviceId} IS ${line.serviceId}`,
+          sql`${schema.riddenLines.serviceLinkSource} IS ${line.serviceLinkSource}`,
+        ))
+        .returning({ id: schema.riddenLines.id });
+      if (updated.length === 0) {
+        throw new Error(`confirmRiddenServiceLink: the link for "${line.name}" changed during confirmation`);
+      }
       ctx.invalidateQueries();
       return { ok: true as const, serviceId: args.serviceId };
     },
@@ -2162,9 +2133,8 @@ export const Actions = {
          runtime twin of migration 0014's dedupe rescue (integrated
          review round 2, H-3) — without it the ledger could no
          longer untick the block the section covers. The block was
-         already validated against this service and these very
-         endpoints above, and the duplicate shares the endpoints,
-         so adopting it cannot mislink the section. */
+         already validated against this service above. The existing
+         section must also fit this service before attaching a block. */
       const findDuplicate = async () => {
         const existing = await db
           .select()
@@ -2183,10 +2153,21 @@ export const Actions = {
         existing: typeof schema.riddenLineSections.$inferSelect,
       ) => {
         if (blockId && !existing.blockId) {
+          if (!recordedSectionFitsService(service.id, {
+            ...existing,
+            direction: normalizeSectionDirection(existing.direction),
+          })) {
+            throw new Error(
+              `addRiddenSection: the existing section's recorded route cannot be attributed to ${service.displayName}`,
+            );
+          }
           await db
             .update(schema.riddenLineSections)
             .set({ blockId })
-            .where(eq(schema.riddenLineSections.id, existing.id));
+            .where(and(
+              eq(schema.riddenLineSections.id, existing.id),
+              isNull(schema.riddenLineSections.blockId),
+            ));
           ctx.invalidateQueries();
         }
       };
@@ -2207,6 +2188,7 @@ export const Actions = {
             toStationName: toName,
             direction,
             blockId,
+            recordedServiceId: service.id,
           })
           .returning({ id: schema.riddenLineSections.id });
         insertedId = inserted[0]?.id ?? null;

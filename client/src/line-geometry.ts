@@ -40,13 +40,11 @@
 
 import {
   SERVICE_MASTER,
-  blockById,
   blocksForService,
-  primarySectionRouteAmbiguous,
+  recordedSectionFitsService,
   serviceBoundaryStations,
   serviceById,
   serviceIsLoop,
-  serviceStationIds,
   stationRefById,
   usableRiddenService,
   type FullPathSnapshot,
@@ -917,14 +915,12 @@ type RecordedSection = {
   fromStationId: string;
   toStationId: string;
   direction: "inner" | "outer" | null;
-  /* The master block the section names, when it is exactly one
-     block — the section's own record of which service it was
-     ridden on (stage 2). Optional in the type because older
-     fixtures omit it; the API always sends it. */
   blockId?: string | null;
+  recordedServiceId?: string | null;
 };
 
 type RecordedRiddenLine = RiddenServiceLink & {
+  recordedServiceId?: string | null;
   rideState: "unknown" | "partial" | "full";
   fromStationId: string | null;
   toStationId: string | null;
@@ -932,72 +928,39 @@ type RecordedRiddenLine = RiddenServiceLink & {
   sections?: readonly RecordedSection[];
 };
 
-/* The intervals of one ledger row that may honestly be counted
-   under the given service. Two kinds of recorded sections are
-   held out (integrated review round 2, high — the client twin
-   of the server's riddenLinkFitProblem):
-   - an added section naming a block of ANOTHER service: the
-     block ID is the section's own record of where it was
-     ridden, so it must not be projected onto this service's
-     path (a 総武本線 block's 東京→千葉 section completed
-     総武快速線 this way);
-   - the primary section whose endpoints run on more than one
-     route (primarySectionRouteAmbiguous): the pair alone
-     cannot say which route was ridden （中央線（快速）'s
-     東京→新宿 is also 山手線's pair, over a different route),
-     so it counts for neither service until it is recorded as
-     a block section, which pins the route outright. */
+/* The intervals attributable to this link, using the same route
+   evidence as link confirmation. Both the map and the block picker
+   use these intervals. */
 export function riddenLineIntervals(
   row: RecordedRiddenLine,
   serviceId: string,
 ): RideInterval[] {
   const intervals: RideInterval[] = [];
-  const addInterval = (
-    fromStationId: string,
-    toStationId: string,
-    direction: RecordedSection["direction"],
-  ) => {
-    const from = stationRefById(fromStationId);
-    const to = stationRefById(toStationId);
+  const addInterval = (section: RecordedSection) => {
+    if (!recordedSectionFitsService(serviceId, section)) return;
+    const from = stationRefById(section.fromStationId);
+    const to = stationRefById(section.toStationId);
+    const { direction } = section;
     if (from && to) intervals.push({ serviceId, from, to, direction });
   };
   if (row.rideState === "partial" && row.fromStationId && row.toStationId) {
-    if (
-      !primarySectionRouteAmbiguous(serviceId, row.fromStationId, row.toStationId)
-    ) {
-      addInterval(row.fromStationId, row.toStationId, null);
-    }
+    addInterval({
+      fromStationId: row.fromStationId,
+      toStationId: row.toStationId,
+      direction: null,
+      recordedServiceId: row.recordedServiceId,
+    });
   }
   for (const section of row.sections ?? []) {
-    if (section.blockId != null && !blockById(serviceId, section.blockId)) {
-      continue;
-    }
-    addInterval(section.fromStationId, section.toStationId, section.direction);
+    addInterval(section);
   }
   return intervals;
 }
 
-/* Translate saved rides into the paths and intervals used by both
-   the map and distance totals. Unknown rides have a path but no
-   interval, so they are painted dashed and count zero kilometres.
-   A ride recorded under one service must never be counted as
-   another's (integrated review round 1, high — a relink changes
-   only the link columns, so the record itself is the only
-   evidence of fit):
-   - a full ride's stored snapshot is cut from its own service
-     (its pathId); a snapshot naming a different service means
-     the full ride belongs elsewhere, and the row is held out of
-     the aggregation entirely — the stored record is untouched,
-     it simply completes nothing here;
-   - a partial section counts only when both endpoints are
-     stations the linked service is known to serve
-     (serviceStationIds); a section recorded on another service
-     is held the same way, instead of being projected onto this
-     service's path wherever its endpoints happen to land;
-   - and riddenLineIntervals holds two more kinds out: an added
-     section naming another service's block, and a primary
-     section whose endpoints run on more than one route (see
-     its comment). */
+/* Build paths and distances from saved rides. A full ride's snapshot
+   or recorded service, when available, must fit the current link.
+   Partial rides contribute only their attributable intervals. Paths
+   with no intervals are painted dashed and count zero kilometres. */
 export function computeRiddenLineCoverage(
   rows: readonly RecordedRiddenLine[],
   geometries: LineGeometryMap,
@@ -1024,7 +987,10 @@ export function computeRiddenLineCoverage(
     const snapshot = parseFullPathSnapshot(row.pathSnapshot);
     const snapshotFits =
       snapshot == null || snapshot.pathId === service.pathId;
-    if (row.rideState === "full" && !snapshotFits) {
+    const fullRideFits = snapshot
+      ? snapshotFits
+      : row.recordedServiceId == null || row.recordedServiceId === service.id;
+    if (row.rideState === "full" && !fullRideFits) {
       /* Held: a full ride recorded on another service. */
       continue;
     }
@@ -1041,14 +1007,7 @@ export function computeRiddenLineCoverage(
     if (row.rideState === "full") {
       contribution.full = true;
     } else if (row.rideState === "partial") {
-      const knownStations = serviceStationIds(service.id);
-      contribution.intervals.push(
-        ...riddenLineIntervals(row, service.id).filter(
-          (interval) =>
-            knownStations.has(interval.from.id) &&
-            knownStations.has(interval.to.id),
-        ),
-      );
+      contribution.intervals.push(...riddenLineIntervals(row, service.id));
     }
   }
   for (const [serviceId, contribution] of contributions) {

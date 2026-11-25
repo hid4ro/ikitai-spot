@@ -99,6 +99,8 @@ export const riddenLines = sqliteTable("ridden_lines", {
   note: text("note"),
   context: text("context"),
   serviceId: text("service_id"),
+  // The service recorded with the primary ride survives link corrections.
+  recordedServiceId: text("recorded_service_id"),
   // Old rows have no source. Automatic matching records its own rule version,
   // separate from the master version of the recorded ride.
   serviceLinkSource: text("service_link_source", { enum: ["auto", "explicit"] }),
@@ -135,6 +137,8 @@ export const riddenLineSections = sqliteTable(
     toStationName: text("to_station_name"),
     direction: text("direction"),
     blockId: text("block_id"),
+    // A section can be recorded under a different link from the primary ride.
+    recordedServiceId: text("recorded_service_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
       .$defaultFn(() => new Date()),
