@@ -8,7 +8,11 @@
    chips already use, and the tick label built from it.
    Run with: bun test client/src/progress-format.test.ts */
 import { describe, expect, test } from "bun:test";
-import { formatProgressValue, progressTickLabel } from "./progress-format";
+import {
+  formatProgressValue,
+  progressTickFraction,
+  progressTickLabel,
+} from "./progress-format";
 
 describe("formatProgressValue", () => {
   test("raw float sums collapse to one decimal", () => {
@@ -55,6 +59,36 @@ describe("progressTickLabel", () => {
   test("a name with no row keeps the bare name", () => {
     expect(progressTickLabel("未収録の事業者", undefined)).toBe(
       "未収録の事業者",
+    );
+  });
+});
+
+/* The axis tick renders the name and the fraction on separate
+   lines (subtask 1576): the joined one-line label was wider
+   than the label column, so its head was clipped on device.
+   These pin the split half the tick's second line draws. */
+describe("progressTickFraction", () => {
+  test("operator row: the formatted fraction on its own", () => {
+    expect(
+      progressTickFraction({ done: 155.5461723571229, total: 6960.6 }),
+    ).toBe("155.5/6,960.6");
+    expect(
+      progressTickFraction({ done: 3.3101422789023127, total: 12.4 }),
+    ).toBe("3.3/12.4");
+  });
+
+  test("municipality row: counts stay plain integers", () => {
+    expect(progressTickFraction({ done: 12, total: 63 })).toBe("12/63");
+  });
+
+  test("no row, no fraction (the tick draws the name alone)", () => {
+    expect(progressTickFraction(undefined)).toBeUndefined();
+  });
+
+  test("name plus fraction recomposes the one-line label", () => {
+    const row = { done: 26.07164613837768, total: 85.1 };
+    expect(`京王電鉄 ${progressTickFraction(row)}`).toBe(
+      progressTickLabel("京王電鉄", row),
     );
   });
 });

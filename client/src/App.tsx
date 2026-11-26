@@ -111,7 +111,7 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
-import { formatProgressValue, progressTickLabel } from "./progress-format";
+import { formatProgressValue, progressTickFraction } from "./progress-format";
 import {
   autoFitGate,
   autoFitMayApply,
@@ -1196,6 +1196,37 @@ function StackedProgressBars({
   onSelect?: (name: string) => void;
 }) {
   const byName = new Map(rows.map((r) => [r.name, r]));
+  /* The tick is two lines — the group name over its exact
+     fraction — because the one-line label （東日本旅客鉄道
+     155.5/6,960.6) outgrew the label column and recharts
+     right-anchors ticks, so the name's head ran off the chart's
+     left edge and was clipped on device (subtask 1576). Split
+     in two, each line fits the column: names run to 8 full-width
+     glyphs (≈88px at 11px) and fractions to ≈13 half-width
+     glyphs (≈86px), so width 100 holds both and hands the bars
+     more room than the old one-line width 124 did. */
+  const renderTick = (props: {
+    x?: number;
+    y?: number;
+    payload?: { value?: string };
+  }) => {
+    const name = String(props.payload?.value ?? "");
+    const fraction = progressTickFraction(byName.get(name));
+    const x = props.x ?? 0;
+    const y = props.y ?? 0;
+    return (
+      <text x={x} y={y} textAnchor="end" fontSize={11} fill="currentColor">
+        <tspan x={x} dy={fraction ? "-0.58em" : "0.35em"}>
+          {name}
+        </tspan>
+        {fraction && (
+          <tspan x={x} dy="1.2em">
+            {fraction}
+          </tspan>
+        )}
+      </text>
+    );
+  };
   return (
     <div className="text-[var(--dim)]" aria-hidden="true">
       <ResponsiveContainer width="100%" height={rows.length * 38 + 46}>
@@ -1205,11 +1236,10 @@ function StackedProgressBars({
           <YAxis
             type="category"
             dataKey="name"
-            width={124}
-            tick={{ fontSize: 11 }}
+            width={100}
+            tick={renderTick}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(name: string) => progressTickLabel(name, byName.get(name))}
           />
           <Tooltip
             contentStyle={CHART_TOOLTIP_STYLE}

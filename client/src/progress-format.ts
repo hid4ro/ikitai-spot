@@ -13,6 +13,22 @@ export function formatProgressValue(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
 }
 
+/* The fraction half of the tick label （乗車済み/全体）, on its
+   own so the axis tick can set it on a second line under the
+   name (subtask 1576): the one-line label （東日本旅客鉄道
+   155.5/6,960.6) measures wider than the 124px label column,
+   and recharts right-anchors the tick, so the overflow ran off
+   the chart's left edge and the name's head was clipped on
+   device （旅客鉄道 155.5/6,960.6). Split in two, the name
+   (≤8 full-width glyphs) and the fraction (≈13 half-width
+   glyphs) each fit a ~100px column. */
+export function progressTickFraction(
+  row: { done: number; total: number } | undefined,
+): string | undefined {
+  if (!row) return undefined;
+  return `${formatProgressValue(row.done)}/${formatProgressValue(row.total)}`;
+}
+
 /* The stacked bars' axis tick label: the group name plus its
    exact fraction (東日本旅客鉄道 155.5/6,960.6), so the numbers
    survive without hovering. A name with no matching row keeps
@@ -21,6 +37,6 @@ export function progressTickLabel(
   name: string,
   row: { done: number; total: number } | undefined,
 ): string {
-  if (!row) return name;
-  return `${name} ${formatProgressValue(row.done)}/${formatProgressValue(row.total)}`;
+  const fraction = progressTickFraction(row);
+  return fraction ? `${name} ${fraction}` : name;
 }
