@@ -153,12 +153,22 @@ function bottomTabBarHeightPx(): number {
 }
 
 /* Fullscreen toggle for the two map panes (subtask 1484): one
-   button per map, top-right over the canvas. The fullscreen itself
-   is CSS, not the Fullscreen API — the API would hide the bottom
-   tab bar, and the reader asked for the bar to stay on top of the
-   map so tabs can still be switched while fullscreen. The button
-   lives in the pane's wrapper (the element that goes fixed), so it
-   stays visible in the fallback / failure states too. */
+   button per map, in the top-right column over the canvas —
+   stacked BELOW the map runtime's own navigation control, not in
+   the corner itself: the runtime places its zoom / compass group
+   at the map's top-right (10px margin, three stacked 29px
+   buttons, so its bottom edge sits 97px below the map's top), and
+   the original corner placement landed this button exactly on
+   the zoom-in button (reader report 2026-11-26). The offset
+   clears that group in both layouts: the non-fullscreen wrapper
+   adds 4px of top padding above the map (4 + 10 + 87 = 101px),
+   the fullscreen wrapper adds none (97px); 109px leaves a gap
+   under the group either way. The fullscreen itself is CSS, not
+   the Fullscreen API — the API would hide the bottom tab bar, and
+   the reader asked for the bar to stay on top of the map so tabs
+   can still be switched while fullscreen. The button lives in
+   the pane's wrapper (the element that goes fixed), so it stays
+   visible in the fallback / failure states too. */
 function MapFullscreenButton({
   fullscreen,
   onToggle,
@@ -173,7 +183,7 @@ function MapFullscreenButton({
       aria-label={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
       aria-pressed={fullscreen}
       title={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
-      className="absolute right-2 top-2 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
+      className="absolute right-2 top-[109px] z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
     >
       {fullscreen ? (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
