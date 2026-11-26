@@ -2,10 +2,12 @@
    per-tab one-shot auto-fit state and its gate (v89 review
    round 1, finding 1; round 2, finding 1), the per-tab run
    tokens and the apply-time validity check for fits that
-   resolve late (round 3, findings 1–2), and the fitBounds
-   padding that keeps a fullscreen map's frame clear of the
-   bottom tab bar (finding 6). Kept dependency-light so both
-   rules are regression-testable without mounting the map —
+   resolve late (round 3, findings 1–2), the publish-time
+   validity check for the shared location those reads feed
+   (round 4), and the fitBounds padding that keeps a
+   fullscreen map's frame clear of the bottom tab bar
+   (finding 6). Kept dependency-light so both rules are
+   regression-testable without mounting the map —
    see map-framing.test.ts. */
 
 /* The two record tabs that own a default framing. The 路線
@@ -143,6 +145,34 @@ export type AutoFitApplyInput = {
 
 export function autoFitMayApply(input: AutoFitApplyInput): boolean {
   return input.tabShowing && input.runCurrent && !input.focusPicked;
+}
+
+/* Whether a framing run may publish its location read into
+   the SHARED location — the position the スポット tab plots
+   its marker from and recomputes its nearest spot and frame
+   from (v89 review round 4). Publishing happens when the
+   read lands, BEFORE the camera check above ever runs, so a
+   superseded run's stale coordinates rewrote the shared
+   location even though its fit was duly refused: after a
+   路線 → 市区町村 → 路線 round trip, the first read landing
+   last dragged the スポット map back to the old position.
+   A superseded run's result is discarded before it can
+   rewrite anything. Currency is the ONLY condition, by
+   design: a still-current run holds the freshest real
+   position, so its read keeps the shared location honest
+   even when its camera fit may not apply — the reader
+   picked the tab's focus meanwhile, or switched tabs (the
+   スポット location deliberately follows record-tab reads,
+   round 1, finding 8). Only supersession makes a read
+   stale. */
+export type AutoFitPublishInput = {
+  runCurrent: boolean;
+};
+
+export function autoFitMayPublishLocation(
+  input: AutoFitPublishInput,
+): boolean {
+  return input.runCurrent;
 }
 
 /* fitBounds padding for the record map. Off fullscreen the

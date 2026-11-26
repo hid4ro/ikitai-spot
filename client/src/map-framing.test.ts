@@ -1,16 +1,20 @@
 /* Regression tests for the record map's framing decisions:
    the per-tab auto-fit shots and their gate (v89 review
-   round 1, finding 1; round 2, finding 1) and the fullscreen
-   fitBounds padding (finding 6).
+   round 1, finding 1; round 2, finding 1), the run tokens
+   and apply-time validity for late fits (round 3), the
+   publish-time validity for the shared location (round 4),
+   and the fullscreen fitBounds padding (finding 6).
    Run with: bun test client/src/map-framing.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
   autoFitGate,
   autoFitMayApply,
+  autoFitMayPublishLocation,
   createAutoFitRuns,
   createAutoFitShots,
   fitBoundsPadding,
   type AutoFitGateInput,
+  type AutoFitTab,
 } from "./map-framing";
 
 describe("createAutoFitShots (the record tabs' default framing)", () => {
@@ -256,5 +260,89 @@ describe("auto-fit runs (a late fit must still be valid when it lands)", () => {
         focusPicked: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("auto-fit runs (a superseded read must not rewrite the shared location)", () => {
+  /* Round 4 finding: the framing functions publish their
+     location read into the SHARED location (the スポット
+     tab's marker position and its nearest-spot framing)
+     before the apply-time check above ever runs. The camera
+     fit of a superseded run is refused, but its stale
+     coordinates have already replaced the shared location,
+     so moving to スポット plots the marker — and recomputes
+     the nearest spot and the frame — from the OLD position.
+     The publish decision below is what the framing functions
+     consult after the read lands and BEFORE the shared
+     location is rewritten; these tests replay the reviewed
+     sequence against a stand-in for that shared location. */
+
+  test("the round trip's older read may not publish after the newer read landed", () => {
+    /* The reviewed sequence: ① 路線 opens and its first
+       location read is held back. ② The reader goes
+       路線 → 市区町村 → 路線; the return starts a second
+       路線 run, whose read returns the NEW position.
+       ③ The first read finally returns the OLD position,
+       and the reader then moves to スポット. */
+    const runs = createAutoFitRuns();
+    const shared: { loc: { lat: number; lng: number } | null } = { loc: null };
+    const publish = (
+      tab: AutoFitTab,
+      token: number,
+      loc: { lat: number; lng: number },
+    ): boolean => {
+      if (
+        !autoFitMayPublishLocation({
+          runCurrent: runs.isCurrent(tab, token),
+        })
+      )
+        return false;
+      shared.loc = loc;
+      return true;
+    };
+    const first = runs.begin("lines");
+    const second = runs.begin("lines");
+    /* ② The newer run's read lands first and publishes. */
+    expect(publish("lines", second, { lat: 35.7, lng: 139.7 })).toBe(true);
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    /* ③ The superseded run's late read is discarded BEFORE
+       it can rewrite the shared location, so スポット keeps
+       the newer position. */
+    expect(publish("lines", first, { lat: 35.6, lng: 139.6 })).toBe(false);
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    /* …and its camera fit stays refused as well (round 3). */
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("lines", first),
+        focusPicked: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("a still-current run publishes even when its camera fit may not apply", () => {
+    /* The publish decision is deliberately narrower than
+       the apply decision: a run that is still its tab's
+       latest holds the freshest real position, so its read
+       keeps the shared location honest even when the camera
+       fit itself is refused — the reader picked the tab's
+       focus while the read was out, or has since switched
+       tabs (the スポット tab's location deliberately
+       follows record-tab reads, round 1, finding 8). Only
+       supersession makes a read stale. */
+    const runs = createAutoFitRuns();
+    const run = runs.begin("municipalities");
+    expect(
+      autoFitMayPublishLocation({
+        runCurrent: runs.isCurrent("municipalities", run),
+      }),
+    ).toBe(true);
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("municipalities", run),
+        focusPicked: true,
+      }),
+    ).toBe(false);
   });
 });
