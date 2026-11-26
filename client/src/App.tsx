@@ -113,6 +113,8 @@ import {
 import { conquestTimelineForVariant } from "./conquest-timeline";
 import {
   autoFitGate,
+  autoFitMayApply,
+  createAutoFitRuns,
   createAutoFitShots,
   fitBoundsPadding,
 } from "./map-framing";
@@ -3788,6 +3790,7 @@ function VisitedMapSection({
   const frameCurrentMunicipality = async (
     manual: boolean,
     onApplied?: () => void,
+    mayApply?: () => boolean,
   ): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
@@ -3815,6 +3818,13 @@ function VisitedMapSection({
          finding 6). The marker is redrawn by the spots framing
          effect there. */
       if (variantRef.current === "spots") return;
+      /* The read can also outlive the run that started it: the
+         reader picked this tab's focus meanwhile, or a newer
+         run of this tab superseded this one. The auto-fit
+         caller passes mayApply to refuse exactly those late
+         landings (review round 3, finding 1); manual calls
+         pass none and always frame. */
+      if (mayApply && !mayApply()) return;
       try {
         stopCamera(map);
         ensureFocusListenersRef.current(map);
@@ -3852,9 +3862,19 @@ function VisitedMapSection({
      initial camera instead of leaving the スポット tab's view.
      Falls back to the whole-country camera when nothing is
      placeable. */
-  const frameVisitedBounds = (onApplied?: () => void) => {
+  const frameVisitedBounds = (
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+  ) => {
     withLiveMapRef.current((map) => {
       if (variantRef.current === "spots") return;
+      /* The fallback belongs to the run that started it: when
+         that run's tab is no longer showing — the reader moved
+         市区町村 → 路線 and the 路線 fit already landed — or a
+         newer run superseded it, or the tab's focus was
+         picked, this fit must not fire on the tab now showing
+         (review round 3, finding 2). */
+      if (mayApply && !mayApply()) return;
       try {
         stopCamera(map);
         let minLng = Infinity;
@@ -3913,6 +3933,7 @@ function VisitedMapSection({
      a tab switch must not yank the new tab's camera. */
   const frameNearestRiddenLine = async (
     onApplied?: () => void,
+    mayApply?: () => boolean,
   ): Promise<boolean> => {
     const loc = await resolveCurrentLocation();
     if (!loc) {
@@ -3934,6 +3955,12 @@ function VisitedMapSection({
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     withLiveMapRef.current((map) => {
       if (variantRef.current !== "lines") return;
+      /* Same late-landing refusal as the municipality
+         framing: a pick made while the read was out, or a
+         newer 路線 run from a tab round trip, retires this
+         run before it can move the camera (review round 3,
+         finding 1). */
+      if (mayApply && !mayApply()) return;
       try {
         stopCamera(map);
         ensureFocusListenersRef.current(map);
@@ -3974,10 +4001,18 @@ function VisitedMapSection({
      in. Returns whether a location was found at all. onApplied
      is forwarded to whichever framing runs: it fires from
      inside the live-map callback, once the fit has actually
-     been issued to the camera (v89 review round 2, finding 1). */
-  const frameRecordDefault = (onApplied?: () => void): Promise<boolean> => {
-    if (variantRef.current === "lines") return frameNearestRiddenLine(onApplied);
-    return frameCurrentMunicipality(false, onApplied);
+     been issued to the camera (v89 review round 2, finding 1).
+     mayApply is forwarded the same way: the framing consults
+     it inside that callback, at the moment the fit would be
+     issued, and drops the fit when the run is no longer valid
+     (v89 review round 3, findings 1–2). */
+  const frameRecordDefault = (
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+  ): Promise<boolean> => {
+    if (variantRef.current === "lines")
+      return frameNearestRiddenLine(onApplied, mayApply);
+    return frameCurrentMunicipality(false, onApplied, mayApply);
   };
   const frameRecordDefaultRef = useRef(frameRecordDefault);
   frameRecordDefaultRef.current = frameRecordDefault;
@@ -3987,6 +4022,13 @@ function VisitedMapSection({
      must not spend 路線's, or 路線 would open on whatever
      camera 市区町村 left behind. */
   const autoFitShotsRef = useRef(createAutoFitShots());
+  /* Run tokens for the same framing (map-framing.ts): each
+     run the effect starts takes the tab's next token, which
+     supersedes the tab's earlier runs — a 路線 run started
+     before a 市区町村 round trip can no longer land after
+     the run the return visit started (v89 review round 3,
+     finding 1). */
+  const autoFitRunsRef = useRef(createAutoFitRuns());
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
        (unification, subtask 1460): its framing effect fits
@@ -4033,20 +4075,43 @@ function VisitedMapSection({
        tab then (v89 review round 2, finding 1). */
     const shotTab = variant;
     const spendShot = () => autoFitShotsRef.current.consume(shotTab);
-    void frameRecordDefaultRef.current(spendShot).then((located) => {
+    /* This run's token and its apply-time validity (v89
+       review round 3, findings 1–2): the framing functions
+       consult mayApply inside their live-map callbacks, at
+       the moment the fit would be issued, and the fallback
+       below consults it before firing at all. The run may
+       apply only while its own tab is still showing, it is
+       still that tab's latest run, and the tab's own focus
+       is unpicked — a pick made while the location read was
+       out, a newer run from a tab round trip, or a move to
+       the other record tab each retire the run, and a run
+       retired without applying spends nothing, so the shot
+       survives for the next visit as before. */
+    const runToken = autoFitRunsRef.current.begin(shotTab);
+    const mayApply = () =>
+      autoFitMayApply({
+        tabShowing: variantRef.current === shotTab,
+        runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
+        focusPicked:
+          shotTab === "lines"
+            ? focusedLineIdRef.current !== null
+            : focusedIdRef.current !== null,
+      });
+    void frameRecordDefaultRef.current(spendShot, mayApply).then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
          visited municipalities' bounds, not the スポット tab's
-         view left behind (review round 1, finding 4). The focus
-         that holds the fallback back is the target tab's own,
-         as with the primary fit above. */
+         view left behind (review round 1, finding 4). The
+         fallback is this run's second half, so it stands or
+         falls with the run: when the reader has moved to the
+         other record tab — whose own fit may already have
+         landed — or this tab's focus was picked meanwhile,
+         mayApply refuses and the visited-bounds fit never
+         fires on the wrong tab (review round 3, finding 2).
+         frameVisitedBounds re-checks mayApply inside its own
+         live-map callback as well. */
       if (located) return;
-      const ownFocusPicked =
-        shotTab === "lines"
-          ? focusedLineIdRef.current !== null
-          : focusedIdRef.current !== null;
-      if (!ownFocusPicked && variantRef.current !== "spots") {
-        frameVisitedBoundsRef.current(spendShot);
-      }
+      if (!mayApply()) return;
+      frameVisitedBoundsRef.current(spendShot, mayApply);
     });
   }, [mapReady, visitedQuery.isPending, riddenQuery.isPending, mapFailed, variant]);
   /* Fullscreen needs a pane to own (v89 review round 2,

@@ -6,6 +6,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   autoFitGate,
+  autoFitMayApply,
+  createAutoFitRuns,
   createAutoFitShots,
   fitBoundsPadding,
   type AutoFitGateInput,
@@ -156,5 +158,103 @@ describe("fitBoundsPadding", () => {
       left: 36,
       right: 36,
     });
+  });
+});
+
+describe("auto-fit runs (a late fit must still be valid when it lands)", () => {
+  /* Round 3, findings 1–2: the framing functions await a
+     location read, and the read can land after the world has
+     moved on — the reader picked a focus, a newer run of the
+     same tab started, or another tab is showing. The run
+     token plus the apply-time decision below are what the
+     live-map callbacks consult before touching the camera;
+     these tests replay the reviewed sequences against them. */
+
+  test("a focus picked while the location read is out refuses the late fit", () => {
+    /* Finding 1, first sequence: 路線 opens and its initial
+       fit starts a location read; while the read is out the
+       reader picks another line, whose framing moves the
+       camera. When the read finally lands, the initial fit
+       must not yank the camera off the pick. */
+    const runs = createAutoFitRuns();
+    const run = runs.begin("lines");
+    /* Still on 路線, still the latest run — but the tab's own
+       focus is now picked, so the late fit may not apply. */
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("lines", run),
+        focusPicked: true,
+      }),
+    ).toBe(false);
+    /* The same run, had nothing been picked, applies. */
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("lines", run),
+        focusPicked: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("a round trip supersedes the first run: its late result may not apply after the newer one", () => {
+    /* Finding 1, second sequence: the first 路線 read is
+       still out when the reader goes 路線 → 市区町村 → 路線.
+       The return starts a second run of the same tab; the
+       newer result applies, and the older result landing
+       afterwards must be refused instead of overwriting it. */
+    const runs = createAutoFitRuns();
+    const first = runs.begin("lines");
+    const second = runs.begin("lines");
+    expect(runs.isCurrent("lines", first)).toBe(false);
+    expect(runs.isCurrent("lines", second)).toBe(true);
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("lines", first),
+        focusPicked: false,
+      }),
+    ).toBe(false);
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("lines", second),
+        focusPicked: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("runs are per-tab: a 市区町村 run does not supersede a 路線 run", () => {
+    const runs = createAutoFitRuns();
+    const linesRun = runs.begin("lines");
+    runs.begin("municipalities");
+    expect(runs.isCurrent("lines", linesRun)).toBe(true);
+  });
+
+  test("the no-location fallback of a 市区町村 run may not land on the 路線 tab", () => {
+    /* Finding 2: 市区町村's read times out with no location
+       after the reader moved to 路線 and the 路線 fit already
+       completed. The fallback (visited bounds) belongs to the
+       run that started it: with 路線 showing, the 市区町村
+       run's apply check reads tabShowing = false and the
+       fallback is refused. */
+    const runs = createAutoFitRuns();
+    const run = runs.begin("municipalities");
+    expect(
+      autoFitMayApply({
+        tabShowing: false,
+        runCurrent: runs.isCurrent("municipalities", run),
+        focusPicked: false,
+      }),
+    ).toBe(false);
+    /* Had the reader stayed on 市区町村, the very same run's
+       fallback may apply. */
+    expect(
+      autoFitMayApply({
+        tabShowing: true,
+        runCurrent: runs.isCurrent("municipalities", run),
+        focusPicked: false,
+      }),
+    ).toBe(true);
   });
 });

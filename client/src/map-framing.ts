@@ -1,6 +1,8 @@
 /* Camera-framing decisions shared by the record map: the
    per-tab one-shot auto-fit state and its gate (v89 review
-   round 1, finding 1; round 2, finding 1) and the fitBounds
+   round 1, finding 1; round 2, finding 1), the per-tab run
+   tokens and the apply-time validity check for fits that
+   resolve late (round 3, findings 1–2), and the fitBounds
    padding that keeps a fullscreen map's frame clear of the
    bottom tab bar (finding 6). Kept dependency-light so both
    rules are regression-testable without mounting the map —
@@ -88,6 +90,59 @@ export function autoFitGate(
   if (tab === "lines" && input.riddenPending) return "wait";
   if (input.focusPicked[tab]) return "spend-without-framing";
   return "frame";
+}
+
+/* Run tokens for the record tabs' default framing (v89
+   review round 3, findings 1–2). A framing run awaits a
+   location read, and the read can outlive the moment that
+   started it: the reader may pick a focus on the tab, leave
+   and come back (starting a NEWER run of the same tab), or
+   still be on another tab when the result lands. begin()
+   issues the tab's next token and thereby supersedes every
+   earlier run of that tab; a run consults isCurrent() at the
+   moment it would touch the camera and drops itself when a
+   newer run has taken over. Tokens are per tab — the two
+   tabs' runs never supersede each other. */
+export type AutoFitRuns = {
+  /* Start a run of this tab: returns its token and
+     supersedes the tab's earlier runs. */
+  begin: (tab: AutoFitTab) => number;
+  /* Whether this token still names the tab's latest run. */
+  isCurrent: (tab: AutoFitTab, token: number) => boolean;
+};
+
+export function createAutoFitRuns(): AutoFitRuns {
+  const latest: Record<AutoFitTab, number> = {
+    municipalities: 0,
+    lines: 0,
+  };
+  return {
+    begin: (tab) => {
+      latest[tab] += 1;
+      return latest[tab];
+    },
+    isCurrent: (tab, token) => token !== 0 && latest[tab] === token,
+  };
+}
+
+/* Whether a framing run may move the camera NOW, evaluated
+   inside the live-map callback at the moment the fit would
+   be issued — for the primary fit and the no-location
+   fallback alike (v89 review round 3, findings 1–2). The
+   run's tab must still be the one showing (a 市区町村 run's
+   fallback must not fire on the 路線 tab), the run must
+   still be that tab's latest (an older read landing after a
+   newer one must not overwrite the newer framing), and the
+   tab's OWN focus must be unpicked (a pick the reader made
+   while the read was out owns the camera). */
+export type AutoFitApplyInput = {
+  tabShowing: boolean;
+  runCurrent: boolean;
+  focusPicked: boolean;
+};
+
+export function autoFitMayApply(input: AutoFitApplyInput): boolean {
+  return input.tabShowing && input.runCurrent && !input.focusPicked;
 }
 
 /* fitBounds padding for the record map. Off fullscreen the
