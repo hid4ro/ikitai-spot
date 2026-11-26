@@ -627,7 +627,7 @@ describe("coverage: dedup and per-service isolation", () => {
     expect(paintedKm).toBeLessThan(41);
   });
 
-  test("a service with no section paints its whole path dashed and counts nothing", () => {
+  test("a service with no section paints its whole path thin and counts nothing", () => {
     /* No intervals and no full rides: every service in the input
        paints its whole path with unknown=true, and none of it
        counts toward the distance. */
@@ -1402,7 +1402,7 @@ describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, rev
   });
 
   test("an unknown ride leaves the whole shape as ghost", () => {
-    /* A row with no section paints its whole path dashed and
+    /* A row with no section paints its whole path thin and
        counts zero kilometres: nothing is subtracted, so the
        ghost is the key's whole 23.46 km shape. */
     const paths = new Map([["yamanote", servicePath("yamanote")]]);

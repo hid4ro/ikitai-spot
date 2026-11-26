@@ -104,7 +104,7 @@ export function variantPaintOps(variant: RecordMapVariant): {
         name: "line-opacity",
         value: municipalitiesHero ? OUTLINE_OPACITY_HERO : OUTLINE_OPACITY_GHOST,
       },
-      /* Ridden lines: casing, color core, dashed unknown. */
+      /* Ridden lines: casing, color core, thin unknown. */
       {
         layer: "visited-lines-casing",
         name: "line-opacity",
@@ -126,9 +126,12 @@ export function variantPaintOps(variant: RecordMapVariant): {
         value: linesHero ? 3.5 : 2,
       },
       {
+        /* The unknown paint IS the unridden look (thin, at the
+           ghost's 0.25), so the hero value matches the ghost's;
+           as the other tab's underlay it drops with the family. */
         layer: "visited-lines-unknown",
         name: "line-opacity",
-        value: linesHero ? 0.6 : 0.28,
+        value: linesHero ? 0.25 : 0.15,
       },
       /* Spot dots: the hero paint is the mount spec (0.6) on the
          スポット tab. On the record tabs the layer is hidden by

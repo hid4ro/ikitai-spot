@@ -111,6 +111,7 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
+import { formatProgressValue, progressTickLabel } from "./progress-format";
 import {
   autoFitGate,
   autoFitMayApply,
@@ -152,23 +153,26 @@ function bottomTabBarHeightPx(): number {
   return bar ? bar.getBoundingClientRect().height : 0;
 }
 
-/* Fullscreen toggle for the two map panes (subtask 1484): one
-   button per map, in the top-right column over the canvas —
-   stacked BELOW the map runtime's own navigation control, not in
-   the corner itself: the runtime places its zoom / compass group
-   at the map's top-right (10px margin, three stacked 29px
-   buttons, so its bottom edge sits 97px below the map's top), and
-   the original corner placement landed this button exactly on
-   the zoom-in button (reader report 2026-11-26). The offset
-   clears that group in both layouts: the non-fullscreen wrapper
-   adds 4px of top padding above the map (4 + 10 + 87 = 101px),
-   the fullscreen wrapper adds none (97px); 109px leaves a gap
-   under the group either way. The fullscreen itself is CSS, not
-   the Fullscreen API — the API would hide the bottom tab bar, and
-   the reader asked for the bar to stay on top of the map so tabs
-   can still be switched while fullscreen. The button lives in
-   the pane's wrapper (the element that goes fixed), so it stays
-   visible in the fallback / failure states too. */
+/* Fullscreen toggle for the shared map pane (subtask 1484):
+   the map's bottom-left corner, over the canvas. It began in
+   the top-right corner, landed exactly on the runtime's zoom-in
+   button, and moved below the navigation group (subtask 1556) —
+   a spot the reader still found awkward (「位置がダサい」, with
+   a bottom-left suggested instead, 2026-11-26; subtask 1564).
+   The bottom-left is free in both layouts: the runtime's
+   navigation control sits top-right and its attribution
+   bottom-right, and nothing else claims the corner. In
+   fullscreen the wrapper is fixed inset-0 UNDER the bottom tab
+   bar (z-30 against the bar's z-40), so the button lifts by the
+   bar's measured height — the same live measurement
+   fitBoundsPadding and the fallback cover's attribution link
+   use — and stays tappable just above the bar. The fullscreen
+   itself is CSS, not the Fullscreen API — the API would hide
+   the bottom tab bar, and the reader asked for the bar to stay
+   on top of the map so tabs can still be switched while
+   fullscreen. The button lives in the pane's wrapper (the
+   element that goes fixed), so it stays visible in the
+   fallback / failure states too. */
 function MapFullscreenButton({
   fullscreen,
   onToggle,
@@ -183,7 +187,8 @@ function MapFullscreenButton({
       aria-label={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
       aria-pressed={fullscreen}
       title={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
-      className="absolute right-2 top-[109px] z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
+      style={fullscreen ? { bottom: bottomTabBarHeightPx() + 8 } : undefined}
+      className="absolute bottom-2 left-2 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
     >
       {fullscreen ? (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1194,9 +1199,9 @@ function StackedProgressBars({
   return (
     <div className="text-[var(--dim)]" aria-hidden="true">
       <ResponsiveContainer width="100%" height={rows.length * 38 + 46}>
-        <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+        <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
           <CartesianGrid horizontal={false} stroke="currentColor" strokeOpacity={0.12} />
-          <XAxis type="number" domain={[0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} />
+          <XAxis type="number" domain={[0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} tickFormatter={(value: number) => formatProgressValue(value)} />
           <YAxis
             type="category"
             dataKey="name"
@@ -1204,14 +1209,11 @@ function StackedProgressBars({
             tick={{ fontSize: 11 }}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(name: string) => {
-              const row = byName.get(name);
-              return row ? `${name} ${row.done}/${row.total}` : name;
-            }}
+            tickFormatter={(name: string) => progressTickLabel(name, byName.get(name))}
           />
           <Tooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(value, name) => [Number(value).toLocaleString(), name]}
+            formatter={(value, name) => [formatProgressValue(Number(value)), name]}
           />
           <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
           <Bar dataKey="done" name={doneName} stackId="total" fill={color} barSize={16} isAnimationActive={false}>
@@ -3103,16 +3105,16 @@ function ensureLineFocusLayers(map: MapLibreLike) {
    line key: two services can share one key — 総武本線 and
    総武快速線 both paint JR・総武線 — and focusing one must not
    hide the other (integrated review round 1, medium). Null
-   restores every line. The dashed unknown layer is excluded the
+   restores every line. The unknown layer is excluded the
    same way: a focused unknown ride must not show both as a
-   dashed whole path and as the focus highlight. */
+   thin whole path and as the focus highlight. */
 function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
   const filter = serviceId
-    ? ["all", ["!=", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["!=", ["get", "dashed"], true];
-  const dashedFilter = serviceId
-    ? ["all", ["==", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["==", ["get", "dashed"], true];
+    ? ["all", ["!=", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
+    : ["!=", ["get", "unknown"], true];
+  const unknownFilter = serviceId
+    ? ["all", ["==", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
+    : ["==", ["get", "unknown"], true];
   if (map.getLayer("visited-lines-casing")) {
     map.setFilter("visited-lines-casing", filter);
   }
@@ -3120,7 +3122,7 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
     map.setFilter("visited-lines-color", filter);
   }
   if (map.getLayer("visited-lines-unknown")) {
-    map.setFilter("visited-lines-unknown", dashedFilter);
+    map.setFilter("visited-lines-unknown", unknownFilter);
   }
 }
 
@@ -3520,9 +3522,9 @@ function VisitedMapSection({
 
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
-     its whole path dashed. A leg's key is its formal line; the
+     its whole path thin. A leg's key is its formal line; the
      color comes from the asset entry for that key. `key`,
-     `serviceId` and `dashed` ride along so a line focus can
+     `serviceId` and `unknown` ride along so a line focus can
      filter its legs OUT of the normal line layers while the
      focus highlight replaces them (see setNormalLineExclusion)
      and so a map tap can resolve the SERVICE that painted the
@@ -3537,7 +3539,7 @@ function VisitedMapSection({
         key: string;
         serviceId: string;
         color: string;
-        dashed: boolean;
+        unknown: boolean;
       };
       geometry: {
         type: "LineString";
@@ -3554,7 +3556,7 @@ function VisitedMapSection({
             key: leg.key,
             serviceId,
             color: entry.color,
-            dashed: painted.unknown,
+            unknown: painted.unknown,
           },
           geometry: { type: "LineString", coordinates: leg.coords },
         });
@@ -5233,7 +5235,7 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "dashed"], true],
+              filter: ["!=", ["get", "unknown"], true],
               paint: {
                 "line-color": "#ffffff",
                 "line-width": 5.5,
@@ -5245,7 +5247,7 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "dashed"], true],
+              filter: ["!=", ["get", "unknown"], true],
               paint: {
                 "line-color": ["get", "color"],
                 "line-width": 3.5,
@@ -5253,21 +5255,25 @@ function VisitedMapSection({
               },
             },
             /* Unknown rides (a row with no section on record):
-               the whole path as a thin dashed line in the
-               service's color — visible, but clearly not a
-               ridden section. The minutes' rule: unknown is
-               never painted as if it were ridden. */
+               the whole path as a thin solid line in the
+               service's color — the same look as the unridden
+               ghost, never a ridden section's strength. The
+               reader's rule: ridden = solid, unridden and
+               unknown = thin, no dashes. The layer stays
+               separate from the ghost so a tap on the track
+               still resolves to the ride's ledger row and a
+               line focus can filter it out (see
+               setNormalLineExclusion). */
             {
               id: "visited-lines-unknown",
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["==", ["get", "dashed"], true],
+              filter: ["==", ["get", "unknown"], true],
               paint: {
                 "line-color": ["get", "color"],
-                "line-width": 2,
-                "line-opacity": 0.6,
-                "line-dasharray": [2, 2],
+                "line-width": 1.6,
+                "line-opacity": 0.25,
               },
             },
           ],
@@ -6622,7 +6628,7 @@ function VisitedMapSection({
      row emphasis applies. The highlight is the row's painted
      legs from the line coverage — a partial ride frames only its
      ridden section, a full ride its whole path, an unknown ride
-     its whole path dashed — so a multi-line service (JR埼京線)
+     its whole path — so a multi-line service (JR埼京線)
      finally has a track to frame. Delete / context-edit controls
      carry data-map-no-fly and never reach here (they are separate
      buttons, checked in RiddenLinesBlock). */
@@ -7295,8 +7301,9 @@ function VisitedMapSection({
                 1482), like the 制覇グラフ below: the 市区町村 tab
                 shows only the municipality headline, the 路線 tab
                 only the line headline and its distance note. The
-                border legend underneath stays on both tabs — it
-                explains the map itself, not one family's stats. */}
+                legend underneath is split per tab too (subtask
+                1564): each tab explains its own hero family's
+                paint, not the other family's. */}
             {variant === "municipalities" && prefectures.length > 0 && (
               <p className="text-sm">
                 {prefectures.map((p) => `${p.name} ${p.total}`).join(" ・ ")}
@@ -7318,14 +7325,25 @@ function VisitedMapSection({
             </p>
             {variant === "lines" && (
               <p className="mt-1 text-xs text-[var(--dim)]">
-                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
+                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は薄い線で描き、距離には数えません
               </p>
             )}
-            {/* Border legend: the map's line hierarchy (prefecture
+            {/* Legend, split per tab (subtask 1564): one shared
+                legend used to sit under both record tabs, so the
+                路線 tab explained borders its map only ghosts and
+                the 市区町村 tab carried a line item — the reader
+                reported it never changed with the tab. Each tab
+                now explains its own hero family's paint. The old
+                「乗った区間（区間不明は破線）」 item leaves with
+                the dashed-segment legend (the reader's rule for
+                the line paint: ridden = solid, unridden = thin,
+                no dashes). */}
+            {variant === "municipalities" ? (
+            /* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
                 ward borders dashed and lightest) is not
                 self-evident from the shapes alone, so the swatches
-                sit with the stats under the map. */}
+                sit with the stats under the map. */
             <div
               className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--dim)]"
               aria-label="地図の境界線の凡例"
@@ -7350,11 +7368,29 @@ function VisitedMapSection({
                 <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-[#ea580c]" />
                 選択中
               </span>
+            </div>
+            ) : (
+            /* Line legend: ridden sections are solid in each
+                service's own color (hence the multi-color swatch)
+                over a white casing; the unridden remainder is the
+                same colors at a whisper (the ghost). A focused
+                line keeps its own color, so there is no orange
+                選択中 item here — that swatch is the municipality
+                focus, on the other tab's legend. */
+            <div
+              className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--dim)]"
+              aria-label="地図の路線の凡例"
+            >
               <span className="flex items-center gap-1.5">
-                <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-dashed border-[#ea580c]" />
-                乗った区間（区間不明は破線）
+                <span aria-hidden className="inline-block h-[3px] w-6 rounded-full bg-[linear-gradient(90deg,#e60012,#f39800,#009944,#0284c7)]" />
+                乗った区間（路線ごとの色）
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-[#64748b] opacity-40" />
+                乗っていない区間・区間不明（薄く表示）
               </span>
             </div>
+            )}
             <ConquestCharts
               variant={variant}
               municipalities={municipalities}

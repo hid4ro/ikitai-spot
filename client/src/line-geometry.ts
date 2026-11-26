@@ -964,7 +964,7 @@ export type LineCoverage = {
   /* The legs the map paints, per service: the clipped sections
      of a partial ride, the whole path of a full ride — and, for
      an unknown ride (no section on record), the whole path too,
-     flagged unknown so the map paints it as a thin dashed line
+     flagged unknown so the map paints it as a thin solid line
      instead of a ridden section. The painted length IS the
      counted length for every service except an unknown one,
      whose legs are paint-only and count nothing (see
@@ -1037,7 +1037,7 @@ export function riddenLineIntervals(
 /* Build paths and distances from saved rides. A full ride's snapshot
    or recorded service, when available, must fit the current link.
    Partial rides contribute only their attributable intervals. Paths
-   with no intervals are painted dashed and count zero kilometres. */
+   with no intervals are painted thin and count zero kilometres. */
 export function computeRiddenLineCoverage(
   rows: readonly RecordedRiddenLine[],
   geometries: LineGeometryMap,
@@ -1142,7 +1142,7 @@ export function computeLineCoverage(
     /* The legs this service paints: the whole path for a full
        ride, the clipped sections for a partial one. An unknown
        ride has no section to clip to, so it paints its whole
-       path too — flagged unknown, so the map draws it dashed
+       path too — flagged unknown, so the map draws it thin
        and it counts nothing (below: unknown legs never reach
        either coverage). */
     const legs: PathLeg[] = [];
@@ -1237,9 +1237,9 @@ export function computeLineCoverage(
    the complement of the merged painted spans on it. Bridges
    are not part of the asset shape, so they never appear in the
    ghost — a painted bridge leg draws over the gap, as before.
-   Unknown rides paint dashed and count nothing, so their legs
-   are not subtracted either: the ghost stays under the dashed
-   paint, as before.
+   Unknown rides paint thin (the unridden look) and count
+   nothing, so their legs are not subtracted either: the ghost
+   stays under the unknown paint, as before.
  *
  * A line with no painted leg at all keeps its whole shape, and
    a fully ridden service still leaves its line's off-spine
