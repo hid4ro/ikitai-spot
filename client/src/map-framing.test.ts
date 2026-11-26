@@ -7,8 +7,9 @@
    read from rewinding that shared location (round 5), the
    single publisher every adoption route funnels through and
    the frame-location decision for a refused publish
-   (round 6, P2-1 and P2-2), and the fullscreen fitBounds
-   padding (finding 6).
+   (round 6, P2-1 and P2-2), the fullscreen fitBounds
+   padding (finding 6), and the camera plan for a focus
+   picked on the map itself (subtask 1584).
    Run with: bun test client/src/map-framing.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
@@ -20,9 +21,11 @@ import {
   createAutoFitShots,
   createSharedLocationPublisher,
   fitBoundsPadding,
+  focusCameraPlan,
   resolveFrameLocation,
   type AutoFitGateInput,
   type AutoFitTab,
+  type LngLatBoundsPair,
 } from "./map-framing";
 
 describe("createAutoFitShots (the record tabs' default framing)", () => {
@@ -701,5 +704,44 @@ describe("record-tab retake camera requests", () => {
     expect(consumeRecordRetakeCameraRequest(retake, latest.seq, appliedSeq, publisher)).toBe(false);
     expect(appliedSeq.current).toBe(0);
     expect(consumeRecordRetakeCameraRequest(latest, latest.seq, appliedSeq, publisher)).toBe(true);
+  });
+});
+
+describe("focusCameraPlan (a focus picked on the map itself, subtask 1584)", () => {
+  const bounds: LngLatBoundsPair = [
+    [139.4, 35.6],
+    [139.6, 35.8],
+  ];
+  const point = { lat: 35.7, lng: 139.5 };
+
+  test("real bounds fit the whole feature", () => {
+    expect(focusCameraPlan(bounds, null)).toEqual({
+      kind: "fit-bounds",
+      bounds,
+    });
+  });
+
+  test("bounds win over the representative point", () => {
+    /* The point is only the fallback for a feature whose
+       extent is unknown; a feature WITH bounds must frame
+       its whole extent, not fly to its middle. */
+    expect(focusCameraPlan(bounds, point)).toEqual({
+      kind: "fit-bounds",
+      bounds,
+    });
+  });
+
+  test("a lone point flies to it at the row taps' zoom", () => {
+    expect(focusCameraPlan(null, point)).toEqual({
+      kind: "fly-to-point",
+      center: point,
+      zoom: 12,
+    });
+  });
+
+  test("neither bounds nor point leaves the camera alone", () => {
+    /* A line with no painted track has nothing to frame:
+       the tap paints (or clears) its highlight only. */
+    expect(focusCameraPlan(null, null)).toEqual({ kind: "none" });
   });
 });
