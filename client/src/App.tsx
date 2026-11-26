@@ -78,7 +78,7 @@ import {
   ghostCoverageKey,
   serializeGhostCoverage,
 } from "./unridden-ghost";
-import { unriddenGhostClient } from "./unridden-ghost-client";
+import { createUnriddenGhostClient } from "./unridden-ghost-client";
 import {
   JAPAN_LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
@@ -108,6 +108,9 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
+import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
+
+const unriddenGhostClient = createUnriddenGhostClient(unriddenGhostWorkerUrl);
 
 /* Input limits come from the server actions' request schemas, so the
    form fields and the server can never disagree (platform v29). */
@@ -3432,6 +3435,9 @@ function VisitedMapSection({
            never reach the map). */
         if (result.coverageKey !== lineCoverageKeyRef.current) return;
         setUnriddenGhost(result);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) console.error("Unridden line geometry failed", error);
       });
     return () => {
       cancelled = true;

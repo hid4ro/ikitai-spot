@@ -57,6 +57,7 @@ const wireB: GhostCoverageWire = {
 
 class FakeTransport implements GhostWorkerTransport {
   sent: GhostWorkerRequest[] = [];
+  closed = false;
   private messageCb: ((m: GhostWorkerResponse) => void) | null = null;
   private errorCb: (() => void) | null = null;
   postMessage(message: GhostWorkerRequest): void {
@@ -67,6 +68,9 @@ class FakeTransport implements GhostWorkerTransport {
   }
   setOnError(cb: () => void): void {
     this.errorCb = cb;
+  }
+  close(): void {
+    this.closed = true;
   }
   respond(seq: number, features: UnriddenLineFeature[]): void {
     this.messageCb?.({
@@ -84,7 +88,7 @@ class FakeTransport implements GhostWorkerTransport {
 function makeClient(transport: FakeTransport) {
   const inlineCalls: GhostCoverageWire[] = [];
   const client = new UnriddenGhostClient(
-    () => transport,
+    async () => transport,
     (wire) => {
       inlineCalls.push(wire);
       return [feature("inline")];
@@ -98,6 +102,7 @@ describe("UnriddenGhostClient", () => {
     const transport = new FakeTransport();
     const { client, inlineCalls } = makeClient(transport);
     const promise = client.request(wireB);
+    await Promise.resolve();
     expect(transport.sent).toHaveLength(1);
     expect(transport.sent[0]!.coverageKey).toBe(ghostCoverageKey(wireB));
     transport.respond(transport.sent[0]!.seq, [feature("from-worker")]);
@@ -111,6 +116,7 @@ describe("UnriddenGhostClient", () => {
     const transport = new FakeTransport();
     const { client } = makeClient(transport);
     const first = client.request(wireA);
+    await Promise.resolve();
     const second = client.request(wireB);
     /* The first request was superseded the moment the second
        was sent. */
@@ -128,6 +134,7 @@ describe("UnriddenGhostClient", () => {
     const transport = new FakeTransport();
     const { client } = makeClient(transport);
     const first = client.request(wireA);
+    await Promise.resolve();
     const second = client.request(wireB);
     /* Newer answer first, then the stale one: the stale one
        finds no pending request and is ignored. */
@@ -139,7 +146,7 @@ describe("UnriddenGhostClient", () => {
 
   test("a worker that cannot start falls back to the inline computation", async () => {
     const client = new UnriddenGhostClient(
-      () => {
+      async () => {
         throw new Error("no Worker here");
       },
       () => [feature("inline")],
@@ -153,6 +160,7 @@ describe("UnriddenGhostClient", () => {
     const transport = new FakeTransport();
     const { client, inlineCalls } = makeClient(transport);
     const promise = client.request(wireB);
+    await Promise.resolve();
     transport.fail();
     const result = await promise;
     expect(result?.features[0]!.properties.key).toBe("inline");
@@ -161,5 +169,52 @@ describe("UnriddenGhostClient", () => {
     expect(second?.features[0]!.properties.key).toBe("inline");
     /* No second message was posted to the dead worker. */
     expect(transport.sent).toHaveLength(1);
+    expect(transport.closed).toBe(true);
+  });
+
+  test("requests share one startup and send only the latest coverage once it finishes", async () => {
+    const transport = new FakeTransport();
+    const startup = Promise.withResolvers<GhostWorkerTransport>();
+    let opens = 0;
+    const client = new UnriddenGhostClient(
+      () => {
+        opens++;
+        return startup.promise;
+      },
+      () => [feature("inline")],
+    );
+    const first = client.request(wireA);
+    const latest = client.request(wireB);
+    expect(opens).toBe(1);
+    expect(transport.sent).toHaveLength(0);
+    startup.resolve(transport);
+    expect(await first).toBeNull();
+    expect(transport.sent).toHaveLength(1);
+    const request = transport.sent[0]!;
+    expect(request.coverage).toBe(wireB);
+    transport.respond(request.seq, [feature("worker")]);
+    expect((await latest)?.features[0]?.properties.key).toBe("worker");
+  });
+
+  test("a DataCloneError from postMessage falls back with the latest request", async () => {
+    const transport = new FakeTransport();
+    const { client, inlineCalls } = makeClient(transport);
+    const first = client.request(wireA);
+    await Promise.resolve();
+    const seq = transport.sent[0]!.seq;
+    transport.postMessage = () => {
+      throw new DOMException("Could not clone worker message", "DataCloneError");
+    };
+
+    const latest = client.request(wireB);
+    transport.respond(seq, [feature("stale")]);
+
+    expect(await first).toBeNull();
+    expect(await latest).toEqual({
+      coverageKey: ghostCoverageKey(wireB),
+      features: [feature("inline")],
+    });
+    expect(inlineCalls).toEqual([wireB]);
+    expect(transport.closed).toBe(true);
   });
 });

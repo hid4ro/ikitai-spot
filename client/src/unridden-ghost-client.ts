@@ -8,21 +8,11 @@
    map (finding 1's apply-side rule, shared with
    applyUnriddenLineGhostLatest in map-variant.ts).
 
-   The worker is created from the bundled worker source
-   (ghost-worker-source.ts, generated — see
-   generate-ghost-worker.mjs for why the standard
-   `new Worker(new URL(...))` pattern cannot be used with this
-   app's bundler) through a Blob URL. One worker serves the
-   app's lifetime, so the per-line simplification memo inside
-   it persists across coverage changes.
-
-   Fallback: where a Worker cannot be created at all (an
-   environment without Worker, or a constructor that throws),
-   the same computation runs inline — the one path that still
-   touches the UI thread, kept so the ghost degrades to the
-   pre-worker behavior instead of vanishing. Tests drive the
-   client with a fake transport and a stub inline computation:
-   unridden-ghost-client.test.ts. */
+   The first request fetches the separately bundled worker
+   script and starts it from a Blob URL. The worker stays alive
+   across coverage changes to preserve its per-line memo.
+   Startup and messaging failures fall back to the same
+   computation on the main thread. */
 
 import {
   computeUnriddenGhostFeatures,
@@ -31,7 +21,6 @@ import {
   type GhostWorkerRequest,
   type GhostWorkerResponse,
 } from "./unridden-ghost";
-import { UNRIDDEN_GHOST_WORKER_SOURCE } from "./ghost-worker-source";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import type { UnriddenLineFeature } from "./map-variant";
 
@@ -46,69 +35,73 @@ export type GhostWorkerTransport = {
   postMessage: (message: GhostWorkerRequest) => void;
   setOnMessage: (cb: (message: GhostWorkerResponse) => void) => void;
   setOnError: (cb: () => void) => void;
+  close: () => void;
 };
 
 export class UnriddenGhostClient {
   private transport: GhostWorkerTransport | null = null;
   private transportFailed = false;
+  private opening = false;
   private seq = 0;
   private pending: {
     seq: number;
     coverageKey: string;
     wire: GhostCoverageWire;
     resolve: (result: GhostResult | null) => void;
+    reject: (reason: unknown) => void;
   } | null = null;
 
   constructor(
-    private readonly createTransport: () => GhostWorkerTransport,
+    private readonly createTransport: () => Promise<GhostWorkerTransport>,
     private readonly computeInline: (
       wire: GhostCoverageWire,
     ) => UnriddenLineFeature[],
   ) {}
 
-  /* Ask for the ghost of one coverage. Resolves with the
-     result when it lands, or with null when a newer request
-     superseded this one (the newer result is the one the
-     caller wants; this request's answer, if it ever arrives,
-     is dropped). Never rejects: a worker failure falls back
-     to the inline computation. */
+  /* A superseded request resolves with null. During startup,
+     only the latest request is sent once the worker is ready. */
   request(wire: GhostCoverageWire): Promise<GhostResult | null> {
     const coverageKey = ghostCoverageKey(wire);
-    this.seq += 1;
-    const seq = this.seq;
-    if (this.pending) {
-      this.pending.resolve(null);
-      this.pending = null;
-    }
-    const transport = this.transport ?? this.openTransport();
-    if (!transport) {
-      return Promise.resolve({
-        coverageKey,
-        features: this.computeInline(wire),
-      });
-    }
-    return new Promise<GhostResult | null>((resolve) => {
-      this.pending = { seq, coverageKey, wire, resolve };
-      transport.postMessage({
-        type: "unridden-ghost-compute",
-        seq,
-        coverageKey,
-        coverage: wire,
-      });
+    this.pending?.resolve(null);
+    return new Promise<GhostResult | null>((resolve, reject) => {
+      this.pending = { seq: ++this.seq, coverageKey, wire, resolve, reject };
+      if (this.transportFailed) {
+        this.finishInline();
+      } else if (this.transport) {
+        this.sendPending(this.transport);
+      } else if (!this.opening) {
+        this.opening = true;
+        void this.openTransport();
+      }
     });
   }
 
-  private openTransport(): GhostWorkerTransport | null {
-    if (this.transportFailed) return null;
+  private async openTransport(): Promise<void> {
     try {
-      const transport = this.createTransport();
+      const transport = await this.createTransport();
+      this.transport = transport;
       transport.setOnMessage((message) => this.onMessage(message));
       transport.setOnError(() => this.onTransportError());
-      this.transport = transport;
-      return transport;
+      this.sendPending(transport);
     } catch {
-      this.transportFailed = true;
-      return null;
+      this.onTransportError();
+    } finally {
+      this.opening = false;
+    }
+  }
+
+  private sendPending(transport: GhostWorkerTransport): void {
+    const pending = this.pending;
+    if (!pending) return;
+    try {
+      transport.postMessage({
+        type: "unridden-ghost-compute",
+        seq: pending.seq,
+        coverageKey: pending.coverageKey,
+        coverage: pending.wire,
+      });
+    } catch {
+      this.onTransportError();
     }
   }
 
@@ -129,47 +122,83 @@ export class UnriddenGhostClient {
   }
 
   private onTransportError(): void {
-    /* The worker died (or failed to start): every later
-       request computes inline, and the request in flight —
-       whose answer will never come — is answered inline too,
-       from the wire it was sent with. */
+    const transport = this.transport;
     this.transport = null;
     this.transportFailed = true;
+    transport?.close();
+    this.finishInline();
+  }
+
+  private finishInline(): void {
     const pending = this.pending;
-    if (pending) {
-      this.pending = null;
+    if (!pending) return;
+    this.pending = null;
+    try {
       pending.resolve({
         coverageKey: pending.coverageKey,
         features: this.computeInline(pending.wire),
       });
+    } catch (error) {
+      pending.reject(error);
     }
   }
 }
 
-/* Creates the real worker from the bundled source. Kept apart
-   from the client so tests never touch it. */
-function createBlobWorkerTransport(): GhostWorkerTransport {
-  const blob = new Blob([UNRIDDEN_GHOST_WORKER_SOURCE], {
-    type: "text/javascript",
-  });
-  const url = URL.createObjectURL(blob);
-  const worker = new Worker(url);
+const WORKER_FETCH_TIMEOUT_MS = 15_000;
+
+async function fetchWorkerSource(assetUrl: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WORKER_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(assetUrl, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Ghost worker asset fetch failed (${response.status})`);
+    }
+    const source: unknown = await response.json();
+    if (typeof source !== "string" || source.length === 0) {
+      throw new Error("Invalid ghost worker asset");
+    }
+    return source;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function createBlobWorkerTransport(
+  assetUrl: string,
+): Promise<GhostWorkerTransport> {
+  if (typeof Worker === "undefined") throw new Error("Web Workers are unavailable");
+  const source = await fetchWorkerSource(assetUrl);
+  const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+  let worker: Worker;
+  try {
+    worker = new Worker(url);
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
   return {
     postMessage: (message) => worker.postMessage(message),
     setOnMessage: (cb) => {
-      worker.onmessage = (event: MessageEvent) =>
+      worker.onmessage = (event: MessageEvent) => {
+        URL.revokeObjectURL(url);
         cb(event.data as GhostWorkerResponse);
+      };
     },
     setOnError: (cb) => {
       worker.onerror = () => cb();
+      worker.onmessageerror = () => cb();
+    },
+    close: () => {
+      worker.terminate();
+      URL.revokeObjectURL(url);
     },
   };
 }
 
-/* The app-wide client: one worker, created lazily on the
-   first request (tabs that never show the ghost never pay
-   for it — not even the worker's startup). */
-export const unriddenGhostClient = new UnriddenGhostClient(
-  createBlobWorkerTransport,
-  (wire) => computeUnriddenGhostFeatures(wire, RIDDEN_LINE_GEOMETRIES),
-);
+export function createUnriddenGhostClient(assetUrl: string): UnriddenGhostClient {
+  return new UnriddenGhostClient(
+    () => createBlobWorkerTransport(assetUrl),
+    (wire) => computeUnriddenGhostFeatures(wire, RIDDEN_LINE_GEOMETRIES),
+  );
+}

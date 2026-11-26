@@ -27,7 +27,6 @@ import {
   serializeGhostCoverage,
   type GhostCoverageWire,
 } from "./unridden-ghost";
-import { UNRIDDEN_GHOST_WORKER_SOURCE } from "./ghost-worker-source";
 
 const GEOMETRIES = RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
 const YAMA_KEY = "山手線|東日本旅客鉄道";
@@ -210,16 +209,5 @@ describe("ghostCoverageKey", () => {
     /* Two services painting the same span union to one span —
        the key is over the span set, so this still matches. */
     expect(ghostCoverageKey(both)).toBe(ghostCoverageKey(known));
-  });
-});
-
-describe("the generated worker source", () => {
-  test("is the real bundled worker, not a placeholder", () => {
-    /* The client bundle carries the worker as this string; if
-       generation ever degraded to an empty stub, the ghost
-       would silently fall back to main-thread computation. */
-    expect(UNRIDDEN_GHOST_WORKER_SOURCE.length).toBeGreaterThan(100_000);
-    expect(UNRIDDEN_GHOST_WORKER_SOURCE).toContain("unridden-ghost-compute");
-    expect(UNRIDDEN_GHOST_WORKER_SOURCE).toContain("unridden-ghost-result");
   });
 });

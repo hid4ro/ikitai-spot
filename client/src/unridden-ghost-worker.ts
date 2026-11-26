@@ -11,11 +11,9 @@
    This file is a build ENTRYPOINT, not an import: the client
    bundler (Bun.build) does not bundle `new Worker(new URL(...))`
    references, so client/generate-ghost-worker.mjs bundles this
-   file on its own (client/build.mjs runs it before the client
-   bundle) and the app creates the worker from the bundled
-   source via a Blob URL (unridden-ghost-client.ts). The asset
-   below is bundled into the worker — the coverage wire stays
-   tiny because only the painted legs ever cross over. */
+   file on its own as a file asset before the client bundle.
+   The app fetches it and creates a Blob Worker when the route
+   tab needs the ghost. Only the painted legs cross postMessage. */
 
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import {
