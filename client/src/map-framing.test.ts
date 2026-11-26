@@ -3,7 +3,9 @@
    round 1, finding 1; round 2, finding 1), the run tokens
    and apply-time validity for late fits (round 3), the
    publish-time validity for the shared location (round 4),
-   and the fullscreen fitBounds padding (finding 6).
+   the cross-tab capture-time comparison that keeps a held
+   read from rewinding that shared location (round 5), and
+   the fullscreen fitBounds padding (finding 6).
    Run with: bun test client/src/map-framing.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
@@ -12,6 +14,7 @@ import {
   autoFitMayPublishLocation,
   createAutoFitRuns,
   createAutoFitShots,
+  createSharedLocationFreshness,
   fitBoundsPadding,
   type AutoFitGateInput,
   type AutoFitTab,
@@ -344,5 +347,149 @@ describe("auto-fit runs (a superseded read must not rewrite the shared location)
         focusPicked: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shared location freshness (a held read from another tab must not rewind it)", () => {
+  /* Round 5 finding: run tokens are per tab, so the
+     publish-time currency check alone cannot stop a
+     municipalities read held across a lines round trip —
+     it is still current for its own tab when it finally
+     lands, and its older coordinates rewind the shared
+     location the スポット tab plots from. The publish gate
+     is therefore currency AND the capture-time comparison
+     below: a read older than the position already adopted
+     is refused, whatever tab it came from. The stand-in
+     publish below replays the framing functions' order of
+     checks (mayPublish, then the shared writes, with the
+     adopted time recorded as the write lands). */
+
+  type Shared = {
+    loc: { lat: number; lng: number } | null;
+    atMs: number | null;
+  };
+  const makePublish = (
+    runs: ReturnType<typeof createAutoFitRuns>,
+    freshness: ReturnType<typeof createSharedLocationFreshness>,
+    shared: Shared,
+  ) => (
+    tab: AutoFitTab,
+    token: number,
+    loc: { lat: number; lng: number },
+    capturedAtMs: number,
+  ): boolean => {
+    if (
+      !autoFitMayPublishLocation({
+        runCurrent: runs.isCurrent(tab, token),
+      })
+    )
+      return false;
+    if (!freshness.mayAdopt(capturedAtMs)) return false;
+    freshness.adopt(capturedAtMs);
+    shared.loc = loc;
+    shared.atMs = capturedAtMs;
+    return true;
+  };
+
+  test("the held municipalities read may not publish after the lines read adopted a newer position", () => {
+    /* The reviewed sequence: ① 市区町村 opens and its
+       location read is held back. ② The reader switches
+       to 路線; its read returns the NEW position first and
+       publishes. ③ The held 市区町村 read finally returns
+       the OLD position, and the reader then moves to
+       スポット. */
+    const runs = createAutoFitRuns();
+    const freshness = createSharedLocationFreshness();
+    const shared: Shared = { loc: null, atMs: null };
+    const publish = makePublish(runs, freshness, shared);
+    const municipalitiesRun = runs.begin("municipalities");
+    const linesRun = runs.begin("lines");
+    /* ② The lines read lands first and publishes. */
+    expect(publish("lines", linesRun, { lat: 35.7, lng: 139.7 }, 2000)).toBe(
+      true,
+    );
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    expect(shared.atMs).toBe(2000);
+    /* ③ The held read is still current for its own tab —
+       currency alone would admit it — but its capture is
+       older than the adopted position, so the cross-tab
+       comparison refuses it and スポット keeps the newer
+       position. */
+    expect(runs.isCurrent("municipalities", municipalitiesRun)).toBe(true);
+    expect(
+      autoFitMayPublishLocation({
+        runCurrent: runs.isCurrent("municipalities", municipalitiesRun),
+      }),
+    ).toBe(true);
+    expect(
+      publish("municipalities", municipalitiesRun, { lat: 35.6, lng: 139.6 }, 1000),
+    ).toBe(false);
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    expect(shared.atMs).toBe(2000);
+  });
+
+  test("a current run with a newer capture still publishes (round 1 spec preserved)", () => {
+    /* The freshness check refuses only OLDER captures: a
+       read carrying a newer position still flows into the
+       shared location even when its camera fit may not
+       apply — the reader switched tabs meanwhile, or picked
+       the tab's focus (round 1, finding 8, stands). */
+    const runs = createAutoFitRuns();
+    const freshness = createSharedLocationFreshness();
+    const shared: Shared = { loc: null, atMs: null };
+    const publish = makePublish(runs, freshness, shared);
+    const linesRun = runs.begin("lines");
+    expect(publish("lines", linesRun, { lat: 35.6, lng: 139.6 }, 1000)).toBe(
+      true,
+    );
+    const municipalitiesRun = runs.begin("municipalities");
+    expect(
+      publish("municipalities", municipalitiesRun, { lat: 35.7, lng: 139.7 }, 2000),
+    ).toBe(true);
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    /* …and that newer read's camera fit may still be
+       refused for the usual per-tab reasons without
+       touching the publish. */
+    expect(
+      autoFitMayApply({
+        tabShowing: false,
+        runCurrent: runs.isCurrent("municipalities", municipalitiesRun),
+        focusPicked: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("run currency still gates: a superseded run with a newer capture may not publish", () => {
+    /* Both halves of the gate must pass. A superseded
+       run's read is refused by currency even if the
+       capture it carries is newer than the adopted one. */
+    const runs = createAutoFitRuns();
+    const freshness = createSharedLocationFreshness();
+    const shared: Shared = { loc: null, atMs: null };
+    const publish = makePublish(runs, freshness, shared);
+    const first = runs.begin("lines");
+    const second = runs.begin("lines");
+    expect(publish("lines", second, { lat: 35.7, lng: 139.7 }, 1000)).toBe(
+      true,
+    );
+    expect(publish("lines", first, { lat: 35.8, lng: 139.8 }, 2000)).toBe(false);
+    expect(shared.loc).toEqual({ lat: 35.7, lng: 139.7 });
+    expect(shared.atMs).toBe(1000);
+  });
+
+  test("the freshness ledger admits anything until the first adoption, then only fresh-or-equal captures", () => {
+    const freshness = createSharedLocationFreshness();
+    expect(freshness.mayAdopt(1000)).toBe(true);
+    freshness.adopt(1000);
+    /* The same stored position read twice carries the same
+       capture time, so an equal capture may adopt. */
+    expect(freshness.mayAdopt(1000)).toBe(true);
+    expect(freshness.mayAdopt(1001)).toBe(true);
+    expect(freshness.mayAdopt(999)).toBe(false);
+    /* Adopting a newer position moves the bar: the old
+       capture stays refused afterwards. */
+    freshness.adopt(2000);
+    expect(freshness.mayAdopt(1000)).toBe(false);
+    expect(freshness.mayAdopt(2000)).toBe(true);
   });
 });

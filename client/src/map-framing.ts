@@ -4,9 +4,11 @@
    tokens and the apply-time validity check for fits that
    resolve late (round 3, findings 1–2), the publish-time
    validity check for the shared location those reads feed
-   (round 4), and the fitBounds padding that keeps a
+   (round 4), the cross-tab capture-time comparison that
+   keeps a held read from rewinding that shared location
+   (round 5), and the fitBounds padding that keeps a
    fullscreen map's frame clear of the bottom tab bar
-   (finding 6). Kept dependency-light so both rules are
+   (finding 6). Kept dependency-light so the rules are
    regression-testable without mounting the map —
    see map-framing.test.ts. */
 
@@ -173,6 +175,45 @@ export function autoFitMayPublishLocation(
   input: AutoFitPublishInput,
 ): boolean {
   return input.runCurrent;
+}
+
+/* Cross-tab freshness for the shared location (v89 review
+   round 5). Run tokens are per tab, so a municipalities
+   run held across a lines round trip is still "current"
+   for its own tab when its read finally lands — and its
+   older coordinates would rewind the shared location the
+   スポット tab plots from. The camera decision stays
+   per-tab (autoFitMayApply above), but a publish also
+   compares the read's capture time against the position
+   already adopted, across tabs: only a read at least as
+   fresh as the adopted one may replace it. Equal capture
+   times are the same stored position read twice, so they
+   may adopt. The publish gate in App is the conjunction
+   of this currency check and the freshness check below:
+   both must pass, and only supersession or an older
+   capture may refuse a publish — never the tab switch or
+   the focus pick alone (round 1, finding 8, stands). */
+export type SharedLocationFreshness = {
+  /* Whether a read captured at this time may still be
+     adopted: only when it is not older than the position
+     already adopted. Nothing adopted yet admits anything. */
+  mayAdopt: (capturedAtMs: number) => boolean;
+  /* Record the capture time of the position just adopted
+     into the shared location. Call once, right after a
+     publish the gate above admitted, so the next read is
+     measured against it. */
+  adopt: (capturedAtMs: number) => void;
+};
+
+export function createSharedLocationFreshness(): SharedLocationFreshness {
+  let adoptedAtMs: number | null = null;
+  return {
+    mayAdopt: (capturedAtMs) =>
+      adoptedAtMs === null || capturedAtMs >= adoptedAtMs,
+    adopt: (capturedAtMs) => {
+      adoptedAtMs = capturedAtMs;
+    },
+  };
 }
 
 /* fitBounds padding for the record map. Off fullscreen the
