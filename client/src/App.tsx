@@ -129,6 +129,10 @@ import {
   focusCameraPlan,
   resolveFrameLocation,
 } from "./map-framing";
+import {
+  geometryBounds,
+  geometryContainsPoint,
+} from "./municipality-geometry";
 import { acquireScrollLock } from "./scroll-lock";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
@@ -931,8 +935,32 @@ function boundaryGeometryFor(m: VisitedMunicipality): GeoJsonGeometry | null {
    coordinates (the 2026-11-21 batch) have no stored point, but their
    boundary is in the boundary data — deriving the point here lets them
    join the map and the numbered ledger instead of showing a bare "・".
-   Null only when neither coordinates nor any boundary are known. */
+   Null only when neither coordinates nor any boundary are known.
+
+   The derivation walks the boundary's rings, and the focus paths
+   ask for the point on every tap (subtask 1584/1586), so a derived
+   point is cached per row object. Only non-null results are
+   cached: a null can mean the row's prefecture has not loaded
+   yet, and that answer must stay retryable — once the boundary
+   lands, the same row derives its point. A cached point is
+   stable because it comes from the row's own coordinates or from
+   an immutable boundary geometry. */
+const representativePointCache = new WeakMap<
+  VisitedMunicipality,
+  { lat: number; lng: number }
+>();
+
 function representativePoint(
+  m: VisitedMunicipality,
+): { lat: number; lng: number } | null {
+  const cached = representativePointCache.get(m);
+  if (cached) return cached;
+  const point = computeRepresentativePoint(m);
+  if (point) representativePointCache.set(m, point);
+  return point;
+}
+
+function computeRepresentativePoint(
   m: VisitedMunicipality,
 ): { lat: number; lng: number } | null {
   if (m.lat !== null && m.lng !== null) return { lat: m.lat, lng: m.lng };
@@ -1799,40 +1827,6 @@ function buildLedgerMarkdown(
   return lines.join("\n") + "\n";
 }
 
-/* Bounding box of a GeoJSON geometry as [[minLng, minLat], [maxLng,
-   maxLat]] — the shape MapLibre's fitBounds takes. Walks every ring of a
-   Polygon / MultiPolygon. */
-function geometryBounds(
-  geometry: GeoJsonGeometry,
-): [[number, number], [number, number]] | null {
-  let minLng = Infinity;
-  let minLat = Infinity;
-  let maxLng = -Infinity;
-  let maxLat = -Infinity;
-  const visit = (coords: unknown): void => {
-    if (!Array.isArray(coords)) return;
-    if (
-      coords.length >= 2 &&
-      typeof coords[0] === "number" &&
-      typeof coords[1] === "number"
-    ) {
-      const [lng, lat] = coords as [number, number];
-      if (lng < minLng) minLng = lng;
-      if (lat < minLat) minLat = lat;
-      if (lng > maxLng) maxLng = lng;
-      if (lat > maxLat) maxLat = lat;
-      return;
-    }
-    for (const c of coords) visit(c);
-  };
-  visit(geometry.coordinates);
-  if (!Number.isFinite(minLng)) return null;
-  return [
-    [minLng, minLat],
-    [maxLng, maxLat],
-  ];
-}
-
 /* The camera target for one municipality: its real boundary's bounds
    when a shape is known, else a small box around the representative
    point (roughly the size of the fallback circle). */
@@ -1849,36 +1843,6 @@ function boundsForMunicipality(
     [m.lng - 0.04, m.lat - 0.03],
     [m.lng + 0.04, m.lat + 0.03],
   ];
-}
-
-/* Ray-casting point-in-ring test over [lng, lat] coordinate pairs. */
-function ringContainsPoint(ring: number[][], lng: number, lat: number): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const a = ring[i];
-    const b = ring[j];
-    if (!a || !b) continue;
-    const [xi, yi] = a as [number, number];
-    const [xj, yj] = b as [number, number];
-    if (yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-/* Whether a Polygon / MultiPolygon geometry contains the point:
-   inside an outer ring and outside every hole of that polygon. */
-function geometryContainsPoint(geometry: GeoJsonGeometry, lng: number, lat: number): boolean {
-  const polygons: number[][][][] =
-    geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
-  for (const polygon of polygons) {
-    const [outer, ...holes] = polygon;
-    if (!outer || !ringContainsPoint(outer, lng, lat)) continue;
-    if (holes.some((hole) => ringContainsPoint(hole, lng, lat))) continue;
-    return true;
-  }
-  return false;
 }
 
 /* The municipality a point falls in, for the fill map's default
