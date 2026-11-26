@@ -13,9 +13,20 @@ import {
   clearGhostLineGeometryCache,
   countGeometryPoints,
   getGhostLineGeometry,
+  ghostPointKey,
   simplifyGhostGeometry,
+  simplifyGhostRemainder,
   simplifyPolyline,
+  type GhostRemainderLeg,
 } from "./ghost-line-geometry";
+import {
+  buildServicePath,
+  computeLineCoverage,
+  ghostLineLegs,
+  type LineGeometryMap,
+  type RideInterval,
+} from "./line-geometry";
+import { serviceById, type StationRef } from "../../shared/service-master";
 
 type Pt = [number, number];
 
@@ -263,7 +274,7 @@ describe("getGhostLineGeometry cache", () => {
 });
 
 describe("real asset: the ghost actually gets lighter", () => {
-  test("the coarse asset keeps about a third of the points", () => {
+  test("the coarse asset keeps under half of the points", () => {
     clearGhostLineGeometryCache();
     let before = 0;
     let after = 0;
@@ -271,12 +282,15 @@ describe("real asset: the ghost actually gets lighter", () => {
       before += countGeometryPoints(entry.geometry);
       after += countGeometryPoints(getGhostLineGeometry(key, entry.geometry));
     }
-    /* Measured 63,355 → 20,873 (32.9% kept) at the 100 m
-       tolerance; the band leaves room for asset drift without
-       hiding a regression that stops simplifying. */
+    /* Measured 63,355 → 29,872 (47.2% kept) at the spec's
+       60 m tolerance, with junction pinning and the crossing
+       reverts on top of DP (DP alone at 60 m keeps 26,237,
+       41.4% — the first cut's 100 m kept 20,873, 32.9%). The
+       band leaves room for asset drift without hiding a
+       regression that stops simplifying. */
     expect(before).toBe(63355);
-    expect(after / before).toBeLessThan(0.4);
-    expect(after / before).toBeGreaterThan(0.2);
+    expect(after / before).toBeLessThan(0.5);
+    expect(after / before).toBeGreaterThan(0.35);
     clearGhostLineGeometryCache();
   });
 
@@ -317,6 +331,376 @@ describe("real asset: the ghost actually gets lighter", () => {
         expect(original.has(`${last[0]},${last[1]}`)).toBe(true);
       }
     }
+    clearGhostLineGeometryCache();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Review round 1 regressions: pinned junctions and contacts, and    */
+/* no invented crossings. The first cut chained pieces and ran DP    */
+/* over the whole run, so a vertex the run merely passed through —   */
+/* a branch junction, a point shared with the solid paint — could    */
+/* be dropped, and a chord could cut across a neighbouring strand.   */
+/* ------------------------------------------------------------------ */
+
+/* Metres east/north of (139, 35) as a coordinate — the synthetic
+   shapes below are drawn in metres so the geometry is readable;
+   1 m ≈ 1/91190° lng and 1/110540° lat at latitude 35. */
+const M = (x: number, y: number): Pt => [139 + x / 91190, 35 + y / 110540];
+
+function orientSign(a: Pt, b: Pt, c: Pt): number {
+  const v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  return v > 0 ? 1 : v < 0 ? -1 : 0;
+}
+
+function properlyCrosses(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const o1 = orientSign(a, b, c);
+  const o2 = orientSign(a, b, d);
+  const o3 = orientSign(c, d, a);
+  const o4 = orientSign(c, d, b);
+  return o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0 && o1 !== o2 && o3 !== o4;
+}
+
+/* Every proper crossing point between non-adjacent segments of
+   a geometry, as [lng, lat]. */
+function crossingPoints(coords: number[][][]): Pt[] {
+  const segs: { a: Pt; b: Pt; run: number; idx: number }[] = [];
+  coords.forEach((run, r) => {
+    for (let i = 0; i < run.length - 1; i++) {
+      segs.push({ a: run[i] as Pt, b: run[i + 1] as Pt, run: r, idx: i });
+    }
+  });
+  const out: Pt[] = [];
+  for (let i = 0; i < segs.length; i++) {
+    for (let j = i + 1; j < segs.length; j++) {
+      const s = segs[i]!;
+      const t = segs[j]!;
+      if (s.run === t.run && Math.abs(s.idx - t.idx) <= 1) continue;
+      if (!properlyCrosses(s.a, s.b, t.a, t.b)) continue;
+      /* Line–line intersection of s and t. */
+      const d =
+        (s.b[0] - s.a[0]) * (t.b[1] - t.a[1]) -
+        (s.b[1] - s.a[1]) * (t.b[0] - t.a[0]);
+      const u =
+        ((t.a[0] - s.a[0]) * (t.b[1] - t.a[1]) -
+          (t.a[1] - s.a[1]) * (t.b[0] - t.a[0])) /
+        d;
+      out.push([
+        s.a[0] + u * (s.b[0] - s.a[0]),
+        s.a[1] + u * (s.b[1] - s.a[1]),
+      ]);
+    }
+  }
+  return out;
+}
+
+describe("pinned junctions and contacts (review round 1)", () => {
+  test("a branch on a curved main line stays connected", () => {
+    /* The main line bows gently through the junction J (35 m
+       off the end-to-end chord — inside the 60 m tolerance, so
+       unpinned DP drops J and the branch ends 35 m from the
+       drawn main line). The old branch test used a STRAIGHT
+       main line, where the dropped junction still lies on the
+       chord and nothing reads as detached. */
+    const J = M(800, 35);
+    const g = geometry([
+      [M(0, 0), M(400, 10), J],
+      [J, M(1200, 10), M(1600, 0)],
+      [J, M(800, 300)],
+    ]);
+    const coarse = simplifyGhostGeometry(g, 60);
+    /* The main run (the one holding both ends of the main line)
+       keeps J as an exact vertex, so the branch — its own run
+       ending at J — meets it there. */
+    const main = coarse.coordinates.find(
+      (run) =>
+        run.some((p) => p[0] === M(0, 0)[0] && p[1] === M(0, 0)[1]) &&
+        run.some((p) => p[0] === M(1600, 0)[0] && p[1] === M(1600, 0)[1]),
+    );
+    expect(main).toBeDefined();
+    expect(main!.some((p) => p[0] === J[0] && p[1] === J[1])).toBe(true);
+    expect(distanceToPolylineM(J, main! as Pt[])).toBe(0);
+  });
+
+  test("a caller-protected point survives; unprotected it is dropped", () => {
+    /* A gentle wave: every interior vertex sits within 20 m of
+       the end-to-end chord, so DP drops them all — including Q,
+       the middle one, unless the caller protects it (the paint
+       contact case). */
+    const Q = M(800, 20);
+    const g = geometry([[M(0, 0), M(400, 8), Q, M(1200, 8), M(1600, 0)]]);
+    const bare = simplifyGhostGeometry(g, 60);
+    expect(
+      bare.coordinates[0]!.some((p) => p[0] === Q[0] && p[1] === Q[1]),
+    ).toBe(false);
+    const pinned = simplifyGhostGeometry(g, 60, new Set([ghostPointKey(Q)]));
+    expect(
+      pinned.coordinates[0]!.some((p) => p[0] === Q[0] && p[1] === Q[1]),
+    ).toBe(true);
+  });
+
+  test("a chord that would cross a neighbouring strand keeps the original points", () => {
+    /* Run 1 bows from A through P to B; its end-to-end chord
+       cuts across run 2's straight strand, which the original
+       polyline passes just beyond the end of (the P→B leg
+       crosses run 2's LINE at x ≈ 1005 m, past D at 1000 m, so
+       the originals never cross). Unpinned, unguarded DP draws
+       the chord and invents the crossing. */
+    const A = M(-800, 60);
+    const P = M(500, 25);
+    const B = M(1800, -60);
+    const g = geometry([
+      [A, P, B],
+      [M(0, -8), M(1000, -8)],
+    ]);
+    expect(crossingPoints(g.coordinates)).toHaveLength(0);
+    const coarse = simplifyGhostGeometry(g, 60);
+    expect(crossingPoints(coarse.coordinates)).toHaveLength(0);
+    /* The crossing span fell back to the original shape: P is
+       still a vertex of run 1. */
+    const run1 = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === A[0] && p[1] === A[1]),
+    );
+    expect(run1).toBeDefined();
+    expect(run1!.some((p) => p[0] === P[0] && p[1] === P[1])).toBe(true);
+  });
+});
+
+describe("endpoint touches (review round 2)", () => {
+  test("a chord through a nearby branch's tip does not connect the branch", () => {
+    /* The reviewer's synthetic case: the main line bows 30 m
+       through P, and a branch's tip T sits exactly on the main
+       line's end-to-end chord, ~30 m clear of the original
+       polyline. Proper-crossing checks see nothing (the chord
+       and the branch only TOUCH, at T), so unguarded DP draws
+       the chord straight through T and the branch reads as
+       joined to the main line. The touch check reverts the
+       chord to the original points, and the branch stays the
+       full 30 m clear. */
+    const T = M(500, 0);
+    const P = M(500, 30);
+    const g = geometry([
+      [M(0, 0), P, M(1000, 0)],
+      [T, M(500, -200)],
+    ]);
+    /* The fixture's premise: T is ~30 m from the original main
+       line (nearest approach to either leg of the bow). */
+    const clearance = distanceToPolylineM(T, g.coordinates[0]! as Pt[]);
+    expect(clearance).toBeGreaterThan(25);
+    expect(clearance).toBeLessThan(35);
+    const coarse = simplifyGhostGeometry(g, 60);
+    const main = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(0, 0)[0] && p[1] === M(0, 0)[1]),
+    );
+    expect(main).toBeDefined();
+    /* Not connected: the drawn main line keeps its distance
+       from the tip instead of passing through it. */
+    expect(distanceToPolylineM(T, main! as Pt[])).toBeGreaterThan(25);
+    /* The chord fell back to the original span: P survives as
+       an exact vertex. */
+    expect(main!.some((p) => p[0] === P[0] && p[1] === P[1])).toBe(true);
+    /* The branch itself is untouched, with T still its end. */
+    const branch = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(500, -200)[0] && p[1] === M(500, -200)[1]),
+    );
+    expect(branch).toBeDefined();
+    const branchEnds = [
+      branch![0]!,
+      branch![branch!.length - 1]!,
+    ];
+    expect(
+      branchEnds.some((p) => p[0] === T[0] && p[1] === T[1]),
+    ).toBe(true);
+  });
+
+  test("a chord through a junction the span does not hold is reverted too", () => {
+    /* The touch rule is not only about dead-end tips: here the
+       main line's chord passes through J, a junction of two
+       OTHER strands crossing there. The original main line
+       passes 30 m north of J and never touches it; drawing the
+       chord through J would plant the main line on their
+       junction. */
+    const J = M(500, 0);
+    const P = M(500, 30);
+    const g = geometry([
+      [M(0, 0), P, M(1000, 0)],
+      [M(500, -200), J],
+      [J, M(500, 200)],
+    ]);
+    const coarse = simplifyGhostGeometry(g, 60);
+    const main = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(0, 0)[0] && p[1] === M(0, 0)[1]),
+    );
+    expect(main).toBeDefined();
+    expect(distanceToPolylineM(J, main! as Pt[])).toBeGreaterThan(25);
+    expect(main!.some((p) => p[0] === P[0] && p[1] === P[1])).toBe(true);
+  });
+});
+
+describe("simplifyGhostRemainder memo (review round 1)", () => {
+  const leg = (toT: number, coords: Pt[]): GhostRemainderLeg => ({
+    edge: "edge:1",
+    fromT: 0,
+    toT,
+    coords,
+  });
+
+  test("an unchanged remainder returns the cached object; a changed one recomputes", () => {
+    clearGhostLineGeometryCache();
+    const straight: Pt[] = [M(0, 0), M(400, 8), M(800, 20), M(1600, 0)];
+    const first = simplifyGhostRemainder("memo-test|x", [leg(1, straight)]);
+    const second = simplifyGhostRemainder("memo-test|x", [leg(1, straight)]);
+    expect(second).toBe(first);
+    /* Same coordinates but a different span fingerprint — the
+       coverage moved — must not serve the stale simplification. */
+    const changed = simplifyGhostRemainder("memo-test|x", [
+      leg(0.5, straight),
+    ]);
+    expect(changed).not.toBe(first);
+    clearGhostLineGeometryCache();
+  });
+});
+
+describe("real asset: junctions and crossings survive (review round 1)", () => {
+  test("every junction of every line stays a vertex of its coarse shape", () => {
+    clearGhostLineGeometryCache();
+    for (const [key, entry] of Object.entries(RIDDEN_LINE_GEOMETRIES)) {
+      /* Junctions by the module's degree rule: 1 per piece end,
+         2 per interior pass, degree ≥ 3 branches. */
+      const degree = new Map<string, number>();
+      for (const piece of entry.geometry.coordinates) {
+        piece.forEach((p, i) => {
+          const w = i === 0 || i === piece.length - 1 ? 1 : 2;
+          const k = `${p[0]},${p[1]}`;
+          degree.set(k, (degree.get(k) ?? 0) + w);
+        });
+      }
+      const coarse = getGhostLineGeometry(key, entry.geometry);
+      const verts = new Set<string>();
+      for (const run of coarse.coordinates) {
+        for (const p of run) verts.add(`${p[0]},${p[1]}`);
+      }
+      for (const [k, d] of degree) {
+        if (d >= 3) expect(verts.has(k)).toBe(true);
+      }
+    }
+    clearGhostLineGeometryCache();
+  });
+
+  test("simplification invents no crossings on any line", () => {
+    clearGhostLineGeometryCache();
+    for (const [key, entry] of Object.entries(RIDDEN_LINE_GEOMETRIES)) {
+      const origPts = crossingPoints(entry.geometry.coordinates);
+      const coarse = getGhostLineGeometry(key, entry.geometry);
+      const simpPts = crossingPoints(coarse.coordinates);
+      /* Every crossing the coarse shape draws must sit where
+         the original already crosses (within twice the
+         tolerance — a kept crossing's chords stay within one
+         tolerance of the strands that cross). A line whose
+         original has no crossings at all must gain none. */
+      if (origPts.length === 0) {
+        expect(simpPts).toHaveLength(0);
+        continue;
+      }
+      for (const p of simpPts) {
+        let nearest = Infinity;
+        for (const q of origPts) {
+          nearest = Math.min(nearest, distanceToPolylineM(p, [q, q]));
+        }
+        expect(nearest).toBeLessThanOrEqual(
+          2 * GHOST_SIMPLIFY_TOLERANCE_M + 1,
+        );
+      }
+      /* 鹿児島線 is the review's example: the original crosses
+         nowhere, and the first cut's simplification invented
+         three crossings. */
+      if (key.startsWith("鹿児島線")) {
+        expect(origPts).toHaveLength(0);
+        expect(simpPts).toHaveLength(0);
+      }
+    }
+    clearGhostLineGeometryCache();
+  });
+});
+
+describe("subtraction → simplification, as App.tsx runs it (review round 1)", () => {
+  test("a Saikyo partial ride keeps every paint contact on the Yamanote ghost", () => {
+    clearGhostLineGeometryCache();
+    const GEOMETRIES = RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
+    const YAMA_KEY = "山手線|東日本旅客鉄道";
+    const osaki: StationRef = {
+      id: "004135",
+      name: "大崎",
+      lng: 139.72807,
+      lat: 35.61985,
+    };
+    const ikebukuro: StationRef = {
+      id: "003390",
+      name: "池袋",
+      lng: 139.71108,
+      lat: 35.72981,
+    };
+    const intervals = new Map<string, readonly RideInterval[]>([
+      [
+        "jr-saikyo",
+        [
+          {
+            serviceId: "jr-saikyo",
+            from: osaki,
+            to: ikebukuro,
+            direction: null,
+          },
+        ],
+      ],
+    ]);
+    const paths = new Map([
+      ["jr-saikyo", buildServicePath(serviceById("jr-saikyo")!, GEOMETRIES)],
+    ]);
+    const coverage = computeLineCoverage(
+      intervals,
+      new Set(),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    /* The contacts, exactly as App.tsx collects them: endpoints
+       of the key's painted legs. */
+    const contacts = new Set<string>();
+    for (const [, painted] of coverage.perServiceLegs) {
+      if (painted.unknown) continue;
+      for (const paintLeg of painted.legs) {
+        if (paintLeg.key !== YAMA_KEY) continue;
+        for (const end of [
+          paintLeg.coords[0]!,
+          paintLeg.coords[paintLeg.coords.length - 1]!,
+        ]) {
+          contacts.add(ghostPointKey(end));
+        }
+      }
+    }
+    const legs = ghostLineLegs(coverage, GEOMETRIES).get(YAMA_KEY) ?? [];
+    expect(legs.length).toBeGreaterThan(0);
+    /* The shared points: contacts that are also remainder-leg
+       endpoints — the spots where ghost meets paint. The first
+       cut dropped one of them mid-run and the ghost slid
+       17.5 m off the paint (measured on this very fixture). */
+    const ghostEnds = new Set<string>();
+    for (const ghostLeg of legs) {
+      for (const end of [
+        ghostLeg.coords[0]!,
+        ghostLeg.coords[ghostLeg.coords.length - 1]!,
+      ]) {
+        ghostEnds.add(ghostPointKey(end));
+      }
+    }
+    const shared = [...contacts].filter((k) => ghostEnds.has(k));
+    expect(shared.length).toBeGreaterThan(0);
+    const coarse = simplifyGhostRemainder(YAMA_KEY, legs, contacts);
+    const verts = new Set<string>();
+    for (const run of coarse.coordinates) {
+      for (const p of run) verts.add(`${p[0]},${p[1]}`);
+    }
+    for (const k of shared) expect(verts.has(k)).toBe(true);
     clearGhostLineGeometryCache();
   });
 });

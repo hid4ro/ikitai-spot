@@ -6,7 +6,10 @@
    Run with: bun test client/src/map-variant.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
+  applyUnriddenLineGhostLatest,
+  applyVariantPaint,
   decideSpotDataRemount,
+  ensureUnriddenLineGhost,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
@@ -14,8 +17,12 @@ import {
   shouldSkipSpotRemount,
   spotsInitialCamera,
   stickyPaneVisibleTop,
+  UNRIDDEN_LINES_LAYER_ID,
+  UNRIDDEN_LINES_SOURCE_ID,
   variantPaintOps,
   type MapMountKeys,
+  type UnriddenGhostResult,
+  type UnriddenLineFeature,
 } from "./map-variant";
 
 const paintValue = (
@@ -133,6 +140,249 @@ describe("variantPaintOps", () => {
         expect(mounted.has(op.layer)).toBe(true);
       }
     }
+  });
+});
+
+describe("ensureUnriddenLineGhost (the ghost joins the map late, review round 2)", () => {
+  /* A fake map with just the surface the ensure + the variant
+     paint use: sources that remember their data, layers that
+     remember their spec, insertion anchor, and layout props. */
+  function fakeMap(existingLayers: string[] = []) {
+    const sources = new Map<string, { data: unknown }>();
+    const layers = new Map<
+      string,
+      { spec: Record<string, unknown>; beforeId?: string }
+    >();
+    for (const id of existingLayers) layers.set(id, { spec: { id } });
+    return {
+      sources,
+      layers,
+      getSource: (id: string) => {
+        const s = sources.get(id);
+        return s ? { setData: (data: unknown) => (s.data = data) } : undefined;
+      },
+      addSource: (id: string, source: Record<string, unknown>) => {
+        sources.set(id, { data: source.data });
+      },
+      addLayer: (layer: Record<string, unknown>, beforeId?: string) => {
+        layers.set(layer.id as string, { spec: layer, beforeId });
+      },
+      getLayer: (id: string) => layers.get(id),
+      setPaintProperty: () => {},
+      setLayoutProperty: (id: string, name: string, value: unknown) => {
+        const l = layers.get(id);
+        if (!l) return;
+        const layout = (l.spec.layout ?? {}) as Record<string, unknown>;
+        layout[name] = value;
+        l.spec.layout = layout;
+      },
+    };
+  }
+
+  const feature = (key: string): UnriddenLineFeature => ({
+    type: "Feature",
+    properties: { key, color: "#123456" },
+    geometry: {
+      type: "MultiLineString",
+      coordinates: [
+        [
+          [139.0, 35.0],
+          [139.01, 35.0],
+        ],
+      ],
+    },
+  });
+
+  test("a first arrival adds the source and the mount's layer, below the ridden lines", () => {
+    const map = fakeMap(["visited-lines-casing", "visited-lines-color"]);
+    ensureUnriddenLineGhost(map, [feature("山手線|東日本旅客鉄道")]);
+    const added = map.layers.get(UNRIDDEN_LINES_LAYER_ID);
+    expect(added).toBeDefined();
+    /* The mount overlay's spec, verbatim: the late layer must
+       be indistinguishable from a mounted one. */
+    expect(added!.spec).toEqual({
+      id: "unridden-lines-ghost",
+      type: "line",
+      source: "unridden-lines",
+      layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
+      paint: { "line-color": ["get", "color"], "line-width": 1.6, "line-opacity": 0.25 },
+    });
+    /* Paint order: directly below the ridden lines, as the
+       mount's sort places the family. */
+    expect(added!.beforeId).toBe("visited-lines-casing");
+    const data = map.sources.get(UNRIDDEN_LINES_SOURCE_ID)!.data as {
+      features: unknown[];
+    };
+    expect(data.features).toHaveLength(1);
+  });
+
+  test("an existing source is refreshed in place, never re-added", () => {
+    const map = fakeMap([]);
+    ensureUnriddenLineGhost(map, [feature("a|b")]);
+    ensureUnriddenLineGhost(map, [feature("a|b"), feature("c|d")]);
+    const data = map.sources.get(UNRIDDEN_LINES_SOURCE_ID)!.data as {
+      features: unknown[];
+    };
+    expect(data.features).toHaveLength(2);
+    expect(map.layers.size).toBe(1);
+  });
+
+  test("no features and no source: nothing joins yet", () => {
+    const map = fakeMap([]);
+    ensureUnriddenLineGhost(map, []);
+    expect(map.sources.size).toBe(0);
+    expect(map.layers.size).toBe(0);
+  });
+
+  test("after the join, the variant paint shows the ghost only on the 路線 tab", () => {
+    /* The App.tsx sequence: ensure, then applyVariantPaint with
+       the current variant — the same order the mount callback
+       uses. A layer joining while the reader is on the 路線 tab
+       must arrive visible; on any other tab it stays hidden. */
+    const onLines = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenLineGhost(onLines, [feature("a|b")]);
+    applyVariantPaint(onLines, "lines");
+    const layout = onLines.layers.get(UNRIDDEN_LINES_LAYER_ID)!.spec
+      .layout as Record<string, unknown>;
+    expect(layout.visibility).toBe("visible");
+
+    const onMunicipalities = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenLineGhost(onMunicipalities, [feature("a|b")]);
+    applyVariantPaint(onMunicipalities, "municipalities");
+    const layout2 = onMunicipalities.layers.get(UNRIDDEN_LINES_LAYER_ID)!
+      .spec.layout as Record<string, unknown>;
+    expect(layout2.visibility).toBe("none");
+  });
+
+  test("the insertion anchor falls back past the spot dots, then to the top", () => {
+    const dotsOnly = fakeMap(["list-spot-points-circle"]);
+    ensureUnriddenLineGhost(dotsOnly, [feature("a|b")]);
+    expect(
+      dotsOnly.layers.get(UNRIDDEN_LINES_LAYER_ID)!.beforeId,
+    ).toBe("list-spot-points-circle");
+    const bare = fakeMap([]);
+    ensureUnriddenLineGhost(bare, [feature("a|b")]);
+    expect(
+      bare.layers.get(UNRIDDEN_LINES_LAYER_ID)!.beforeId,
+    ).toBeUndefined();
+  });
+});
+
+describe("applyUnriddenLineGhostLatest (a late waiter must not wipe the ghost, review round 3)", () => {
+  /* The same fake-map surface as the ensure tests above. */
+  function fakeMap(existingLayers: string[] = []) {
+    const sources = new Map<string, { data: unknown }>();
+    const layers = new Map<string, { spec: Record<string, unknown> }>();
+    for (const id of existingLayers) layers.set(id, { spec: { id } });
+    return {
+      sources,
+      layers,
+      getSource: (id: string) => {
+        const s = sources.get(id);
+        return s ? { setData: (data: unknown) => (s.data = data) } : undefined;
+      },
+      addSource: (id: string, source: Record<string, unknown>) => {
+        sources.set(id, { data: source.data });
+      },
+      addLayer: (layer: Record<string, unknown>) => {
+        layers.set(layer.id as string, { spec: layer });
+      },
+      getLayer: (id: string) => layers.get(id),
+    };
+  }
+
+  const feature = (key: string): UnriddenLineFeature => ({
+    type: "Feature",
+    properties: { key, color: "#123456" },
+    geometry: {
+      type: "MultiLineString",
+      coordinates: [
+        [
+          [139.0, 35.0],
+          [139.01, 35.0],
+        ],
+      ],
+    },
+  });
+
+  const sourceFeatures = (
+    map: ReturnType<typeof fakeMap>,
+  ): UnriddenLineFeature[] =>
+    (
+      map.sources.get(UNRIDDEN_LINES_SOURCE_ID)?.data as {
+        features: UnriddenLineFeature[];
+      }
+    )?.features ?? [];
+
+  test("the reversed order the review reproduced: a waiter registered with the empty ghost fires after the real one landed — the ghost survives", () => {
+    const KEY = "ledger-1";
+    const map = fakeMap(["visited-lines-casing"]);
+    /* The App.tsx pattern after the fix: the result lives in a
+       ref-shaped box, and a waiter reads the box when it FIRES,
+       never the value from when it was registered. */
+    const latest: { current: UnriddenGhostResult | null } = {
+      current: { coverageKey: KEY, features: [] },
+    };
+    const waiters: (() => void)[] = [];
+    const registerWaiter = () =>
+      waiters.push(() =>
+        applyUnriddenLineGhostLatest(map, latest.current, KEY),
+      );
+    /* 1. The data effect runs while the ghost is still empty
+       and the map is not ready: its waiter stays registered. */
+    registerWaiter();
+    /* 2. The worker's result lands; the next effect run applies
+       it at once (the map is ready by now). */
+    latest.current = { coverageKey: KEY, features: [feature("a|b")] };
+    expect(applyUnriddenLineGhostLatest(map, latest.current, KEY)).toBe(true);
+    expect(sourceFeatures(map)).toHaveLength(1);
+    /* The layer is up and — with the variant paint the effect
+       runs right after — visible on the 路線 tab. */
+    expect(map.layers.has(UNRIDDEN_LINES_LAYER_ID)).toBe(true);
+    /* 3. The stale waiter from step 1 finally fires. Reading
+       the latest result, it re-applies the REAL ghost; with
+       the round-2 capture it applied the empty array it was
+       registered with and the source went empty under a
+       visible layer. */
+    for (const fire of waiters) fire();
+    expect(sourceFeatures(map)).toHaveLength(1);
+    expect(sourceFeatures(map)[0]!.properties.key).toBe("a|b");
+  });
+
+  test("a result whose ledger has moved on is refused — it neither overwrites nor wipes", () => {
+    const map = fakeMap(["visited-lines-casing"]);
+    expect(
+      applyUnriddenLineGhostLatest(
+        map,
+        { coverageKey: "k1", features: [feature("a|b")] },
+        "k1",
+      ),
+    ).toBe(true);
+    expect(sourceFeatures(map)).toHaveLength(1);
+    /* The ledger is at k2 now. A late path carrying k1's (even
+       emptier) result must leave the map exactly as it is; the
+       k2 result joins through its own effect run. */
+    expect(
+      applyUnriddenLineGhostLatest(
+        map,
+        { coverageKey: "k1", features: [] },
+        "k2",
+      ),
+    ).toBe(false);
+    expect(sourceFeatures(map)).toHaveLength(1);
+    expect(
+      applyUnriddenLineGhostLatest(map, null, "k2"),
+    ).toBe(false);
+    expect(sourceFeatures(map)).toHaveLength(1);
+    /* And the current ledger's result applies normally. */
+    expect(
+      applyUnriddenLineGhostLatest(
+        map,
+        { coverageKey: "k2", features: [feature("a|b"), feature("c|d")] },
+        "k2",
+      ),
+    ).toBe(true);
+    expect(sourceFeatures(map)).toHaveLength(2);
   });
 });
 

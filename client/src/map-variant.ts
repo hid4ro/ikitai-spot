@@ -26,6 +26,7 @@ import {
   usableRiddenService,
   type RiddenServiceLink,
 } from "../../shared/service-master";
+import type { GeoJsonLineGeometry } from "./geojson";
 
 /* Which map tab the shared map is showing: the spot list's tab,
    the municipality ledger's tab, or the ridden lines' tab. The
@@ -175,6 +176,122 @@ export function applyVariantPaint(
       map.setLayoutProperty(op.layer, op.name, op.value);
     }
   }
+}
+
+/* ---------------- the unridden ghost's late join ----------------
+   The 路線 tab's ghost of everything not ridden (subtask 1457):
+   its geometry is computed OFF the render path (review round 2 —
+   the first cut simplified all 597 lines synchronously inside a
+   useMemo, on every tab, before the first paint), so on a first
+   mount the layer usually does not exist yet. It joins the live
+   map through here once the computation lands, and a coverage
+   change after the mount refreshes the source in place. */
+
+export const UNRIDDEN_LINES_SOURCE_ID = "unridden-lines";
+export const UNRIDDEN_LINES_LAYER_ID = "unridden-lines-ghost";
+
+/* One formal line's unridden remainder as a map feature, in its
+   own color — the shape App.tsx's ghost computation produces
+   and the mount overlay carries. */
+export type UnriddenLineFeature = {
+  type: "Feature";
+  properties: { key: string; color: string };
+  geometry: GeoJsonLineGeometry;
+};
+
+/* The minimal map surface ensureUnriddenLineGhost needs — the
+   real MapLibreLike satisfies it, and tests drive it with a
+   fake. */
+export type UnriddenGhostMap = {
+  getSource: (
+    id: string,
+  ) => { setData: (data: unknown) => void } | undefined;
+  addSource: (id: string, source: Record<string, unknown>) => void;
+  addLayer: (layer: Record<string, unknown>, beforeId?: string) => void;
+  getLayer: (id: string) => unknown;
+};
+
+/* Adds the unridden-lines ghost source + layer to a live map,
+   or refreshes its data when they already exist. The layer spec
+   mirrors App.tsx's mount overlay exactly, inserted below the
+   ridden lines — the paint order the mount's sort gives the
+   family (unridden-lines sits directly under visited-lines,
+   above the prefecture borders and the spot dots stay above
+   it). Visibility starts at "none": the caller applies the
+   variant paint right after, as the mount does, so a layer
+   joining while the 路線 tab is up arrives visible and one
+   joining elsewhere stays hidden. With no features and no
+   source there is nothing to join yet — the next arrival
+   retries. */
+export function ensureUnriddenLineGhost(
+  map: UnriddenGhostMap,
+  features: readonly UnriddenLineFeature[],
+): void {
+  const data = { type: "FeatureCollection", features };
+  const source = map.getSource(UNRIDDEN_LINES_SOURCE_ID);
+  if (source) {
+    source.setData(data);
+    return;
+  }
+  if (features.length === 0) return;
+  map.addSource(UNRIDDEN_LINES_SOURCE_ID, { type: "geojson", data });
+  const beforeId = [
+    "visited-lines-casing",
+    "visited-lines-color",
+    "visited-lines-unknown",
+    "list-spot-points-circle",
+  ].find((id) => map.getLayer(id));
+  map.addLayer(
+    {
+      id: UNRIDDEN_LINES_LAYER_ID,
+      type: "line",
+      source: UNRIDDEN_LINES_SOURCE_ID,
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+        visibility: "none",
+      },
+      paint: {
+        "line-color": ["get", "color"],
+        "line-width": 1.6,
+        "line-opacity": 0.25,
+      },
+    },
+    beforeId,
+  );
+}
+
+/* A computed ghost and the ledger it belongs to: the coverage
+   key is the fingerprint of the painted legs the features were
+   computed from (ghostCoverageKey in unridden-ghost.ts). */
+export type UnriddenGhostResult = {
+  coverageKey: string;
+  features: readonly UnriddenLineFeature[];
+};
+
+/* Applies the LATEST ghost result to the map — but only while
+   it still belongs to the CURRENT ledger (subtask 1457, review
+   round 3, finding 1). The deferred paths that reach the map
+   (the data effect's waiter, the mount callback) call this
+   with the latest result read from a ref AT EXECUTION TIME,
+   never with a value captured when the waiter was registered:
+   the first deferred cut captured the features at effect time,
+   so a waiter registered while the ghost was still empty could
+   fire after the real features had already been applied and
+   wipe the source back to empty — the layer stayed visible,
+   the ghost vanished. Reading the latest result at fire time
+   makes a late waiter re-apply the CURRENT ghost instead, and
+   the coverage-key check refuses a result whose ledger has
+   already moved on (its replacement is on its way through the
+   compute effect). Returns whether anything was applied. */
+export function applyUnriddenLineGhostLatest(
+  map: UnriddenGhostMap,
+  latest: UnriddenGhostResult | null,
+  currentCoverageKey: string,
+): boolean {
+  if (!latest || latest.coverageKey !== currentCoverageKey) return false;
+  ensureUnriddenLineGhost(map, latest.features);
+  return true;
 }
 
 /* The ledger row a tap on a painted line track belongs to: the

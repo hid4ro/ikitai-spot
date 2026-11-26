@@ -6,5 +6,9 @@
 // define, asset naming, tailwind plugin).
 
 import { buildClient } from "@hatch/space-sdk/build";
+import { generateGhostWorkerAsset } from "./generate-ghost-worker.mjs";
+
+// Generate the file asset before the SDK resolves App.tsx's asset imports.
+await generateGhostWorkerAsset();
 
 await buildClient();

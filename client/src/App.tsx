@@ -30,7 +30,7 @@ import type { Actions } from "../../server/src/actions";
 import { api, type ApiResponse } from "./api";
 import { mountPlaceListMap } from "./map-helpers.mjs";
 import type { MapLibreLike, PlaceListMapHandle } from "./map-helpers.mjs";
-import type { GeoJsonGeometry, GeoJsonLineGeometry } from "./geojson";
+import type { GeoJsonGeometry } from "./geojson";
 import {
   ensureBoundaryManifest,
   ensurePrefectureBorders,
@@ -69,13 +69,16 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
-  ghostLineLegs,
   riddenLineIntervals,
   sectionBounds,
   type LineCoverage,
   type LineGeometryMap,
 } from "./line-geometry";
-import { simplifyGhostGeometry } from "./ghost-line-geometry";
+import {
+  ghostCoverageKey,
+  serializeGhostCoverage,
+} from "./unridden-ghost";
+import { createUnriddenGhostClient } from "./unridden-ghost-client";
 import {
   JAPAN_LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
@@ -87,6 +90,7 @@ import {
   UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
 import {
+  applyUnriddenLineGhostLatest,
   applyVariantPaint,
   decideSpotDataRemount,
   lineRowForPaintedFeature,
@@ -96,12 +100,17 @@ import {
   stickyPaneVisibleTop,
   type MapMountKeys,
   type RecordMapVariant,
+  type UnriddenGhostResult,
+  type UnriddenLineFeature,
 } from "./map-variant";
 import {
   createSelectionSequencer,
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
+import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
+
+const unriddenGhostClient = createUnriddenGhostClient(unriddenGhostWorkerUrl);
 
 /* Input limits come from the server actions' request schemas, so the
    form fields and the server can never disagree (platform v29). */
@@ -2665,6 +2674,12 @@ function ensureGhostSpotPoints(
   );
 }
 
+/* The 路線 tab's ghost features for one coverage — every
+   formal line's unridden remainder, coarsened — are computed
+   by computeUnriddenGhostFeatures in unridden-ghost.ts, inside
+   the ghost's Web Worker (review round 3; the computation used
+   to live here). */
+
 function ensureFocusLayers(map: MapLibreLike) {
   if (!map.getSource(FOCUS_POLYGON_SOURCE_ID)) {
     map.addSource(FOCUS_POLYGON_SOURCE_ID, {
@@ -3354,43 +3369,80 @@ function VisitedMapSection({
      dropped the whole 山手線 loop from the ghost the moment one
      section of it was ridden, so the unridden arcs showed
      nothing and the loop read as gapped (subtask 1456, review
-     round 1). One feature per key, in its own color, drawn by
-     the mount as one thin layer whose visibility the variant
-     paint toggles. The remainder is then coarsened with the
-     ghost simplification (subtask 1457): the pieces chained
-     and simplified at a 100 m tolerance, about a third of the
+     round 1). One feature per key, in its own color, drawn as
+     one thin layer whose visibility the variant paint toggles.
+     The remainder is then coarsened with the ghost
+     simplification (subtask 1457): the pieces chained and
+     simplified at the spec's 60 m tolerance, under half the
      coordinates — the faint underlay does not need the record's
      precision, and the ridden legs above it still draw at full
      precision. The subtraction makes the remainder depend on
-     the coverage, so the per-key static cache behind
-     getGhostLineGeometry no longer applies: simplifyGhostGeometry
-     runs on the remainder inside this useMemo, which re-runs
-     only when the coverage changes. Slice endpoints survive
-     simplification exactly, so the painted/ghost boundary keeps
-     its precision. */
-  const unriddenLineFeatures = useMemo(() => {
-    const features: {
-      type: "Feature";
-      properties: { key: string; color: string };
-      geometry: GeoJsonLineGeometry;
-    }[] = [];
-    for (const [key, legs] of ghostLineLegs(
-      lineCoverage,
-      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
-    )) {
-      const entry = RIDDEN_LINE_GEOMETRIES[key];
-      if (!entry || legs.length === 0) continue;
-      features.push({
-        type: "Feature",
-        properties: { key, color: entry.color },
-        geometry: simplifyGhostGeometry({
-          type: "MultiLineString",
-          coordinates: legs.map((leg) => leg.coords),
-        }),
+     the coverage, so it is simplified per key through
+     simplifyGhostRemainder, whose memo re-runs a line only when
+     its remainder actually changed (review round 1: a coverage
+     change used to re-simplify all 597 lines). The painted
+     legs' endpoints on each key ride along as protected points,
+     so the points where ghost meets paint are pinned exactly —
+     unpinned, chaining plus DP could drop a shared point
+     mid-run and the ghost slid off the paint (17.5 m on
+     山手線）. Slice endpoints survive simplification exactly,
+     so the painted/ghost boundary keeps its precision.
+     The computation itself is the map's heaviest (all 597
+     lines), so it runs off the UI thread entirely (review
+     round 3): the first cut's useMemo simplified everything
+     synchronously on EVERY tab — including the two that never
+     show the ghost — before the first paint, and round 2's
+     setTimeout deferral still let the ~300 ms computation
+     precede the 路線 tab's first paint. Now an effect hands
+     the settled coverage to the ghost's Web Worker
+     (unridden-ghost.ts / unridden-ghost-client.ts) once the
+     路線 tab is showing, and the result — tagged with the
+     coverage key of the ledger it was computed from — joins
+     the live map through applyUnriddenLineGhostLatest (the
+     mount still bakes it in directly when a remount finds it
+     ready AND still current). Tabs that never show the ghost
+     never start the worker at all. */
+  const lineCoverageKey = useMemo(
+    () => ghostCoverageKey(serializeGhostCoverage(lineCoverage)),
+    [lineCoverage],
+  );
+  const lineCoverageKeyRef = useRef(lineCoverageKey);
+  lineCoverageKeyRef.current = lineCoverageKey;
+  const [unriddenGhost, setUnriddenGhost] =
+    useState<UnriddenGhostResult | null>(null);
+  const unriddenGhostRef = useRef(unriddenGhost);
+  unriddenGhostRef.current = unriddenGhost;
+  /* The mount overlay bake still reads a plain feature list:
+     the latest result's features, or none before the first
+     result lands. Whether they may be baked at all is decided
+     where the overlay is built (the coverage-key check). */
+  const unriddenLineFeatures: readonly UnriddenLineFeature[] =
+    unriddenGhost?.features ?? [];
+  const lineCoverageSettled =
+    riddenQuery.data !== undefined || riddenQuery.isError;
+  useEffect(() => {
+    if (variant !== "lines" || !lineCoverageSettled) return;
+    if (unriddenGhostRef.current?.coverageKey === lineCoverageKey) return;
+    let cancelled = false;
+    unriddenGhostClient
+      .request(serializeGhostCoverage(lineCoverage))
+      .then((result) => {
+        if (cancelled || !result) return;
+        /* The ledger moved on while the worker was computing:
+           this result belongs to a coverage the map no longer
+           shows, and the newer request's result is the one to
+           apply (review round 3, finding 1 — a stale ghost must
+           never reach the map). */
+        if (result.coverageKey !== lineCoverageKeyRef.current) return;
+        setUnriddenGhost(result);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) console.error("Unridden line geometry failed", error);
       });
-    }
-    return features;
-  }, [lineCoverage]);
+    return () => {
+      cancelled = true;
+    };
+  }, [variant, lineCoverageSettled, lineCoverage, lineCoverageKey]);
 
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
@@ -4782,8 +4834,18 @@ function VisitedMapSection({
          The layer rides along on every mount, but its visibility
          starts at "none": the variant paint applied right after
          the mount (and on every tab switch) shows it only on the
-         路線 tab. */
-      if (unriddenLineFeatures.length > 0) {
+         路線 tab.
+         The bake is gated on the result still belonging to THIS
+         render's ledger (review round 3, finding 1 — the same
+         condition the late-join paths use): a remount that finds
+         a ghost computed for an older coverage leaves the layer
+         out, and the data effect joins the current one when the
+         worker's answer lands. */
+      if (
+        unriddenGhost &&
+        unriddenGhost.coverageKey === lineCoverageKey &&
+        unriddenLineFeatures.length > 0
+      ) {
         overlays.push({
           id: "unridden-lines",
           data: {
@@ -4979,6 +5041,27 @@ function VisitedMapSection({
              double the hero dots. */
           try {
             ensureGhostSpotPoints(map, ghostSpotPointFeaturesRef.current);
+          } catch {
+            /* the ghost is an underlay; its data effect retries */
+          }
+          /* The unridden-lines ghost joins the same way, before
+             the variant paint (subtask 1457, review round 2):
+             its geometry is computed off the UI thread, so the
+             mount overlays usually ran before it existed — this
+             adds the layer with whatever has landed, and the
+             data effect below refreshes it as more arrives. A
+             layer added after the paint would keep the mount's
+             "none" visibility even on the 路線 tab. The result
+             is read from the ref at this moment and applied only
+             while it belongs to the current ledger (review
+             round 3, finding 1 — the same condition the data
+             effect's waiter uses). */
+          try {
+            applyUnriddenLineGhostLatest(
+              map,
+              unriddenGhostRef.current,
+              lineCoverageKeyRef.current,
+            );
           } catch {
             /* the ghost is an underlay; its data effect retries */
           }
@@ -5263,6 +5346,39 @@ function VisitedMapSection({
       }
     });
   }, [ghostSpotPointFeatures, boundarySettled]);
+
+  /* The unridden-lines ghost is computed in a Web Worker
+     (subtask 1457, review round 3), so it normally lands after
+     the mount: join the live map here — or refresh the source
+     in place when the coverage moved under it — and re-apply
+     the variant paint right after, as the mount callback does,
+     so a layer joining on the 路線 tab arrives visible and one
+     joining elsewhere stays hidden.
+     The waiter below deliberately reads the result from the
+     ref AT EXECUTION TIME (review round 3, finding 1): the
+     round-2 cut captured the features when the effect ran, so
+     a waiter registered while the ghost was still empty could
+     fire after the real features had been applied and wipe the
+     source back to empty. Reading the latest result when the
+     waiter fires makes a late run apply the CURRENT ghost, and
+     applyUnriddenLineGhostLatest refuses it outright if its
+     ledger has already moved on. */
+  useEffect(() => {
+    if (!boundarySettled) return;
+    withLiveMapRef.current((map) => {
+      try {
+        applyUnriddenLineGhostLatest(
+          map,
+          unriddenGhostRef.current,
+          lineCoverageKeyRef.current,
+        );
+        applyVariantPaint(map, variantRef.current);
+      } catch {
+        /* the ghost is an underlay; a failed refresh leaves the
+           previous shape, and the next mount rebuilds it */
+      }
+    });
+  }, [unriddenGhost, boundarySettled]);
 
   /* Runs `fn` with the live MapLibre map as soon as it exists. The map
      handle is stored at mount time, but the underlying map only appears
