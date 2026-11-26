@@ -13,6 +13,7 @@ import {
   GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
+  mapPaneBlockRendered,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
   shouldSkipSpotRemount,
@@ -838,5 +839,27 @@ describe("decideSpotDataRemount (review round 2, finding 5)", () => {
         true,
       ),
     ).toBe("remount");
+  });
+});
+
+describe("mapPaneBlockRendered (v89 review round 2, finding 2)", () => {
+  test("the スポット tab always renders its pane, even with no records", () => {
+    expect(mapPaneBlockRendered("spots", 0, false)).toBe(true);
+  });
+
+  test("a record tab renders the pane when either ledger has rows", () => {
+    expect(mapPaneBlockRendered("municipalities", 3, false)).toBe(true);
+    expect(mapPaneBlockRendered("municipalities", 0, true)).toBe(true);
+    expect(mapPaneBlockRendered("lines", 3, false)).toBe(true);
+    expect(mapPaneBlockRendered("lines", 0, true)).toBe(true);
+  });
+
+  test("with zero records a record tab renders NO pane — fullscreen must not survive there", () => {
+    /* The reviewed trap: fullscreen carried from スポット into
+       an empty 市区町村 / 路線 tab left the shared flag (and
+       the scroll lock) on while neither the map nor its exit
+       button was rendered, and touch had no way out. */
+    expect(mapPaneBlockRendered("municipalities", 0, false)).toBe(false);
+    expect(mapPaneBlockRendered("lines", 0, false)).toBe(false);
   });
 });

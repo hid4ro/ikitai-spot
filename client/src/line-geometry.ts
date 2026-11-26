@@ -93,6 +93,30 @@ function polylineLengthKm(points: readonly LngLat[]): number {
   return total;
 }
 
+/* Distance from a point to a MultiLineString geometry in metres:
+   the nearest point-to-segment distance over every piece, on the
+   same local projection nearestOnSegment uses — so a point beside
+   the middle of a long straight counts as near, not only a point
+   beside a vertex. Null when the geometry carries no segment at
+   all (no points, or only lone points). */
+export function distanceToLineGeometryM(
+  point: LngLat,
+  geometry: GeoJsonLineGeometry,
+): number | null {
+  let best: number | null = null;
+  for (const segment of geometry.coordinates) {
+    for (let i = 0; i < segment.length - 1; i++) {
+      const near = nearestOnSegment(
+        point,
+        segment[i]! as LngLat,
+        segment[i + 1]! as LngLat,
+      );
+      if (best === null || near.distanceM < best) best = near.distanceM;
+    }
+  }
+  return best;
+}
+
 /* ------------------------------------------------------------------ */
 /* The graph of one formal line                                       */
 /* ------------------------------------------------------------------ */

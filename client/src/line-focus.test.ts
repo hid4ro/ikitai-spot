@@ -5,20 +5,39 @@
    the service master (shared/service-master.ts).
    Run with: bun test client/src/line-focus.test.ts */
 import { describe, expect, test } from "bun:test";
-import type { RiddenServiceLink } from "../../shared/service-master";
+import {
+  resolveRiddenService,
+  type RiddenServiceLink,
+} from "../../shared/service-master";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import { buildLineKeyByName, resolveRiddenLineKey } from "./line-resolution";
 import {
   firstLineByOperator,
   groupLinesByOperator,
   lineGeometryBounds,
+  nearestRiddenLine,
   operatorOfLine,
   UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
+import { buildServicePath, servicePathCoords } from "./line-geometry";
 
 const keyByName = buildLineKeyByName(RIDDEN_LINE_GEOMETRIES);
 const operatorOf = (line: string | RiddenServiceLink) =>
   operatorOfLine(line, RIDDEN_LINE_GEOMETRIES, keyByName);
+
+/* The bounds of the route a ledger name's service actually
+   runs (buildServicePath over the master) — the frame
+   nearestRiddenLine must produce for a service row since v89
+   review round 1, finding 2. */
+const serviceRouteBounds = (name: string) => {
+  const service = resolveRiddenService({ name }).service!;
+  return lineGeometryBounds({
+    type: "MultiLineString",
+    coordinates: servicePathCoords(
+      buildServicePath(service, RIDDEN_LINE_GEOMETRIES),
+    ),
+  })!;
+};
 
 /* The nine rows of the live ridden-lines ledger (listRiddenLines,
    ids 1, 3–10), in ledger order. */
@@ -214,5 +233,120 @@ describe("lineGeometryBounds (the row-tap camera target)", () => {
     expect(
       lineGeometryBounds({ type: "MultiLineString", coordinates: [[]] }),
     ).toBeNull();
+  });
+});
+
+describe("nearestRiddenLine (the 路線 tab's default framing, subtask 1483)", () => {
+  /* N02 station centroids (the master's values), the same points
+     line-geometry.test.ts projects from. */
+  const FUCHU = { lat: 35.67219, lng: 139.4801 };
+  const CHIBA = { lat: 35.61275, lng: 140.1136 };
+  const OMIYA = { lat: 35.90653, lng: 139.62356 };
+  const nearest = (location: { lat: number; lng: number }) =>
+    nearestRiddenLine(location, LEDGER_ROWS, RIDDEN_LINE_GEOMETRIES, keyByName);
+
+  test("at 府中駅 the nearest recorded line is 京王線, framed over its route", () => {
+    const found = nearest(FUCHU);
+    expect(found?.row.id).toBe(7);
+    expect(found!.distanceM).toBeLessThan(1000);
+    /* 京王線 resolves to a service in the master, so the frame
+       is the service's running route — not the 京王線 asset
+       geometry, which also carries the 相模原線 the 京王線
+       service does not run. */
+    expect(found!.bounds).toEqual(serviceRouteBounds("京王線"));
+  });
+
+  test("at 千葉駅 the 総武線 pair ties and the earlier ledger row wins", () => {
+    const found = nearest(CHIBA);
+    /* Both services run through 千葉駅, so the distances are
+       near-identical and ledger order breaks the tie. */
+    expect(found?.row.id).toBe(5);
+    expect(found!.distanceM).toBeLessThan(1000);
+    /* The frame is the winning row's own service route
+       （総武快速線： 東京〜千葉), not the shared 総武線 asset
+       geometry, which runs on to 銚子. */
+    expect(found!.bounds).toEqual(serviceRouteBounds("JR総武快速線"));
+  });
+
+  test("at 大宮駅 the multi-line 埼京線 wins, framed over its running route", () => {
+    const found = nearest(OMIYA);
+    expect(found?.row.id).toBe(8);
+    expect(found!.distanceM).toBeLessThan(1000);
+    /* The frame is the route the service actually runs
+       (buildServicePath over its segments: 大崎〜池袋〜赤羽〜
+       大宮〜川越), NOT the union of the formal lines it borrows
+       — the 東北線 asset alone runs to 青森 (v89 review round 1,
+       finding 2). */
+    expect(found!.bounds).toEqual(serviceRouteBounds("JR埼京線"));
+    /* …and the route stays in the 大崎〜川越 corridor. */
+    const [[minLng, minLat], [maxLng, maxLat]] = found!.bounds;
+    expect(minLat).toBeGreaterThan(35.5);
+    expect(maxLat).toBeLessThan(36.1);
+    expect(minLng).toBeGreaterThan(139.4);
+    expect(maxLng).toBeLessThan(139.8);
+  });
+
+  test("at 仙台駅 a borrowed line does not leak: 仙石線 beats 埼京線", () => {
+    /* Regression for v89 review round 1, finding 2: JR埼京線
+       borrows the 東北線 only 赤羽〜大宮, but the old code
+       measured it against the 東北線 asset's full extent, so at
+       仙台駅 it scored ~13 m and won over the local 仙石線. */
+    const SENDAI = { lat: 38.2602, lng: 140.8824 };
+    const rows = [
+      { id: 8, name: "JR埼京線" },
+      { id: 99, name: "仙石線" },
+    ];
+    const found = nearestRiddenLine(
+      SENDAI,
+      rows,
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(found?.row.id).toBe(99);
+    expect(found!.distanceM).toBeLessThan(1000);
+    /* On its own, 埼京線 is honestly ~282 km away at 仙台. */
+    const saikyoOnly = nearestRiddenLine(
+      SENDAI,
+      [rows[0]!],
+      RIDDEN_LINE_GEOMETRIES,
+      keyByName,
+    );
+    expect(saikyoOnly).not.toBeNull();
+    expect(saikyoOnly!.distanceM).toBeGreaterThan(200_000);
+  });
+
+  test("no placeable row means null — empty ledger, unknown names, review-held rows", () => {
+    expect(
+      nearestRiddenLine({ lat: 35.67, lng: 139.48 }, [], RIDDEN_LINE_GEOMETRIES, keyByName),
+    ).toBeNull();
+    expect(
+      nearestRiddenLine(
+        { lat: 35.67, lng: 139.48 },
+        [{ id: 99, name: "存在しない線" }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBeNull();
+    /* A review-held row never counts, even beside its own line. */
+    expect(
+      nearestRiddenLine(
+        FUCHU,
+        [{ id: 98, name: "りんかい線（仮）", serviceId: "rinkai" }],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      ),
+    ).toBeNull();
+    /* ...but it does not block a placeable row behind it. */
+    expect(
+      nearestRiddenLine(
+        FUCHU,
+        [
+          { id: 98, name: "りんかい線（仮）", serviceId: "rinkai" },
+          { id: 7, name: "京王線" },
+        ],
+        RIDDEN_LINE_GEOMETRIES,
+        keyByName,
+      )?.row.id,
+    ).toBe(7);
   });
 });

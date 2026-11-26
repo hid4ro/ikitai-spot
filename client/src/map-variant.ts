@@ -495,6 +495,25 @@ export function shouldMountLiveMap(
   return !mapFailed && boundarySettled && showLiveMap;
 }
 
+/* Whether the shared map's pane block renders at all on a
+   tab (v89 review round 2, finding 2): the スポット tab
+   always has its pane (its whole-country camera is the empty
+   state), while a record tab's pane block — the fullscreen
+   wrapper and its toggle button included — renders only
+   when some ledger has rows; with zero records the empty
+   state renders instead. Fullscreen is only meaningful
+   while this holds: carried into a pane-less record tab,
+   the shared flag (and the page scroll lock it holds) would
+   stay on with neither a map nor an exit button rendered,
+   and touch would have no way out. */
+export function mapPaneBlockRendered(
+  variant: RecordMapVariant,
+  totalVisited: number,
+  hasRiddenLines: boolean,
+): boolean {
+  return variant === "spots" || totalVisited > 0 || hasRiddenLines;
+}
+
 /* The ledger row a tap on a painted municipality shape belongs
    to: the mount builds the hit-layer features with the name
    "${prefecture} ${name}", and the ledger holds at most one row

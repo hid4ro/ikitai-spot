@@ -86,6 +86,7 @@ import {
 import {
   firstLineByOperator,
   groupLinesByOperator,
+  nearestRiddenLine,
   operatorOfLine,
   UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
@@ -95,6 +96,7 @@ import {
   decideSpotDataRemount,
   GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
+  mapPaneBlockRendered,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
   spotsInitialCamera,
@@ -108,6 +110,19 @@ import {
   createSelectionSequencer,
   fallbackPhaseAfterReady,
 } from "./spot-selection";
+import { conquestTimelineForVariant } from "./conquest-timeline";
+import {
+  autoFitGate,
+  autoFitMayApply,
+  autoFitMayPublishLocation,
+  consumeRecordRetakeCameraRequest,
+  createAutoFitRuns,
+  createAutoFitShots,
+  createSharedLocationPublisher,
+  fitBoundsPadding,
+  resolveFrameLocation,
+} from "./map-framing";
+import { acquireScrollLock } from "./scroll-lock";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
 
@@ -125,6 +140,53 @@ const FIELDS = actionFields<typeof Actions>();
    60dvh / 32rem pane far too big). Horizontally the pane breaks out
    of the page column's side padding and runs edge to edge. */
 const MAP_PANE_HEIGHT = "h-[min(40dvh,20rem)]";
+
+/* The fixed bottom tab bar's real height (content + safe-area
+   inset), measured from the live element: fullscreen framing
+   pads the map's bottom by it (map-framing.ts's
+   fitBoundsPadding), so the number must track the bar itself,
+   never a copied constant. 0 when the bar is not mounted. */
+function bottomTabBarHeightPx(): number {
+  if (typeof document === "undefined") return 0;
+  const bar = document.querySelector<HTMLElement>("[data-bottom-tab-bar]");
+  return bar ? bar.getBoundingClientRect().height : 0;
+}
+
+/* Fullscreen toggle for the two map panes (subtask 1484): one
+   button per map, top-right over the canvas. The fullscreen itself
+   is CSS, not the Fullscreen API — the API would hide the bottom
+   tab bar, and the reader asked for the bar to stay on top of the
+   map so tabs can still be switched while fullscreen. The button
+   lives in the pane's wrapper (the element that goes fixed), so it
+   stays visible in the fallback / failure states too. */
+function MapFullscreenButton({
+  fullscreen,
+  onToggle,
+}: {
+  fullscreen: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
+      aria-pressed={fullscreen}
+      title={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
+      className="absolute right-2 top-2 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
+    >
+      {fullscreen ? (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+        </svg>
+      ) : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 /* Save failures that no mutation handles itself surface as a bottom
    notice; word it in Japanese to match the page. Mutations that render
@@ -238,6 +300,13 @@ type MapCameraRequest = {
   target: "spots" | "visited";
   lat: number;
   lng: number;
+  /* The capture time of the stored position the re-take read
+     that minted this request (v89 review round 6, P2-1): the
+     camera-request effect adopts the position into the shared
+     location through the single funnel, and the funnel needs
+     the capture time to refuse a request held while another
+     route adopted a newer position. */
+  capturedAtMs: number;
 };
 /* The outcome of the map-only re-take (App's retakeMapDeviceLocation):
    the calling map's button uses it to report a failure in place —
@@ -265,6 +334,13 @@ async function resolveCurrentLocation(): Promise<{
   lat: number;
   lng: number;
   label: string;
+  /* The stored position's capture time, carried through so
+     the framing publish gate can compare it across tabs
+     (v89 review round 5): a read held across a tab switch
+     must not rewind the shared location with older
+     coordinates. Callers that only plot the position
+     ignore it. */
+  capturedAtMs: number;
 } | null> {
   try {
     const stored = freshDeviceCoords(
@@ -280,6 +356,7 @@ async function resolveCurrentLocation(): Promise<{
         lat: stored.lat,
         lng: stored.lng,
         label: `Pixelの位置（${deviceAgeMinutes(stored.capturedAtMs)}分前）`,
+        capturedAtMs: stored.capturedAtMs,
       };
     }
   } catch {
@@ -1153,64 +1230,23 @@ function StackedProgressBars({
   );
 }
 
-/* Cumulative counts by month (YYYY-MM), expanded to a continuous
-   month axis from the first to the last recorded month so the time
-   spacing is real. A series' value at a month is its total up to
-   that month — defined for every month once counting starts, and 0
-   before its first record. */
-function buildCumulativeSeries(
-  municipalityDates: readonly string[],
-  lineDates: readonly string[],
-): { month: string; municipalities: number; lines: number }[] {
-  const monthOf = (d: string) => (/^\d{4}-\d{2}/.test(d) ? d.slice(0, 7) : null);
-  const muniMonths = municipalityDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const lineMonths = lineDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const all = [...muniMonths, ...lineMonths].sort();
-  const first = all[0];
-  const last = all[all.length - 1];
-  if (!first || !last) return [];
-  const [startYear = 1970, startMonth = 1] = first.split("-").map(Number);
-  const [endYear = 1970, endMonth = 1] = last.split("-").map(Number);
-  const rows: { month: string; municipalities: number; lines: number }[] = [];
-  let mi = 0;
-  let li = 0;
-  let mc = 0;
-  let lc = 0;
-  let year = startYear;
-  let month = startMonth;
-  while (year < endYear || (year === endYear && month <= endMonth)) {
-    const key = `${year}-${String(month).padStart(2, "0")}`;
-    while (mi < muniMonths.length && (muniMonths[mi] ?? "") <= key) {
-      mc++;
-      mi++;
-    }
-    while (li < lineMonths.length && (lineMonths[li] ?? "") <= key) {
-      lc++;
-      li++;
-    }
-    rows.push({ month: key, municipalities: mc, lines: lc });
-    month++;
-    if (month > 12) {
-      month = 1;
-      year++;
-    }
-  }
-  return rows;
-}
+/* The growth chart's cumulative series and its per-tab model
+   live in ./conquest-timeline (subtask 1482): the month axis and
+   the chart's visibility are decided by the selected tab's
+   records alone. */
 
 /* The 制覇グラフ block under the fill map: overall donuts for
    municipalities and lines, per-prefecture municipality bars,
    per-operator line bars (only operators with at least one ridden
    line), and the cumulative growth chart. Every number is computed
    here from the same ledger rows and bundled totals the map and the
-   headline counts above it use. */
+   headline counts above it use. The block is split per tab
+   (subtask 1482): the 市区町村 tab shows only the municipality
+   family's stats, the 路線 tab only the line family's — the same
+   graphs used to show on both tabs. The numbers themselves are
+   unchanged; only which family renders is gated by `variant`. */
 function ConquestCharts({
+  variant,
   municipalities,
   prefectures,
   totalVisited,
@@ -1223,6 +1259,12 @@ function ConquestCharts({
   lineProgressPct,
   onOperatorSelect,
 }: {
+  /* Which record tab shows this block (tab split, subtask 1482):
+     "municipalities" renders the municipality donut, the
+     per-prefecture bars and the municipality growth series;
+     "lines" renders the line donut, the per-operator bars and
+     the line growth series. */
+  variant: "municipalities" | "lines";
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
   totalVisited: number;
@@ -1271,7 +1313,10 @@ function ConquestCharts({
         b.done - a.done || b.total - a.total || a.name.localeCompare(b.name, "ja"),
     );
 
-  const timeline = buildCumulativeSeries(
+  /* The growth chart's month axis and visibility come from the
+     selected tab's records alone (./conquest-timeline). */
+  const timeline = conquestTimelineForVariant(
+    variant,
     municipalities.map((m) => m.visitedOn),
     riddenLines
       .filter((line) => !resolveRiddenService(line).needsReview)
@@ -1283,25 +1328,29 @@ function ConquestCharts({
       <h3 className="font-[family-name:var(--font-display)] text-base font-bold">制覇グラフ</h3>
 
       <div className="mt-1 flex flex-wrap justify-center gap-2">
-        <ProgressDonut
-          title="市区町村"
-          value={totalVisited}
-          total={JAPAN_MUNICIPALITY_TOTAL}
-          pctText={municipalityProgressPct}
-          color={CHART_MUNICIPALITY_COLOR}
-          doneLabel="訪問済み"
-        />
-        <ProgressDonut
-          title="路線"
-          value={networkRiddenKm}
-          total={JAPAN_LINE_TOTAL_KM}
-          pctText={lineProgressPct}
-          color={CHART_LINE_COLOR}
-          doneLabel="乗車済み"
-          unit="km"
-        />
+        {variant === "municipalities" && (
+          <ProgressDonut
+            title="市区町村"
+            value={totalVisited}
+            total={JAPAN_MUNICIPALITY_TOTAL}
+            pctText={municipalityProgressPct}
+            color={CHART_MUNICIPALITY_COLOR}
+            doneLabel="訪問済み"
+          />
+        )}
+        {variant === "lines" && (
+          <ProgressDonut
+            title="路線"
+            value={networkRiddenKm}
+            total={JAPAN_LINE_TOTAL_KM}
+            pctText={lineProgressPct}
+            color={CHART_LINE_COLOR}
+            doneLabel="乗車済み"
+            unit="km"
+          />
+        )}
       </div>
-      {(completeServiceCount > 0 || unpreparedLines > 0) && (
+      {variant === "lines" && (completeServiceCount > 0 || unpreparedLines > 0) && (
         <p className="mt-1 text-center text-xs text-[var(--dim)]">
           {completeServiceCount > 0 && `完乗 ${completeServiceCount}系統`}
           {completeServiceCount > 0 && unpreparedLines > 0 && " ・ "}
@@ -1309,7 +1358,7 @@ function ConquestCharts({
         </p>
       )}
 
-      {prefRows.length > 0 && (
+      {variant === "municipalities" && prefRows.length > 0 && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">都道府県別（市区町村）</h4>
           <div className="mt-1">
@@ -1327,6 +1376,7 @@ function ConquestCharts({
         </div>
       )}
 
+      {variant === "lines" && (
       <div className="mt-4">
         <h4 className="text-sm font-medium">事業者別（路線）</h4>
         {operatorRows.length > 0 ? (
@@ -1373,13 +1423,14 @@ function ConquestCharts({
           </p>
         )}
       </div>
+      )}
 
-      {timeline.length > 0 && (
+      {timeline.visible && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">これまでの伸び（月ごとの累計）</h4>
           <div className="mt-1 text-[var(--dim)]" aria-hidden="true">
             <ResponsiveContainer width="100%" height={210}>
-              <AreaChart data={timeline} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+              <AreaChart data={timeline.rows} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
                 <CartesianGrid vertical={false} stroke="currentColor" strokeOpacity={0.12} />
                 <XAxis
                   dataKey="month"
@@ -1396,8 +1447,17 @@ function ConquestCharts({
                   formatter={(value, name) => [`${Number(value).toLocaleString()}件`, name]}
                 />
                 <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                <Area type="stepAfter" dataKey="municipalities" name="市区町村" stroke={CHART_MUNICIPALITY_COLOR} fill={CHART_MUNICIPALITY_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
-                <Area type="stepAfter" dataKey="lines" name="路線" stroke={CHART_LINE_COLOR} fill={CHART_LINE_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
+                <Area
+                  type="stepAfter"
+                  dataKey="count"
+                  name={timeline.seriesName}
+                  stroke={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fill={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fillOpacity={0.16}
+                  strokeWidth={2}
+                  dot={{ r: 2.5, strokeWidth: 0 }}
+                  isAnimationActive={false}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -3105,6 +3165,8 @@ function VisitedMapSection({
   search,
   centerGetterRef,
   onSpotTap,
+  fullscreen,
+  onToggleFullscreen,
   children,
 }: {
   active: boolean;
@@ -3116,6 +3178,12 @@ function VisitedMapSection({
      which ledger renders below it. See map-variant.ts for the
      paint side. */
   variant: RecordMapVariant;
+  /* Fullscreen (subtask 1484): the shared App flag — every map
+     tab reads the same value through this one section, so
+     switching tabs while fullscreen keeps the newly shown map
+     fullscreen too. */
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
   /* The maps' shared Pixel position (App state) — the SAME position
      the スポット tab's map receives. Updated every time any
      stored-position read (a re-take on either tab, or the initial
@@ -3634,6 +3702,42 @@ function VisitedMapSection({
     lng: number;
     label: string;
   } | null>(null);
+  /* The shared location's single publisher (map-framing.ts,
+     v89 review round 6, P2-1): the capture time of the
+     position last adopted into spotLoc, so a held read
+     cannot rewind it with older coordinates. */
+  const sharedLocationPublisherRef = useRef(createSharedLocationPublisher());
+  /* The ONE place the shared location is written (v89 review
+     round 6, P2-1). Every route that adopts a position
+     funnels through here — the framing reads, the manual
+     frame button, the 60 s poll, the deviceLoc adoption,
+     the mount resolve, the re-take camera request — so the
+     capture time of the adopted position and the position
+     itself are compared and recorded together: whichever
+     route adopted the newer position, a held older read
+     landing later can no longer rewind it. Returns whether
+     the candidate was adopted; a refused candidate changes
+     nothing. A candidate at the same coordinates only moves
+     the freshness bar: the refs and the state already hold
+     those coordinates, and rewriting them would re-run the
+     spots framing effect (and re-fit its camera) for no
+     movement — the old poll and adoption early-returns did
+     the same, minus the bar, which is exactly the hole
+     round 6 closed. */
+  const publishSharedLocation = (loc: {
+    lat: number;
+    lng: number;
+    label: string;
+    capturedAtMs: number;
+  }): boolean => {
+    if (!sharedLocationPublisherRef.current.publish(loc)) return false;
+    const cur = currentLocRef.current;
+    if (cur && cur.lat === loc.lat && cur.lng === loc.lng) return true;
+    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
+    spotLocRef.current = loc;
+    setSpotLoc(loc);
+    return true;
+  };
   /* Mirrors for the spots framing effect, which reads them outside
      the cameraRequest prop's own effect: the latest request, and
      the live map itself (set once the mount hands the map over,
@@ -3723,23 +3827,81 @@ function VisitedMapSection({
      automatically when the map and the ledger are ready (unless the
      reader has already picked a municipality), and again whenever
      the 「今いる市区町村に合わせる」 button is pressed. */
-  const frameCurrentMunicipality = async (manual: boolean): Promise<boolean> => {
+  /* fitBounds padding for this section's framing moves: in
+     fullscreen the fitted frame must end above the bottom tab
+     bar, which floats over the map's lower edge (v89 review
+     round 1, finding 6). The flag is read through a ref and
+     the bar height from the live DOM, both at the moment the
+     fit is applied to the camera: every caller runs inside a
+     live-map callback, which can land long after the closure
+     was created — a location read that resolves after the
+     reader toggled fullscreen mid-flight must frame with the
+     CURRENT state, not the state at request time (v89 review
+     round 2, finding 4). */
+  const fullscreenRef = useRef(fullscreen);
+  fullscreenRef.current = fullscreen;
+  const mapFitPadding = (base = 36) =>
+    fitBoundsPadding(fullscreenRef.current, bottomTabBarHeightPx(), base);
+  const frameCurrentMunicipality = async (
+    manual: boolean,
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
+  ): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
     if (manual) setLocBusy(false);
     if (!loc) {
       return false;
     }
-    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
-    /* The スポット tab's location follows the same read (review
-       round 1, finding 8): without this, a re-take on a record
-       tab moved currentLocRef alone, and returning to the スポット
-       tab re-plotted the marker and the nearest spot from the
-       stale spotLoc — the 60 s poll compares against
-       currentLocRef, so it early-returned and never repaired it. */
-    spotLocRef.current = loc;
-    setSpotLoc(loc);
-    const hit = findMunicipalityAt(loc.lat, loc.lng, municipalitiesRef.current);
+    /* Publishing this read into the shared location (review
+       rounds 4–6): a superseded auto-fit run discards its
+       read BEFORE the shared location is rewritten — its
+       camera fit is refused by mayApply further down, but
+       the writes used to run first, and the スポット tab
+       plots its marker — and recomputes its nearest spot
+       and frame — from this shared location, so a stale
+       read landing after a newer one dragged the スポット
+       map back to the old position. The publish callback
+       the auto-fit effect passes composes the run-currency
+       check (round 4) with the single shared publisher
+       (round 6, P2-1), which compares the read's capture
+       time against the position already adopted and records
+       the adopted time in the same step — a run held across
+       a tab switch is still current for its own tab, so
+       currency alone would let its older coordinates rewind
+       the shared location (round 5). Manual calls pass no
+       publish callback and go through the same publisher
+       directly, so a manual frame that resolved a stored
+       position older than the adopted one cannot rewind it
+       either.
+       A refused publish no longer stops the framing here
+       (round 6, P2-2): the run still owns its initial fit
+       while it is valid, so the fit continues on the
+       position already adopted instead of leaving the tab
+       with no initial frame — returning early also skipped
+       the visited-bounds fallback. When nothing is adopted
+       yet the run was superseded and the newer run owns the
+       framing, so there is nothing to frame on and the run
+       still reports located. The camera guard below still
+       decides whether the fit may actually land. */
+    const published = publish ? publish(loc) : publishSharedLocation(loc);
+    const frameLoc = resolveFrameLocation(
+      loc,
+      published,
+      currentLocRef.current,
+    );
+    if (!frameLoc) return true;
+    const hit = findMunicipalityAt(
+      frameLoc.lat,
+      frameLoc.lng,
+      municipalitiesRef.current,
+    );
     const reduceMotion =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -3750,45 +3912,63 @@ function VisitedMapSection({
          finding 6). The marker is redrawn by the spots framing
          effect there. */
       if (variantRef.current === "spots") return;
+      /* The read can also outlive the run that started it: the
+         reader picked this tab's focus meanwhile, or a newer
+         run of this tab superseded this one. The auto-fit
+         caller passes mayApply to refuse exactly those late
+         landings (review round 3, finding 1); manual calls
+         pass none and always frame. */
+      if (mayApply && !mayApply()) return;
       try {
         stopCamera(map);
         ensureFocusListenersRef.current(map);
-        drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
+        drawCurrentLocationMarker(map, frameLoc.lat, frameLoc.lng, false);
         const bounds = hit ? geometryBounds(hit.geometry) : null;
         if (bounds) {
           map.fitBounds(bounds, {
-            padding: 36,
+            padding: mapFitPadding(),
             maxZoom: 15,
             duration: reduceMotion ? 0 : 1200,
           });
         } else {
           map.fitBounds(
             [
-              [loc.lng - 0.04, loc.lat - 0.03],
-              [loc.lng + 0.04, loc.lat + 0.03],
+              [frameLoc.lng - 0.04, frameLoc.lat - 0.03],
+              [frameLoc.lng + 0.04, frameLoc.lat + 0.03],
             ],
-            { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+            { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
         }
+        /* The fit landed on the camera (the tab guard above
+           passed): the auto-fit caller spends its one shot
+           here, never at request time (v89 review round 2,
+           finding 1). */
+        onApplied?.();
       } catch {
         /* framing is best-effort; a failure leaves the current view */
       }
     });
     return true;
   };
-  /* Kept in a ref so the auto-fit effect below always calls the
-     latest version without re-running. */
-  const frameCurrentRef = useRef(frameCurrentMunicipality);
-  frameCurrentRef.current = frameCurrentMunicipality;
   /* Fit the camera to every visited municipality the reader can
      place (review round 1, finding 4): entering a record tab
      with no Pixel position must still restore the record tabs'
      initial camera instead of leaving the スポット tab's view.
      Falls back to the whole-country camera when nothing is
      placeable. */
-  const frameVisitedBounds = () => {
+  const frameVisitedBounds = (
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+  ) => {
     withLiveMapRef.current((map) => {
       if (variantRef.current === "spots") return;
+      /* The fallback belongs to the run that started it: when
+         that run's tab is no longer showing — the reader moved
+         市区町村 → 路線 and the 路線 fit already landed — or a
+         newer run superseded it, or the tab's focus was
+         picked, this fit must not fire on the tab now showing
+         (review round 3, finding 2). */
+      if (mayApply && !mayApply()) return;
       try {
         stopCamera(map);
         let minLng = Infinity;
@@ -3818,11 +3998,15 @@ function VisitedMapSection({
               [minLng, minLat],
               [maxLng, maxLat],
             ],
-            { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+            { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
         } else {
           resetSpotsCamera(map);
         }
+        /* The fallback fit landed: same spend-on-apply rule
+           as the primary framing (v89 review round 2,
+           finding 1). */
+        onApplied?.();
       } catch {
         /* framing is best-effort; a failure leaves the current view */
       }
@@ -3830,40 +4014,288 @@ function VisitedMapSection({
   };
   const frameVisitedBoundsRef = useRef(frameVisitedBounds);
   frameVisitedBoundsRef.current = frameVisitedBounds;
-  const didAutoFitRef = useRef(false);
+  /* The 路線 tab's default framing (subtask 1483): fit the camera
+     to the whole extent of the recorded line nearest the current
+     location, so the full line is in view at the tab's default
+     scale. With no recorded line to place (no rides, or none
+     resolving to a geometry), a small box around the location
+     itself is fitted instead — the same box the municipality
+     framing uses when no boundary contains the position. Returns
+     whether a location was found at all, so the caller can fall
+     back to the visited bounds when there is none. Runs only
+     while the 路線 tab is showing: a location read that outlives
+     a tab switch must not yank the new tab's camera. */
+  const frameNearestRiddenLine = async (
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
+  ): Promise<boolean> => {
+    const loc = await resolveCurrentLocation();
+    if (!loc) {
+      return false;
+    }
+    /* Same publish rule as frameCurrentMunicipality above
+       (review rounds 4–6): a superseded run's read — or a
+       held read whose capture is older than the position
+       already adopted — never reaches the shared location,
+       and a refused publish no longer stops the framing:
+       the fit continues on the position already adopted
+       while the run is still valid (round 6, P2-2). */
+    const published = publish ? publish(loc) : publishSharedLocation(loc);
+    const frameLoc = resolveFrameLocation(
+      loc,
+      published,
+      currentLocRef.current,
+    );
+    if (!frameLoc) return true;
+    const nearest = nearestRiddenLine(
+      { lat: frameLoc.lat, lng: frameLoc.lng },
+      riddenRowsRef.current,
+      RIDDEN_LINE_GEOMETRIES,
+      LINE_KEY_BY_NAME,
+    );
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    withLiveMapRef.current((map) => {
+      if (variantRef.current !== "lines") return;
+      /* Same late-landing refusal as the municipality
+         framing: a pick made while the read was out, or a
+         newer 路線 run from a tab round trip, retires this
+         run before it can move the camera (review round 3,
+         finding 1). */
+      if (mayApply && !mayApply()) return;
+      try {
+        stopCamera(map);
+        ensureFocusListenersRef.current(map);
+        drawCurrentLocationMarker(map, frameLoc.lat, frameLoc.lng, false);
+        let [[minLng, minLat], [maxLng, maxLat]] = nearest?.bounds ?? [
+          [frameLoc.lng - 0.04, frameLoc.lat - 0.03],
+          [frameLoc.lng + 0.04, frameLoc.lat + 0.03],
+        ];
+        if (minLng === maxLng && minLat === maxLat) {
+          minLng -= 0.04;
+          maxLng += 0.04;
+          minLat -= 0.03;
+          maxLat += 0.03;
+        }
+        map.fitBounds(
+          [
+            [minLng, minLat],
+            [maxLng, maxLat],
+          ],
+          { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+        );
+        /* The fit landed on the camera (the lines tab guard
+           above passed): the auto-fit caller spends its one
+           shot here. A run the guard dropped — the reader
+           left for 市区町村 while the location read was out —
+           never reaches this line, so its shot survives for
+           the return visit (v89 review round 2, finding 1). */
+        onApplied?.();
+      } catch {
+        /* framing is best-effort; a failure leaves the current view */
+      }
+    });
+    return true;
+  };
+  /* The record tabs' one-shot default framing: the 路線 tab fits
+     the recorded line nearest the current location (subtask
+     1483), the 市区町村 tab fits the municipality the reader is
+     in. Returns whether a location was found at all. onApplied
+     is forwarded to whichever framing runs: it fires from
+     inside the live-map callback, once the fit has actually
+     been issued to the camera (v89 review round 2, finding 1).
+     mayApply is forwarded the same way: the framing consults
+     it inside that callback, at the moment the fit would be
+     issued, and drops the fit when the run is no longer valid
+     (v89 review round 3, findings 1–2). publish is consulted
+     earlier, the moment the location read lands: it is the
+     auto-fit effect's composition of the run-currency check
+     (a superseded run discards its read before it can
+     rewrite the shared location the スポット tab plots
+     from, round 4) and the single shared publisher (a held
+     read whose capture is older than the position already
+     adopted is refused the same way, rounds 5–6). A refused
+     publish does not stop the framing: the fit continues on
+     the adopted position while the run is still valid
+     (round 6, P2-2). */
+  const frameRecordDefault = (
+    onApplied?: () => void,
+    mayApply?: () => boolean,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
+  ): Promise<boolean> => {
+    if (variantRef.current === "lines")
+      return frameNearestRiddenLine(onApplied, mayApply, publish);
+    return frameCurrentMunicipality(false, onApplied, mayApply, publish);
+  };
+  const frameRecordDefaultRef = useRef(frameRecordDefault);
+  frameRecordDefaultRef.current = frameRecordDefault;
+  /* One-shot default framing state, one shot PER record tab
+     (map-framing.ts): the tabs' initializations are independent
+     (v89 review round 1, finding 1) — consuming 市区町村's shot
+     must not spend 路線's, or 路線 would open on whatever
+     camera 市区町村 left behind. */
+  const autoFitShotsRef = useRef(createAutoFitShots());
+  /* Run tokens for the same framing (map-framing.ts): each
+     run the effect starts takes the tab's next token, which
+     supersedes the tab's earlier runs — a 路線 run started
+     before a 市区町村 round trip can no longer land after
+     the run the return visit started (v89 review round 3,
+     finding 1). */
+  const autoFitRunsRef = useRef(createAutoFitRuns());
+  /* The shared location's publisher lives next to the
+     spotLoc state above (v89 review round 6, P2-1): every
+     adoption route funnels through publishSharedLocation,
+     so the framing reads are no longer the only writers
+     that move the freshness bar. */
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
        (unification, subtask 1460): its framing effect fits
        location + nearest, so the record auto-fit stays pending
        — without consuming its one shot — until a record tab is
-       entered. On that entry this effect frames when the map is
-       already live (it runs before the variant-change effect in
-       the same commit, which therefore only covers the
-       map-not-ready-yet entry). */
+       entered. This effect is the ONE entry point for the
+       record tabs' initial framing (v89 review round 1,
+       finding 3): it waits for the map AND for both ledgers
+       before framing starts, so a slow ridden-lines ledger
+       can no longer let an empty-ledger framing win the race
+       through a side path. The variant-change effect below
+       therefore does no framing of its own — when the map is
+       not ready yet this effect simply stays pending and runs
+       when mapReady rises. Whether the shot may run, must
+       wait, or is spent without framing is autoFitGate's call
+       (map-framing.ts): it reads THIS tab's own picked focus
+       only, so a municipality picked on the 市区町村 tab no
+       longer spends — or suppresses — the 路線 tab's first
+       fit (v89 review round 2, finding 1). */
     if (variant === "spots") return;
-    if (didAutoFitRef.current) return;
-    if (mapFailed) {
-      didAutoFitRef.current = true;
+    if (autoFitShotsRef.current.used(variant)) return;
+    const gate = autoFitGate(variant, {
+      mapFailed,
+      mapReady: mapReady !== 0,
+      visitedPending: visitedQuery.isPending,
+      riddenPending: riddenQuery.isPending,
+      focusPicked: {
+        municipalities: focusedIdRef.current !== null,
+        lines: focusedLineIdRef.current !== null,
+      },
+    });
+    if (gate === "wait") return;
+    if (gate === "spend-without-framing") {
+      autoFitShotsRef.current.consume(variant);
       return;
     }
-    if (mapReady === 0 || visitedQuery.isPending) return;
-    /* A municipality the reader picked before the default framing
-       landed wins — never yank the camera away from it. */
-    didAutoFitRef.current = true;
-    if (focusedIdRef.current !== null) return;
-    void frameCurrentRef.current(false).then((located) => {
+    /* The shot is spent only when a fit actually lands on the
+       camera: spendShot rides into the framing functions and
+       fires from inside their live-map callbacks, past their
+       tab guards. A run the reader's tab switch drops on the
+       way — the 路線 location read landing after a move to
+       市区町村 — spends nothing, so the shot is still there
+       when the reader comes back and this effect frames the
+       tab then (v89 review round 2, finding 1). */
+    const shotTab = variant;
+    const spendShot = () => autoFitShotsRef.current.consume(shotTab);
+    /* This run's token and its apply-time validity (v89
+       review round 3, findings 1–2): the framing functions
+       consult mayApply inside their live-map callbacks, at
+       the moment the fit would be issued, and the fallback
+       below consults it before firing at all. The run may
+       apply only while its own tab is still showing, it is
+       still that tab's latest run, and the tab's own focus
+       is unpicked — a pick made while the location read was
+       out, a newer run from a tab round trip, or a move to
+       the other record tab each retire the run, and a run
+       retired without applying spends nothing, so the shot
+       survives for the next visit as before. */
+    const runToken = autoFitRunsRef.current.begin(shotTab);
+    const mayApply = () =>
+      autoFitMayApply({
+        tabShowing: variantRef.current === shotTab,
+        runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
+        focusPicked:
+          shotTab === "lines"
+            ? focusedLineIdRef.current !== null
+            : focusedIdRef.current !== null,
+      });
+    /* The same run token gates the read's publication into
+       the shared location (v89 review round 4), composed
+       with the single shared publisher (rounds 5–6): the
+       framing functions consult publish the moment their
+       location read lands, before the shared writes, so a
+       run this round trip superseded discards its stale
+       coordinates instead of dragging the スポット tab's
+       marker and framing back to the old position — and so
+       does a run held across a tab switch whose capture is
+       older than the position already adopted (its own
+       tab's token still names it current, so currency alone
+       would admit it). Currency plus freshness are the only
+       conditions: a still-current run's read is the freshest
+       position even when its camera fit may not apply. */
+    const publish = (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }): boolean => {
+      if (
+        !autoFitMayPublishLocation({
+          runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
+        })
+      )
+        return false;
+      return publishSharedLocation(loc);
+    };
+    void frameRecordDefaultRef.current(
+      spendShot,
+      mayApply,
+      publish,
+    ).then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
          visited municipalities' bounds, not the スポット tab's
-         view left behind (review round 1, finding 4). */
-      if (
-        !located &&
-        focusedIdRef.current === null &&
-        variantRef.current !== "spots"
-      ) {
-        frameVisitedBoundsRef.current();
-      }
+         view left behind (review round 1, finding 4). The
+         fallback is this run's second half, so it stands or
+         falls with the run: when the reader has moved to the
+         other record tab — whose own fit may already have
+         landed — or this tab's focus was picked meanwhile,
+         mayApply refuses and the visited-bounds fit never
+         fires on the wrong tab (review round 3, finding 2).
+         frameVisitedBounds re-checks mayApply inside its own
+         live-map callback as well. */
+      if (located) return;
+      if (!mayApply()) return;
+      frameVisitedBoundsRef.current(spendShot, mayApply);
     });
-  }, [mapReady, visitedQuery.isPending, mapFailed, variant]);
+  }, [mapReady, visitedQuery.isPending, riddenQuery.isPending, mapFailed, variant]);
+  /* Fullscreen needs a pane to own (v89 review round 2,
+     finding 2): the shared flag lives in App, but the pane
+     block below renders only when a tab has something to
+     plot (mapPaneBlockRendered) — with zero records a record
+     tab shows the empty state instead, toggle button and
+     all. Carrying fullscreen in from スポット would leave
+     the flag (and App's scroll lock) on with no map and no
+     rendered way out, freezing the record form behind a
+     scroll lock touch cannot release, so the section hands
+     the flag back the moment its pane is not rendered. The
+     その他 tab is App's own effect's business (it exits
+     fullscreen there directly). */
+  useEffect(() => {
+    if (
+      fullscreen &&
+      !mapPaneBlockRendered(variant, totalVisited, hasRiddenLines)
+    ) {
+      onToggleFullscreen();
+    }
+  }, [fullscreen, variant, totalVisited, hasRiddenLines, onToggleFullscreen]);
   /* Follow the Pixel while the reader stays on this tab: the
      location job stores a fresh position about once a minute, so
      re-read it on the same cadence and move ONLY the blue marker
@@ -3888,11 +4320,16 @@ function VisitedMapSection({
       void (async () => {
         const loc = await resolveCurrentLocation();
         if (!loc) return;
-        const cur = currentLocRef.current;
-        if (cur && cur.lat === loc.lat && cur.lng === loc.lng) return;
-        currentLocRef.current = { lat: loc.lat, lng: loc.lng };
-        spotLocRef.current = loc;
-        setSpotLoc(loc);
+        /* Adopted through the single funnel (round 6, P2-1):
+           a poll tick that resolved before a re-take adopted
+           a newer position must not rewind the shared location
+           with its older read either. The funnel also keeps
+           the old same-coordinates early-return's effect: an
+           unchanged position does not rewrite the state, so
+           the spots framing effect does not re-fit its camera
+           every minute. The marker is redrawn only for an
+           adopted position. */
+        if (!publishSharedLocation(loc)) return;
         withLiveMapRef.current((map) => {
           try {
             drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
@@ -3916,8 +4353,11 @@ function VisitedMapSection({
       const resolved = await resolveCurrentLocation();
       if (cancelled || !resolved) return;
       if (spotLocRef.current) return;
-      spotLocRef.current = resolved;
-      setSpotLoc(resolved);
+      /* Adopted through the single funnel (round 6, P2-1):
+         the first adoption records its capture time with
+         the position, so a held read landing afterwards is
+         measured against it. */
+      publishSharedLocation(resolved);
     })();
     return () => {
       cancelled = true;
@@ -3945,16 +4385,23 @@ function VisitedMapSection({
     if (deviceLocLat === undefined || deviceLocLng === undefined || deviceLocAt === undefined) {
       return;
     }
-    const cur = currentLocRef.current;
-    if (cur && cur.lat === deviceLocLat && cur.lng === deviceLocLng) return;
-    currentLocRef.current = { lat: deviceLocLat, lng: deviceLocLng };
+    /* Adopted through the single funnel (round 6, P2-1): this
+       is the re-take's path, and the re-take is exactly the
+       route that used to update the shared location WITHOUT
+       recording its capture time — so a held framing read
+       landing afterwards rewound the スポット marker to the
+       old position. The funnel compares and records the
+       capture together, and keeps the same-coordinates
+       early-return's effect (no state rewrite when the
+       position did not move). A refused adoption draws
+       nothing: the marker stays on the adopted position. */
     const adopted = {
       lat: deviceLocLat,
       lng: deviceLocLng,
       label: `Pixelの位置（${deviceAgeMinutes(deviceLocAt)}分前）`,
+      capturedAtMs: deviceLocAt,
     };
-    spotLocRef.current = adopted;
-    setSpotLoc(adopted);
+    if (!publishSharedLocation(adopted)) return;
     withLiveMapRef.current((map) => {
       try {
         drawCurrentLocationMarker(map, deviceLocLat, deviceLocLng, false);
@@ -3982,43 +4429,38 @@ function VisitedMapSection({
        and this fly-to must not land on it. The request stays
        unapplied, so the variant change re-runs this effect. */
     if (variant === "spots") return;
-    currentLocRef.current = { lat: cameraRequest.lat, lng: cameraRequest.lng };
     /* Keep the スポット tab's location in step (review round 1,
        finding 8): the deviceLoc adoption early-returns when the
        position is already shown, so this is the path that would
-       otherwise leave spotLoc stale. The request carries no
-       capture time, so the label says 0分前 — the re-take just
-       read the stored position, and the adoption corrects the age
-       whenever it runs. */
-    const prevSpot = spotLocRef.current;
-    if (
-      !prevSpot ||
-      prevSpot.lat !== cameraRequest.lat ||
-      prevSpot.lng !== cameraRequest.lng
-    ) {
-      const loc = {
-        lat: cameraRequest.lat,
-        lng: cameraRequest.lng,
-        label: "Pixelの位置（0分前）",
-      };
-      spotLocRef.current = loc;
-      setSpotLoc(loc);
-    }
-    /* The effect above already waits while the スポット tab is
-       showing, but that check runs before the style wait: if the
-       reader switches to the スポット tab while this camera
-       move is waiting, the move must not land on the スポット
-       map (review round 2, finding 6). The guard re-checks at
-       execution time, and the request is only marked applied
-       inside the callback — so a waiter dropped by the guard
-       leaves the request unapplied, and the variant change
-       re-runs this effect when a record tab returns. A duplicate
-       waiter (the effect re-running while one is still pending)
-       is harmless: the marker draw and the marking are
-       idempotent. */
+       otherwise leave spotLoc stale. The request carries the
+       capture time of the re-take read that minted it, so the
+       write goes through the single funnel (round 6, P2-1)
+       like every other adoption: a request held while another
+       route adopted a newer position must not rewind the
+       shared location. The label says 0分前 — the re-take
+       just read the stored position, and the adoption
+       corrects the age whenever it runs. */
+    publishSharedLocation({
+      lat: cameraRequest.lat,
+      lng: cameraRequest.lng,
+      label: "Pixelの位置（0分前）",
+      capturedAtMs: cameraRequest.capturedAtMs,
+    });
+    /* A style wait can outlive a tab switch or a newer location
+       adoption. Leave requests pending on スポット, and check the
+       request and capture time again when the live map will move. */
     withLiveMapRef.current(
       (map) => {
-        appliedCameraSeqRef.current = cameraRequest.seq;
+        if (
+          !consumeRecordRetakeCameraRequest(
+            cameraRequest,
+            cameraRequestRef.current?.seq,
+            appliedCameraSeqRef,
+            sharedLocationPublisherRef.current,
+          )
+        ) {
+          return;
+        }
         try {
           drawCurrentLocationMarker(map, cameraRequest.lat, cameraRequest.lng, true);
         } catch {
@@ -4128,7 +4570,7 @@ function VisitedMapSection({
               Math.max(current.lat, best.point.lat),
             ],
           ],
-          { padding: 56, maxZoom: 15 },
+          { padding: mapFitPadding(56), maxZoom: 15 },
         );
       }
     } catch {
@@ -5196,8 +5638,10 @@ function VisitedMapSection({
      own variant, so this effect's first run (mount-time variant)
      is a repeat. The switch also swaps the tab's camera and tap
      ownership: entering a record tab from the スポット tab
-     re-frames to the municipality the reader is in (the fresh
-     mount used to do that), entering the スポット tab hands
+     re-frames to that tab's default (the municipality the
+     reader is in, or the nearest recorded line on the 路線 tab
+     — subtask 1483; the fresh mount used to do that), entering
+     the スポット tab hands
      the camera to the spots framing effect below and clears any
      record focus (its ledger is not rendered there), and the
      nearest-spot ring is cleared off the スポット tab. Between
@@ -5205,10 +5649,7 @@ function VisitedMapSection({
      map is re-measured too: at xl the record tabs lay the pane
      out inside the grid while the スポット tab keeps it full
      width, so the container's size changes with the variant. */
-  const prevVariantRef = useRef(variant);
   useEffect(() => {
-    const prevVariant = prevVariantRef.current;
-    prevVariantRef.current = variant;
     /* This callback closes over the variant of THIS run. A style
        wait can outlive a second switch, and the held variant
        would then paint the wrong tab — a スポット paint landing
@@ -5240,40 +5681,25 @@ function VisitedMapSection({
           /* the ring is a cue only */
         }
       }
-      if (variant !== "spots" && prevVariant === "spots") {
-        /* A municipality the reader picked before the switch
-           wins — never yank the camera away from it. The
-           auto-fit effect above covers the map-live switch
-           (it runs first in the same commit and consumes its
-           one shot framing); this covers only the
-           map-not-ready-yet entry, and consumes the auto-fit's
-           one shot so it does not frame twice. */
-        if (focusedIdRef.current !== null) return;
-        if (didAutoFitRef.current) return;
-        didAutoFitRef.current = true;
-        void frameCurrentRef.current(false).then((located) => {
-          /* No Pixel position: the record tabs' initial camera is
-             the visited municipalities' bounds, not the スポット
-             tab's view left behind (review round 1, finding 4). */
-          if (
-            !located &&
-            focusedIdRef.current === null &&
-            variantRef.current !== "spots"
-          ) {
-            frameVisitedBoundsRef.current();
-          }
-        });
-      }
-      /* Dropping this waiter leaves didAutoFitRef unconsumed, so
-         the auto-fit effect above still frames when the map
-         becomes ready — nothing is lost, only deferred. */
+      /* No framing happens here (v89 review round 1,
+         finding 3): the auto-fit effect above is the single
+         entry point for the record tabs' initial camera, and
+         it spends a tab's shot only once the map is live and
+         the ledgers it needs have landed. This effect used to
+         frame a spots → record switch itself when the map was
+         already live — a second entry that never checked the
+         ridden-lines ledger, so a slow ledger let the initial
+         framing settle on an empty one. */
+      /* Dropping this waiter leaves the tab's auto-fit shot
+         unconsumed, so the auto-fit effect still frames when
+         the map becomes ready — nothing is lost, only deferred. */
     }, { when: () => variantRef.current === variant });
     if (variant === "spots") {
       /* The next record entry gets its one-shot auto-fit back
          (review round 1, finding 4: the flag used to stick after
          the first entry, so re-entering a record tab never
          re-framed). */
-      didAutoFitRef.current = false;
+      autoFitShotsRef.current.reset();
       /* A record focus would linger highlighted over the ghost
          fills with no ledger row to explain it — the fresh
          mount used to drop it with the map. */
@@ -5310,12 +5736,12 @@ function VisitedMapSection({
        now that a record tab is showing, and hand the new mount
        its one-shot auto-fit back so it frames the current
        municipality instead of opening on the runtime's default
-       place-fit. This runs after the paint above, so the
-       spots→record branch in the same commit still sees the
-       auto-fit as consumed and does not frame the old map. */
+       place-fit. The auto-fit effect re-runs for the new mount
+       (mapReady falls and rises), so the fresh mount frames
+       through the single entry point. */
     if (variant !== "spots" && mapDataStaleRef.current) {
       mapDataStaleRef.current = false;
-      didAutoFitRef.current = false;
+      autoFitShotsRef.current.reset();
       setMapAttempt((n) => n + 1);
     }
   }, [variant]);
@@ -5958,7 +6384,9 @@ function VisitedMapSection({
   /* The section renders only while its tab is active, so on mount
      the live map is asked to re-measure its container (it may have
      been sized while the tab was hidden) — camera and highlight
-     state then render at the right size. */
+     state then render at the right size. Fullscreen toggles
+     (subtask 1484) re-size the container the same way, so the
+     toggle is a dependency too. */
   useEffect(() => {
     if (!active) return;
     const raf = requestAnimationFrame(() => {
@@ -5971,7 +6399,7 @@ function VisitedMapSection({
       });
     });
     return () => cancelAnimationFrame(raf);
-  }, [active]);
+  }, [active, fullscreen]);
 
   /* Scrolls a ledger row fully into view, then keeps verifying and
      correcting until the row is actually there. A single fire-and-
@@ -6150,7 +6578,7 @@ function VisitedMapSection({
           setFocusGeometry(map, geometry, m);
           if (bounds) {
             map.fitBounds(bounds, {
-              padding: 36,
+              padding: mapFitPadding(),
               maxZoom: 15,
               duration: reduceMotion ? 0 : 1200,
             });
@@ -6253,7 +6681,7 @@ function VisitedMapSection({
           if (service) setFocusSection(map, service.id, painted.legs);
           if (bounds) {
             map.fitBounds(bounds, {
-              padding: 36,
+              padding: mapFitPadding(),
               maxZoom: 15,
               duration: reduceMotion ? 0 : 1200,
             });
@@ -6498,7 +6926,7 @@ function VisitedMapSection({
      automatic-retry budget is restored, and the default framing may
      run again for the new map. */
   const retryVisitedMap = () => {
-    didAutoFitRef.current = false;
+    autoFitShotsRef.current.reset();
     mapRetryCountRef.current = 0;
     setMapFailureReason(null);
     setMapFailed(false);
@@ -6573,7 +7001,7 @@ function VisitedMapSection({
             : undefined
         }
       >
-      {(totalVisited > 0 || hasRiddenLines || variant === "spots") && (
+      {(mapPaneBlockRendered(variant, totalVisited, hasRiddenLines)) && (
         <>
           {/* Sticky map first — the exact same wrapper as the
               スポット tab's pinned map (sticky, -mx-4 full-bleed,
@@ -6583,15 +7011,27 @@ function VisitedMapSection({
               the map container inside keeps its own ref. On the
               スポット tab the grid is off (see above), so the pane
               stays full width exactly as the old spot map did. */}
-          <div className="sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1">
+          {/* Fullscreen (subtask 1484): the wrapper goes fixed
+              inset-0 at z-30 — below the bottom tab bar's z-40, so
+              the bar stays on top of the map and tabs can still be
+              switched while fullscreen. The toggle button is a
+              direct child of this wrapper, so it stays visible in
+              the fallback / failure states too. */}
+          <div
+            className={
+              fullscreen
+                ? "fixed inset-0 z-30 bg-[var(--bg)]"
+                : "sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1"
+            }
+          >
           {/* showMapPane already includes the スポット tab
               (showLiveMap || variant === "spots"), so no extra
               variant term belongs here. */}
           {!mapFailed && showMapPane && (
-            <div className="relative">
+            <div className={fullscreen ? "relative h-full" : "relative"}>
               <div
                 ref={mapContainerRef}
-                className={`${MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
+                className={`${fullscreen ? "h-full" : MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
                 role="img"
                 aria-label={
                   variant === "spots"
@@ -6640,6 +7080,11 @@ function VisitedMapSection({
                     target="_blank"
                     rel="noopener"
                     className="pointer-events-auto absolute bottom-0 right-0 bg-[var(--bg)] px-1 text-[10px]"
+                    style={
+                      fullscreen
+                        ? { bottom: bottomTabBarHeightPx() }
+                        : undefined
+                    }
                   >
                     © OpenStreetMap contributors, Map Data Legal Notices
                   </a>
@@ -6747,6 +7192,7 @@ function VisitedMapSection({
               境界データの一部を読み込めませんでした。通信が戻れば自動で再取得します。
             </p>
           )}
+          <MapFullscreenButton fullscreen={fullscreen} onToggle={onToggleFullscreen} />
           </div>
 
           {/* The スポット tab's list and controls (passed in as
@@ -6835,24 +7281,36 @@ function VisitedMapSection({
 
           {variant !== "spots" && (
           <div className="mt-2 xl:col-start-1 xl:row-start-3">
-            {prefectures.length > 0 && (
+            {/* The stats under the map are split per tab (subtask
+                1482), like the 制覇グラフ below: the 市区町村 tab
+                shows only the municipality headline, the 路線 tab
+                only the line headline and its distance note. The
+                border legend underneath stays on both tabs — it
+                explains the map itself, not one family's stats. */}
+            {variant === "municipalities" && prefectures.length > 0 && (
               <p className="text-sm">
                 {prefectures.map((p) => `${p.name} ${p.total}`).join(" ・ ")}
               </p>
             )}
             <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-              <span>
-                市区町村 {totalVisited.toLocaleString()} /{" "}
-                {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
-              </span>
-              <span>
-                路線 {networkRiddenKmText} /{" "}
-                {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
-              </span>
+              {variant === "municipalities" && (
+                <span>
+                  市区町村 {totalVisited.toLocaleString()} /{" "}
+                  {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
+                </span>
+              )}
+              {variant === "lines" && (
+                <span>
+                  路線 {networkRiddenKmText} /{" "}
+                  {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
+                </span>
+              )}
             </p>
-            <p className="mt-1 text-xs text-[var(--dim)]">
-              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
-            </p>
+            {variant === "lines" && (
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
+              </p>
+            )}
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
                 ward borders dashed and lightest) is not
@@ -6888,6 +7346,7 @@ function VisitedMapSection({
               </span>
             </div>
             <ConquestCharts
+              variant={variant}
               municipalities={municipalities}
               prefectures={prefectures}
               totalVisited={totalVisited}
@@ -8437,6 +8896,7 @@ export function App() {
               target: "spots",
               lat: fresh.lat,
               lng: fresh.lng,
+              capturedAtMs: fresh.capturedAtMs,
             });
           }
           return;
@@ -8493,6 +8953,7 @@ export function App() {
           target,
           lat: fresh.lat,
           lng: fresh.lng,
+          capturedAtMs: fresh.capturedAtMs,
         });
         return { ok: true };
       }
@@ -8633,6 +9094,47 @@ export function App() {
      which family is the hero and which is the ghost underlay —
      see RecordMapVariant in map-variant.ts. */
   const [tab, setTab] = useState<"spots" | "map" | "lines" | "more">("spots");
+  /* Map fullscreen (subtask 1484): one shared flag for the shared
+     map section, so switching tabs while fullscreen keeps the
+     newly shown map fullscreen too — the bottom tab bar stays on
+     top of the map (z-40 over the map pane's z-30) precisely so
+     the reader can switch tabs without leaving fullscreen. */
+  const [mapFullscreen, setMapFullscreen] = useState(false);
+  const toggleMapFullscreen = useCallback(() => {
+    setMapFullscreen((v) => !v);
+  }, []);
+  /* Esc leaves fullscreen (the CSS fullscreen has no browser
+     chrome to do it), and the page behind the fixed map must not
+     scroll while the map owns the viewport. The scroll lock is
+     the shared one (scroll-lock.ts): the spot detail sheet can
+     hold it at the same time, and the page unlocks only when
+     the last holder leaves. Escape is NOT consumed here when a
+     foreground layer already handled it: the detail sheet and
+     the delete dialog listen on document — ahead of this
+     window listener — and stop the event's propagation when
+     they close, so one Esc press closes only the front layer
+     (v89 review round 1, finding 5). */
+  useEffect(() => {
+    if (!mapFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMapFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const releaseScrollLock = acquireScrollLock();
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      releaseScrollLock();
+    };
+  }, [mapFullscreen]);
+  /* Fullscreen is carried between the MAP tabs only (v89 review
+     round 1, finding 4): the その他 tab has no map, so moving
+     there exits fullscreen — otherwise the map and its exit
+     button unmount while the flag (and the scroll lock above)
+     stay on, freezing the dashboard's scroll until the reader
+     happens back onto a map tab. */
+  useEffect(() => {
+    if (tab === "more") setMapFullscreen(false);
+  }, [tab]);
   /* Save-failure messages rendered next to the control that failed.
      Each mutation below reports through onError into one of these, so
      the SDK's bottom failure notice never duplicates an in-page error. */
@@ -9218,12 +9720,22 @@ export function App() {
 
   /* Escape closes the detail — or, while editing, first cancels the
      edit back to the detail view. The delete dialog, when open, owns
-     the key instead. */
+     the key instead. The event's propagation stops here: this
+     handler sits on document, ahead of the fullscreen map's window
+     listener, so one Esc press closes only this front layer and
+     leaves fullscreen for the next press (v89 review round 1,
+     finding 5). The handler lives only while the detail itself
+     is on screen — the スポット tab: the selection can outlive
+     its pane when the reader carries it into a record tab (and
+     into fullscreen there), and an invisible detail must not
+     sit in front of the fullscreen map's own Esc (v89 review
+     round 2, finding 3). */
   useEffect(() => {
-    if (selectedId === null || confirmDelete) return;
+    if (selectedId === null || confirmDelete || tab !== "spots") return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
+      e.stopPropagation();
       if (editing) {
         setEditing(null);
         requestAnimationFrame(() => {
@@ -9235,7 +9747,7 @@ export function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedId, confirmDelete, editing]);
+  }, [selectedId, confirmDelete, editing, tab]);
 
   /* The delete confirmation dialog owns Escape while it is open
      (phase 5): it closes exactly like its キャンセル button and the
@@ -9247,6 +9759,7 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
+      e.stopPropagation();
       setConfirmDelete(null);
     };
     document.addEventListener("keydown", onKey);
@@ -9294,11 +9807,14 @@ export function App() {
       }
     };
     document.addEventListener("keydown", onKey, true);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    /* The shared scroll lock (scroll-lock.ts), not a private
+       save/restore: over the fullscreen map this sheet is the
+       second holder, and the page unlocks only when both have
+       released (v89 review round 1, finding 5). */
+    const releaseScrollLock = acquireScrollLock();
     return () => {
       document.removeEventListener("keydown", onKey, true);
-      document.body.style.overflow = prevOverflow;
+      releaseScrollLock();
     };
   }, [sheetOpenMobile]);
 
@@ -9541,6 +10057,8 @@ export function App() {
             search={search}
             centerGetterRef={spotMapCenterGetterRef}
             onSpotTap={openDetailFromMap}
+            fullscreen={mapFullscreen}
+            onToggleFullscreen={toggleMapFullscreen}
           >
             {/* ===== spot management (スポット tab) ===== */}
             {tab === "spots" && (
@@ -10398,6 +10916,7 @@ export function App() {
       {/* ===== bottom tab bar ===== */}
       <nav
         aria-label="画面の切り替え"
+        data-bottom-tab-bar
         className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border)] bg-[var(--surface)] pb-[env(safe-area-inset-bottom)]"
       >
         <div className="mx-auto flex w-full max-w-3xl xl:max-w-5xl 2xl:max-w-7xl">

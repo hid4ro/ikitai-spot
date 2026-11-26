@@ -14,15 +14,17 @@
    section, since no single track stands for the whole service. */
 
 import type { GeoJsonLineGeometry } from "./geojson";
+import {
+  buildServicePath,
+  distanceToLineGeometryM,
+  servicePathCoords,
+  type LineGeometryMap,
+} from "./line-geometry";
 import { resolveRiddenLineKey } from "./line-resolution";
 import {
   resolveRiddenService,
   type RiddenServiceLink,
 } from "../../shared/service-master";
-
-type LineGeometryMap = Readonly<
-  Record<string, { operator: string; geometry: GeoJsonLineGeometry }>
->;
 
 /* The operator of the row's resolved asset line or service. A
    multi-line service still has an operator in the master. Rows
@@ -97,6 +99,93 @@ export function groupLinesByOperator<
     operator,
     rows: groupRows,
   }));
+}
+
+/* The recorded line nearest a location (subtask 1483): the
+   路線 tab's default framing fits this line's whole extent.
+   A row counts when it resolves to a geometry — a plain row
+   through its resolved formal-line key, a service row through
+   the route its service actually runs. Rows held for review,
+   and rows with no geometry at all, never count. The distance
+   is to the line's running extent, so a line counts as near
+   wherever its service runs, not only where it was ridden.
+   Ties keep the earlier ledger row. Null when no row can be
+   placed.
+
+   A service row is measured against buildServicePath's route
+   (v89 review round 1, finding 2): the formal lines a service
+   borrows extend far beyond the service itself — JR埼京線
+   rides the 東北線 only 赤羽〜大宮, but the 東北線 asset runs
+   to 青森, so measuring against the borrowed lines' full
+   extents made 埼京線 the "nearest" line in 仙台. The framing
+   bounds come from the same route, so the frame covers the
+   service, not its landlords. */
+export type NearestRiddenLine<Row> = {
+  row: Row;
+  /* The line's whole extent — the bounds the default framing
+     fits, so the full line is in view. */
+  bounds: [[number, number], [number, number]];
+  distanceM: number;
+};
+export function nearestRiddenLine<
+  Row extends RiddenServiceLink & { id: number },
+>(
+  location: { lat: number; lng: number },
+  rows: readonly Row[],
+  geometries: LineGeometryMap,
+  keyByName: ReadonlyMap<string, string>,
+): NearestRiddenLine<Row> | null {
+  const point: [number, number] = [location.lng, location.lat];
+  let best: NearestRiddenLine<Row> | null = null;
+  for (const row of rows) {
+    const { service, needsReview } = resolveRiddenService(row);
+    if (needsReview) continue;
+    /* The geometry this row is measured and framed by: a
+       service row's own running route (see above), a plain
+       row's formal line. Empty when the row cannot be placed. */
+    const rowGeometries: GeoJsonLineGeometry[] = [];
+    if (service) {
+      const coords = servicePathCoords(
+        buildServicePath(service, geometries),
+      );
+      if (coords.length > 0) {
+        rowGeometries.push({ type: "MultiLineString", coordinates: coords });
+      }
+    } else {
+      const key = resolveRiddenLineKey(row, geometries, keyByName);
+      const geometry = key ? geometries[key]?.geometry : undefined;
+      if (geometry) rowGeometries.push(geometry);
+    }
+    let distanceM: number | null = null;
+    let minLng = Infinity;
+    let minLat = Infinity;
+    let maxLng = -Infinity;
+    let maxLat = -Infinity;
+    for (const geometry of rowGeometries) {
+      const d = distanceToLineGeometryM(point, geometry);
+      if (d !== null && (distanceM === null || d < distanceM)) {
+        distanceM = d;
+      }
+      const b = lineGeometryBounds(geometry);
+      if (!b) continue;
+      if (b[0][0] < minLng) minLng = b[0][0];
+      if (b[0][1] < minLat) minLat = b[0][1];
+      if (b[1][0] > maxLng) maxLng = b[1][0];
+      if (b[1][1] > maxLat) maxLat = b[1][1];
+    }
+    if (distanceM === null || !Number.isFinite(minLng)) continue;
+    if (!best || distanceM < best.distanceM) {
+      best = {
+        row,
+        bounds: [
+          [minLng, minLat],
+          [maxLng, maxLat],
+        ],
+        distanceM,
+      };
+    }
+  }
+  return best;
 }
 
 /* Bounding box of a line geometry as [[minLng, minLat],
