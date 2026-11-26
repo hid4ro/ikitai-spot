@@ -126,6 +126,7 @@ import {
   createAutoFitShots,
   createSharedLocationPublisher,
   fitBoundsPadding,
+  focusCameraPlan,
   resolveFrameLocation,
 } from "./map-framing";
 import { acquireScrollLock } from "./scroll-lock";
@@ -6033,8 +6034,16 @@ function VisitedMapSection({
   /* Map-shape tap: the reverse of a ledger row tap. The tapped
      municipality gets the same persistent highlight (orange geometry
      on the map, emphasized row), its prefecture group expands if
-     folded, and the ledger scrolls to its row — the camera itself
-     does not move, the reader is already looking at the place. */
+     folded, and the ledger scrolls to its row. The camera also fits
+     the whole municipality into the frame, exactly as a row tap
+     frames it (subtask 1584, the reader's request of 2026-11-26:
+     a tapped feature lands whole and centered on the map); before
+     that request the camera deliberately stayed put. The fit needs
+     no gate of its own: the pick itself is what the entry
+     auto-fit's apply-time check reads (focusPicked), so a framing
+     run still in flight when the tap lands refuses its own fit
+     instead of overwriting this one, and an auto-fit animation
+     already running is stopped by the fit's stopCamera. */
   const focusMunicipalityFromMap = (m: VisitedMunicipality) => {
     focusedIdRef.current = m.id;
     setFocusedId(m.id);
@@ -6054,6 +6063,9 @@ function VisitedMapSection({
        reason. */
     rowScrollSeqRef.current += 1;
     const geometry = boundaryGeometryFor(m);
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     withLiveMap((map) => {
       /* A later tap — or leaving for the スポット tab, which
          clears the focus — supersedes this one: never paint a
@@ -6062,8 +6074,33 @@ function VisitedMapSection({
       if (variantRef.current !== "municipalities" || focusedIdRef.current !== m.id) return;
       try {
         setFocusGeometry(map, geometry, m);
+        /* Fit the whole municipality into the frame, with the
+           row tap's framing (focusMunicipality): same padding,
+           same maxZoom, same duration. A municipality with no
+           known boundary flies to its representative point
+           instead; one with neither keeps the camera where it
+           is and lets the highlight speak. */
+        const plan = focusCameraPlan(
+          boundsForMunicipality(m),
+          representativePoint(m),
+        );
+        if (plan.kind === "fit-bounds") {
+          stopCamera(map);
+          map.fitBounds(plan.bounds, {
+            padding: mapFitPadding(),
+            maxZoom: 15,
+            duration: reduceMotion ? 0 : 1200,
+          });
+        } else if (plan.kind === "fly-to-point") {
+          stopCamera(map);
+          map.flyTo({
+            center: [plan.center.lng, plan.center.lat],
+            zoom: plan.zoom,
+            duration: reduceMotion ? 0 : 1200,
+          });
+        }
       } catch {
-        /* a failed highlight leaves the row emphasis as the cue */
+        /* a failed highlight or camera move leaves the row emphasis as the cue */
       }
     });
   };
@@ -6201,8 +6238,8 @@ function VisitedMapSection({
       /* 路線 tab (tab split, subtask 1439): the lines are the
          hero here, so the painted tracks ARE the tap target — a
          tap on a track focuses its ledger row (track highlight +
-         the list scrolls to the row; the camera stays, the
-         reader is already looking at the line). Municipality
+         the list scrolls to the row + the camera fits the whole
+         track, subtask 1584). Municipality
          shapes stay untappable on this tab: their ledger is not
          rendered here, so focusing one would strand the reader
          with a highlight and no row. The unridden ghost tracks
@@ -6779,12 +6816,13 @@ function VisitedMapSection({
   /* 事業者別（路線）bar tap: the reverse direction. The operator's
      first ledger row is emphasized, its track gets the same focus
      highlight on the map (no camera move — the reader is looking
-     at the chart and the list, exactly as a map tap on a
-     municipality does not move the camera), the list opens if it
-     was folded, and the ledger scrolls to the row once it is
-     rendered (see the pending-scroll effect below). An operator
-     with no resolved row never reaches here: its bar is not
-     rendered (operatorRows only counts resolved rows). */
+     at the chart and the list, and this path's own contract keeps
+     the camera where it was, unlike a map tap since subtask
+     1584), the list opens if it was folded, and the ledger scrolls
+     to the row once it is rendered (see the pending-scroll effect
+     below). An operator with no resolved row never reaches here:
+     its bar is not rendered (operatorRows only counts resolved
+     rows). */
   const focusLineFromOperator = (operator: string) => {
     const row = firstLineRowByOperator.get(operator);
     if (!row) return;
@@ -6867,10 +6905,14 @@ function VisitedMapSection({
      reverse of a ledger row tap, with the municipality map tap's
      contract — the tapped line gets the persistent highlight
      (focus track on the map, emphasized row), its operator group
-     expands if folded, and the list scrolls to its row; the
-     camera does NOT move, the reader is already looking at the
-     line. (A row tap, by contrast, flies the map to the track —
-     see focusRiddenLine.) */
+     expands if folded, and the list scrolls to its row. The
+     camera also fits the whole track into the frame, as a row
+     tap frames it (subtask 1584, the reader's request of
+     2026-11-26; before that request the camera deliberately
+     stayed put — see focusRiddenLine for the row tap, and
+     focusMunicipalityFromMap for why the fit needs no gate of
+     its own). A line with no painted track has nothing to
+     frame, so its tap only clears the previous highlight. */
   const focusLineFromMap = (line: RiddenLine) => {
     if (resolveRiddenService(line).needsReview) return;
     /* The two focuses are mutually exclusive, exactly as in
@@ -6900,6 +6942,9 @@ function VisitedMapSection({
     const painted = service
       ? lineCoverage.perServiceLegs.get(service.id)
       : undefined;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     withLiveMap((map) => {
       /* A later tap supersedes this one: never paint a stale
          highlight for a row the reader has already left. */
@@ -6907,13 +6952,25 @@ function VisitedMapSection({
       try {
         if (painted && painted.legs.length > 0 && service) {
           setFocusSection(map, service.id, painted.legs);
+          /* Fit the whole track into the frame, with the row
+             tap's framing (focusRiddenLine): same padding,
+             same maxZoom, same duration. */
+          const plan = focusCameraPlan(sectionBounds(painted.legs), null);
+          if (plan.kind === "fit-bounds") {
+            stopCamera(map);
+            map.fitBounds(plan.bounds, {
+              padding: mapFitPadding(),
+              maxZoom: 15,
+              duration: reduceMotion ? 0 : 1200,
+            });
+          }
         } else {
           /* No track to paint (a row with no service link): the
              previous row's highlight must not linger. */
           clearFocusLineGeometry(map);
         }
       } catch {
-        /* a failed highlight leaves the row emphasis as the cue */
+        /* a failed highlight or camera move leaves the row emphasis as the cue */
       }
     });
   };

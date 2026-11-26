@@ -8,11 +8,13 @@
    keeps a held read from rewinding that shared location
    (round 5), the single publisher every adoption route
    funnels through and the frame-location decision for a
-   refused publish (round 6, P2-1 and P2-2), and the
+   refused publish (round 6, P2-1 and P2-2), the
    fitBounds padding that keeps a fullscreen map's frame
-   clear of the bottom tab bar (finding 6). Kept
-   dependency-light so the rules are regression-testable
-   without mounting the map — see map-framing.test.ts. */
+   clear of the bottom tab bar (finding 6), and the camera
+   plan for a focus picked on the map itself (subtask
+   1584). Kept dependency-light so the rules are
+   regression-testable without mounting the map — see
+   map-framing.test.ts. */
 
 /* The two record tabs that own a default framing. The 路線
    tab's initialization is independent of the 市区町村 tab's:
@@ -317,4 +319,43 @@ export function fitBoundsPadding(
     left: base,
     right: base,
   };
+}
+
+/* A [lng, lat] bounds pair — the shape MapLibre's fitBounds
+   takes, and the shape App's geometryBounds / sectionBounds
+   produce. */
+export type LngLatBoundsPair = [[number, number], [number, number]];
+
+/* The camera move for a focus the reader picked on the map
+   itself (subtask 1584, the reader's request of 2026-11-26):
+   tapping a municipality or a line on its record tab frames
+   the whole feature, exactly as the ledger row taps already
+   frame it (focusMunicipality / focusRiddenLine in App),
+   instead of leaving the camera where it was. The plan is
+   decided here, away from the map, so the choice is
+   regression-testable: real bounds fit the whole feature
+   (the caller adds the fitBoundsPadding padding and the row
+   taps' maxZoom); a lone representative point — a
+   municipality with no known boundary — flies to that point
+   at the row taps' zoom; neither means the tap paints its
+   highlight and leaves the camera alone (a line with no
+   painted track has nothing to frame). Bounds win over the
+   point: the point is only the fallback for a feature whose
+   extent is unknown. */
+export type FocusCameraPlan =
+  | { kind: "fit-bounds"; bounds: LngLatBoundsPair }
+  | {
+      kind: "fly-to-point";
+      center: { lat: number; lng: number };
+      zoom: number;
+    }
+  | { kind: "none" };
+
+export function focusCameraPlan(
+  bounds: LngLatBoundsPair | null,
+  point: { lat: number; lng: number } | null,
+): FocusCameraPlan {
+  if (bounds) return { kind: "fit-bounds", bounds };
+  if (point) return { kind: "fly-to-point", center: point, zoom: 12 };
+  return { kind: "none" };
 }
