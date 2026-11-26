@@ -6,11 +6,13 @@
    validity check for the shared location those reads feed
    (round 4), the cross-tab capture-time comparison that
    keeps a held read from rewinding that shared location
-   (round 5), and the fitBounds padding that keeps a
-   fullscreen map's frame clear of the bottom tab bar
-   (finding 6). Kept dependency-light so the rules are
-   regression-testable without mounting the map —
-   see map-framing.test.ts. */
+   (round 5), the single publisher every adoption route
+   funnels through and the frame-location decision for a
+   refused publish (round 6, P2-1 and P2-2), and the
+   fitBounds padding that keeps a fullscreen map's frame
+   clear of the bottom tab bar (finding 6). Kept
+   dependency-light so the rules are regression-testable
+   without mounting the map — see map-framing.test.ts. */
 
 /* The two record tabs that own a default framing. The 路線
    tab's initialization is independent of the 市区町村 tab's:
@@ -177,43 +179,104 @@ export function autoFitMayPublishLocation(
   return input.runCurrent;
 }
 
-/* Cross-tab freshness for the shared location (v89 review
-   round 5). Run tokens are per tab, so a municipalities
-   run held across a lines round trip is still "current"
-   for its own tab when its read finally lands — and its
-   older coordinates would rewind the shared location the
-   スポット tab plots from. The camera decision stays
-   per-tab (autoFitMayApply above), but a publish also
-   compares the read's capture time against the position
-   already adopted, across tabs: only a read at least as
-   fresh as the adopted one may replace it. Equal capture
-   times are the same stored position read twice, so they
-   may adopt. The publish gate in App is the conjunction
-   of this currency check and the freshness check below:
-   both must pass, and only supersession or an older
-   capture may refuse a publish — never the tab switch or
-   the focus pick alone (round 1, finding 8, stands). */
-export type SharedLocationFreshness = {
-  /* Whether a read captured at this time may still be
-     adopted: only when it is not older than the position
-     already adopted. Nothing adopted yet admits anything. */
+/* The shared location's single publisher (v89 review
+   round 6, P2-1). Run tokens are per tab, so a
+   municipalities run held across a lines round trip is
+   still "current" for its own tab when its read finally
+   lands — and its older coordinates would rewind the
+   shared location the スポット tab plots from (round 5).
+   Round 6 found the other half of the same hole: a
+   re-take adopts a newer position into the shared
+   location WITHOUT recording its capture time, so the
+   ledger still measured the next read against the OLD
+   bar and a held read in between rewound it. The fix
+   collects the update in one place: EVERY route that
+   adopts a position — framing reads, the manual frame
+   button, the 60 s poll, the deviceLoc adoption, the
+   mount resolve, the re-take camera request — funnels
+   through publish(), which compares the candidate's
+   capture time against the position already adopted and
+   records the adopted capture time in the same step.
+   Only a candidate at least as fresh as the adopted one
+   may replace it. Equal capture times are the same
+   stored position read twice, so they may adopt. The
+   camera decision stays per-tab (autoFitMayApply
+   above), and the publish gate in App is the
+   conjunction of the run-currency check
+   (autoFitMayPublishLocation) and this publish: both
+   must pass, and only supersession or an older capture
+   may refuse a publish — never the tab switch or the
+   focus pick alone (round 1, finding 8, stands). */
+export type SharedLocationPublisher = {
+  /* Whether a candidate captured at this time may still
+     be adopted: only when it is not older than the
+     position already adopted. Nothing adopted yet admits
+     anything. */
   mayAdopt: (capturedAtMs: number) => boolean;
-  /* Record the capture time of the position just adopted
-     into the shared location. Call once, right after a
-     publish the gate above admitted, so the next read is
-     measured against it. */
-  adopt: (capturedAtMs: number) => void;
+  /* Adopt a candidate into the shared location: returns
+     false and changes nothing when its capture is older
+     than the position already adopted, true when it is
+     adopted (and the adopted capture time moves with
+     it). The comparison and the record happen together,
+     so no route can adopt a position without moving the
+     bar to it. */
+  publish: (loc: {
+    lat: number;
+    lng: number;
+    capturedAtMs: number;
+  }) => boolean;
+  /* The position currently adopted, if any — the
+     coordinates a refused framing run frames on instead
+     (resolveFrameLocation below). */
+  adopted: () => {
+    lat: number;
+    lng: number;
+    capturedAtMs: number;
+  } | null;
 };
 
-export function createSharedLocationFreshness(): SharedLocationFreshness {
-  let adoptedAtMs: number | null = null;
+export function createSharedLocationPublisher(): SharedLocationPublisher {
+  let adoptedLoc: {
+    lat: number;
+    lng: number;
+    capturedAtMs: number;
+  } | null = null;
   return {
     mayAdopt: (capturedAtMs) =>
-      adoptedAtMs === null || capturedAtMs >= adoptedAtMs,
-    adopt: (capturedAtMs) => {
-      adoptedAtMs = capturedAtMs;
+      adoptedLoc === null || capturedAtMs >= adoptedLoc.capturedAtMs,
+    publish: (loc) => {
+      if (adoptedLoc !== null && loc.capturedAtMs < adoptedLoc.capturedAtMs)
+        return false;
+      adoptedLoc = loc;
+      return true;
     },
+    adopted: () => adoptedLoc,
   };
+}
+
+/* Which coordinates a framing run frames on after its
+   publish attempt (v89 review round 6, P2-2). A read
+   whose publish was refused — superseded, or an older
+   capture than the position already adopted — still owns
+   its initial fit while the run is valid, so the fit
+   continues on the adopted position instead of stopping:
+   refusing the publish used to return "located" early,
+   which skipped the visited-bounds fallback too and left
+   the tab with no initial frame at all. A published read
+   frames on its own coordinates. When nothing is adopted
+   yet there is nothing to frame on; the run reports
+   located as before and the newer run that superseded it
+   owns the framing. The camera guard (autoFitMayApply)
+   still decides whether the fit may actually land, so a
+   superseded run reaching this point with an adopted
+   position in hand is still refused at the camera. */
+export function resolveFrameLocation(
+  read: { lat: number; lng: number },
+  published: boolean,
+  adopted: { lat: number; lng: number } | null,
+): { lat: number; lng: number } | null {
+  if (published) return read;
+  return adopted;
 }
 
 /* fitBounds padding for the record map. Off fullscreen the

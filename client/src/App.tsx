@@ -117,8 +117,9 @@ import {
   autoFitMayPublishLocation,
   createAutoFitRuns,
   createAutoFitShots,
-  createSharedLocationFreshness,
+  createSharedLocationPublisher,
   fitBoundsPadding,
+  resolveFrameLocation,
 } from "./map-framing";
 import { acquireScrollLock } from "./scroll-lock";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
@@ -298,6 +299,13 @@ type MapCameraRequest = {
   target: "spots" | "visited";
   lat: number;
   lng: number;
+  /* The capture time of the stored position the re-take read
+     that minted this request (v89 review round 6, P2-1): the
+     camera-request effect adopts the position into the shared
+     location through the single funnel, and the funnel needs
+     the capture time to refuse a request held while another
+     route adopted a newer position. */
+  capturedAtMs: number;
 };
 /* The outcome of the map-only re-take (App's retakeMapDeviceLocation):
    the calling map's button uses it to report a failure in place —
@@ -3693,6 +3701,42 @@ function VisitedMapSection({
     lng: number;
     label: string;
   } | null>(null);
+  /* The shared location's single publisher (map-framing.ts,
+     v89 review round 6, P2-1): the capture time of the
+     position last adopted into spotLoc, so a held read
+     cannot rewind it with older coordinates. */
+  const sharedLocationPublisherRef = useRef(createSharedLocationPublisher());
+  /* The ONE place the shared location is written (v89 review
+     round 6, P2-1). Every route that adopts a position
+     funnels through here — the framing reads, the manual
+     frame button, the 60 s poll, the deviceLoc adoption,
+     the mount resolve, the re-take camera request — so the
+     capture time of the adopted position and the position
+     itself are compared and recorded together: whichever
+     route adopted the newer position, a held older read
+     landing later can no longer rewind it. Returns whether
+     the candidate was adopted; a refused candidate changes
+     nothing. A candidate at the same coordinates only moves
+     the freshness bar: the refs and the state already hold
+     those coordinates, and rewriting them would re-run the
+     spots framing effect (and re-fit its camera) for no
+     movement — the old poll and adoption early-returns did
+     the same, minus the bar, which is exactly the hole
+     round 6 closed. */
+  const publishSharedLocation = (loc: {
+    lat: number;
+    lng: number;
+    label: string;
+    capturedAtMs: number;
+  }): boolean => {
+    if (!sharedLocationPublisherRef.current.publish(loc)) return false;
+    const cur = currentLocRef.current;
+    if (cur && cur.lat === loc.lat && cur.lng === loc.lng) return true;
+    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
+    spotLocRef.current = loc;
+    setSpotLoc(loc);
+    return true;
+  };
   /* Mirrors for the spots framing effect, which reads them outside
      the cameraRequest prop's own effect: the latest request, and
      the live map itself (set once the mount hands the map over,
@@ -3801,8 +3845,12 @@ function VisitedMapSection({
     manual: boolean,
     onApplied?: () => void,
     mayApply?: () => boolean,
-    mayPublish?: (capturedAtMs: number) => boolean,
-    onPublish?: (capturedAtMs: number) => void,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
   ): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
@@ -3810,35 +3858,49 @@ function VisitedMapSection({
     if (!loc) {
       return false;
     }
-    /* A superseded auto-fit run discards its read BEFORE the
-       shared location is rewritten (review round 4): its
+    /* Publishing this read into the shared location (review
+       rounds 4–6): a superseded auto-fit run discards its
+       read BEFORE the shared location is rewritten — its
        camera fit is refused by mayApply further down, but
-       the writes below run first, and the スポット tab plots
-       its marker — and recomputes its nearest spot and
-       frame — from this shared location, so a stale read
-       landing after a newer one dragged the スポット map
-       back to the old position. Round 5 adds the cross-tab
-       case: a run held across a tab switch is still current
-       for its own tab, so currency alone would let its
-       older coordinates rewind the shared location — the
-       gate also compares the read's capture time against
-       the position already adopted, and onPublish records
-       the adopted time the moment this write lands. The
-       location WAS found, so the run still reports located;
-       the newer run owns the framing. Manual calls pass no
-       mayPublish and always publish. */
-    if (mayPublish && !mayPublish(loc.capturedAtMs)) return true;
-    onPublish?.(loc.capturedAtMs);
-    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
-    /* The スポット tab's location follows the same read (review
-       round 1, finding 8): without this, a re-take on a record
-       tab moved currentLocRef alone, and returning to the スポット
-       tab re-plotted the marker and the nearest spot from the
-       stale spotLoc — the 60 s poll compares against
-       currentLocRef, so it early-returned and never repaired it. */
-    spotLocRef.current = loc;
-    setSpotLoc(loc);
-    const hit = findMunicipalityAt(loc.lat, loc.lng, municipalitiesRef.current);
+       the writes used to run first, and the スポット tab
+       plots its marker — and recomputes its nearest spot
+       and frame — from this shared location, so a stale
+       read landing after a newer one dragged the スポット
+       map back to the old position. The publish callback
+       the auto-fit effect passes composes the run-currency
+       check (round 4) with the single shared publisher
+       (round 6, P2-1), which compares the read's capture
+       time against the position already adopted and records
+       the adopted time in the same step — a run held across
+       a tab switch is still current for its own tab, so
+       currency alone would let its older coordinates rewind
+       the shared location (round 5). Manual calls pass no
+       publish callback and go through the same publisher
+       directly, so a manual frame that resolved a stored
+       position older than the adopted one cannot rewind it
+       either.
+       A refused publish no longer stops the framing here
+       (round 6, P2-2): the run still owns its initial fit
+       while it is valid, so the fit continues on the
+       position already adopted instead of leaving the tab
+       with no initial frame — returning early also skipped
+       the visited-bounds fallback. When nothing is adopted
+       yet the run was superseded and the newer run owns the
+       framing, so there is nothing to frame on and the run
+       still reports located. The camera guard below still
+       decides whether the fit may actually land. */
+    const published = publish ? publish(loc) : publishSharedLocation(loc);
+    const frameLoc = resolveFrameLocation(
+      loc,
+      published,
+      currentLocRef.current,
+    );
+    if (!frameLoc) return true;
+    const hit = findMunicipalityAt(
+      frameLoc.lat,
+      frameLoc.lng,
+      municipalitiesRef.current,
+    );
     const reduceMotion =
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -3859,7 +3921,7 @@ function VisitedMapSection({
       try {
         stopCamera(map);
         ensureFocusListenersRef.current(map);
-        drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
+        drawCurrentLocationMarker(map, frameLoc.lat, frameLoc.lng, false);
         const bounds = hit ? geometryBounds(hit.geometry) : null;
         if (bounds) {
           map.fitBounds(bounds, {
@@ -3870,8 +3932,8 @@ function VisitedMapSection({
         } else {
           map.fitBounds(
             [
-              [loc.lng - 0.04, loc.lat - 0.03],
-              [loc.lng + 0.04, loc.lat + 0.03],
+              [frameLoc.lng - 0.04, frameLoc.lat - 0.03],
+              [frameLoc.lng + 0.04, frameLoc.lat + 0.03],
             ],
             { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
@@ -3965,28 +4027,33 @@ function VisitedMapSection({
   const frameNearestRiddenLine = async (
     onApplied?: () => void,
     mayApply?: () => boolean,
-    mayPublish?: (capturedAtMs: number) => boolean,
-    onPublish?: (capturedAtMs: number) => void,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
   ): Promise<boolean> => {
     const loc = await resolveCurrentLocation();
     if (!loc) {
       return false;
     }
-    /* Same discard-before-publish rule as
-       frameCurrentMunicipality above (review round 4, and
-       round 5's cross-tab capture-time comparison): a
-       superseded run's read — or a held read whose capture
-       is older than the position already adopted — never
-       reaches the shared location writes below. */
-    if (mayPublish && !mayPublish(loc.capturedAtMs)) return true;
-    onPublish?.(loc.capturedAtMs);
-    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
-    /* The スポット tab's location follows the same read, as in
-       frameCurrentMunicipality above. */
-    spotLocRef.current = loc;
-    setSpotLoc(loc);
+    /* Same publish rule as frameCurrentMunicipality above
+       (review rounds 4–6): a superseded run's read — or a
+       held read whose capture is older than the position
+       already adopted — never reaches the shared location,
+       and a refused publish no longer stops the framing:
+       the fit continues on the position already adopted
+       while the run is still valid (round 6, P2-2). */
+    const published = publish ? publish(loc) : publishSharedLocation(loc);
+    const frameLoc = resolveFrameLocation(
+      loc,
+      published,
+      currentLocRef.current,
+    );
+    if (!frameLoc) return true;
     const nearest = nearestRiddenLine(
-      { lat: loc.lat, lng: loc.lng },
+      { lat: frameLoc.lat, lng: frameLoc.lng },
       riddenRowsRef.current,
       RIDDEN_LINE_GEOMETRIES,
       LINE_KEY_BY_NAME,
@@ -4005,10 +4072,10 @@ function VisitedMapSection({
       try {
         stopCamera(map);
         ensureFocusListenersRef.current(map);
-        drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
+        drawCurrentLocationMarker(map, frameLoc.lat, frameLoc.lng, false);
         let [[minLng, minLat], [maxLng, maxLat]] = nearest?.bounds ?? [
-          [loc.lng - 0.04, loc.lat - 0.03],
-          [loc.lng + 0.04, loc.lat + 0.03],
+          [frameLoc.lng - 0.04, frameLoc.lat - 0.03],
+          [frameLoc.lng + 0.04, frameLoc.lat + 0.03],
         ];
         if (minLng === maxLng && minLat === maxLat) {
           minLng -= 0.04;
@@ -4046,29 +4113,30 @@ function VisitedMapSection({
      mayApply is forwarded the same way: the framing consults
      it inside that callback, at the moment the fit would be
      issued, and drops the fit when the run is no longer valid
-     (v89 review round 3, findings 1–2). mayPublish is consulted
-     earlier, the moment the location read lands: a superseded
-     run discards its read before it can rewrite the shared
-     location the スポット tab plots from (round 4), and a
-     held read whose capture is older than the position
-     already adopted is refused the same way (round 5).
-     onPublish records the adopted capture time right after
-     a publish the gate admitted. */
+     (v89 review round 3, findings 1–2). publish is consulted
+     earlier, the moment the location read lands: it is the
+     auto-fit effect's composition of the run-currency check
+     (a superseded run discards its read before it can
+     rewrite the shared location the スポット tab plots
+     from, round 4) and the single shared publisher (a held
+     read whose capture is older than the position already
+     adopted is refused the same way, rounds 5–6). A refused
+     publish does not stop the framing: the fit continues on
+     the adopted position while the run is still valid
+     (round 6, P2-2). */
   const frameRecordDefault = (
     onApplied?: () => void,
     mayApply?: () => boolean,
-    mayPublish?: (capturedAtMs: number) => boolean,
-    onPublish?: (capturedAtMs: number) => void,
+    publish?: (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }) => boolean,
   ): Promise<boolean> => {
     if (variantRef.current === "lines")
-      return frameNearestRiddenLine(onApplied, mayApply, mayPublish, onPublish);
-    return frameCurrentMunicipality(
-      false,
-      onApplied,
-      mayApply,
-      mayPublish,
-      onPublish,
-    );
+      return frameNearestRiddenLine(onApplied, mayApply, publish);
+    return frameCurrentMunicipality(false, onApplied, mayApply, publish);
   };
   const frameRecordDefaultRef = useRef(frameRecordDefault);
   frameRecordDefaultRef.current = frameRecordDefault;
@@ -4085,16 +4153,11 @@ function VisitedMapSection({
      the run the return visit started (v89 review round 3,
      finding 1). */
   const autoFitRunsRef = useRef(createAutoFitRuns());
-  /* Cross-tab freshness for the shared location
-     (map-framing.ts, v89 review round 5): the capture time
-     of the position last adopted into spotLoc, so a framing
-     read held across a tab switch cannot rewind it with
-     older coordinates. The other spotLoc writers (the 60 s
-     poll, the deviceLoc adoption, the mount resolve) always
-     write the currently-stored position, so their capture
-     times can only move forward; only the framing reads —
-     which can be held — need the ledger. */
-  const sharedLocationFreshnessRef = useRef(createSharedLocationFreshness());
+  /* The shared location's publisher lives next to the
+     spotLoc state above (v89 review round 6, P2-1): every
+     adoption route funnels through publishSharedLocation,
+     so the framing reads are no longer the only writers
+     that move the freshness bar. */
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
        (unification, subtask 1460): its framing effect fits
@@ -4164,32 +4227,37 @@ function VisitedMapSection({
             : focusedIdRef.current !== null,
       });
     /* The same run token gates the read's publication into
-       the shared location (v89 review round 4), together
-       with the cross-tab freshness of its capture time
-       (round 5): the framing functions consult mayPublish
-       the moment their location read lands, before the
-       shared writes, so a run this round trip superseded
-       discards its stale coordinates instead of dragging
-       the スポット tab's marker and framing back to the old
-       position — and so does a run held across a tab switch
-       whose capture is older than the position already
-       adopted (its own tab's token still names it current,
-       so currency alone would admit it). Currency plus
-       freshness are the only conditions: a still-current
-       run's read is the freshest position even when its
-       camera fit may not apply. onPublish records the
-       adopted capture time the moment the write lands. */
-    const mayPublish = (capturedAtMs: number) =>
-      autoFitMayPublishLocation({
-        runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
-      }) && sharedLocationFreshnessRef.current.mayAdopt(capturedAtMs);
-    const onPublish = (capturedAtMs: number) =>
-      sharedLocationFreshnessRef.current.adopt(capturedAtMs);
+       the shared location (v89 review round 4), composed
+       with the single shared publisher (rounds 5–6): the
+       framing functions consult publish the moment their
+       location read lands, before the shared writes, so a
+       run this round trip superseded discards its stale
+       coordinates instead of dragging the スポット tab's
+       marker and framing back to the old position — and so
+       does a run held across a tab switch whose capture is
+       older than the position already adopted (its own
+       tab's token still names it current, so currency alone
+       would admit it). Currency plus freshness are the only
+       conditions: a still-current run's read is the freshest
+       position even when its camera fit may not apply. */
+    const publish = (loc: {
+      lat: number;
+      lng: number;
+      label: string;
+      capturedAtMs: number;
+    }): boolean => {
+      if (
+        !autoFitMayPublishLocation({
+          runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
+        })
+      )
+        return false;
+      return publishSharedLocation(loc);
+    };
     void frameRecordDefaultRef.current(
       spendShot,
       mayApply,
-      mayPublish,
-      onPublish,
+      publish,
     ).then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
          visited municipalities' bounds, not the スポット tab's
@@ -4251,11 +4319,16 @@ function VisitedMapSection({
       void (async () => {
         const loc = await resolveCurrentLocation();
         if (!loc) return;
-        const cur = currentLocRef.current;
-        if (cur && cur.lat === loc.lat && cur.lng === loc.lng) return;
-        currentLocRef.current = { lat: loc.lat, lng: loc.lng };
-        spotLocRef.current = loc;
-        setSpotLoc(loc);
+        /* Adopted through the single funnel (round 6, P2-1):
+           a poll tick that resolved before a re-take adopted
+           a newer position must not rewind the shared location
+           with its older read either. The funnel also keeps
+           the old same-coordinates early-return's effect: an
+           unchanged position does not rewrite the state, so
+           the spots framing effect does not re-fit its camera
+           every minute. The marker is redrawn only for an
+           adopted position. */
+        if (!publishSharedLocation(loc)) return;
         withLiveMapRef.current((map) => {
           try {
             drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
@@ -4279,8 +4352,11 @@ function VisitedMapSection({
       const resolved = await resolveCurrentLocation();
       if (cancelled || !resolved) return;
       if (spotLocRef.current) return;
-      spotLocRef.current = resolved;
-      setSpotLoc(resolved);
+      /* Adopted through the single funnel (round 6, P2-1):
+         the first adoption records its capture time with
+         the position, so a held read landing afterwards is
+         measured against it. */
+      publishSharedLocation(resolved);
     })();
     return () => {
       cancelled = true;
@@ -4308,16 +4384,23 @@ function VisitedMapSection({
     if (deviceLocLat === undefined || deviceLocLng === undefined || deviceLocAt === undefined) {
       return;
     }
-    const cur = currentLocRef.current;
-    if (cur && cur.lat === deviceLocLat && cur.lng === deviceLocLng) return;
-    currentLocRef.current = { lat: deviceLocLat, lng: deviceLocLng };
+    /* Adopted through the single funnel (round 6, P2-1): this
+       is the re-take's path, and the re-take is exactly the
+       route that used to update the shared location WITHOUT
+       recording its capture time — so a held framing read
+       landing afterwards rewound the スポット marker to the
+       old position. The funnel compares and records the
+       capture together, and keeps the same-coordinates
+       early-return's effect (no state rewrite when the
+       position did not move). A refused adoption draws
+       nothing: the marker stays on the adopted position. */
     const adopted = {
       lat: deviceLocLat,
       lng: deviceLocLng,
       label: `Pixelの位置（${deviceAgeMinutes(deviceLocAt)}分前）`,
+      capturedAtMs: deviceLocAt,
     };
-    spotLocRef.current = adopted;
-    setSpotLoc(adopted);
+    if (!publishSharedLocation(adopted)) return;
     withLiveMapRef.current((map) => {
       try {
         drawCurrentLocationMarker(map, deviceLocLat, deviceLocLng, false);
@@ -4345,28 +4428,23 @@ function VisitedMapSection({
        and this fly-to must not land on it. The request stays
        unapplied, so the variant change re-runs this effect. */
     if (variant === "spots") return;
-    currentLocRef.current = { lat: cameraRequest.lat, lng: cameraRequest.lng };
     /* Keep the スポット tab's location in step (review round 1,
        finding 8): the deviceLoc adoption early-returns when the
        position is already shown, so this is the path that would
-       otherwise leave spotLoc stale. The request carries no
-       capture time, so the label says 0分前 — the re-take just
-       read the stored position, and the adoption corrects the age
-       whenever it runs. */
-    const prevSpot = spotLocRef.current;
-    if (
-      !prevSpot ||
-      prevSpot.lat !== cameraRequest.lat ||
-      prevSpot.lng !== cameraRequest.lng
-    ) {
-      const loc = {
-        lat: cameraRequest.lat,
-        lng: cameraRequest.lng,
-        label: "Pixelの位置（0分前）",
-      };
-      spotLocRef.current = loc;
-      setSpotLoc(loc);
-    }
+       otherwise leave spotLoc stale. The request carries the
+       capture time of the re-take read that minted it, so the
+       write goes through the single funnel (round 6, P2-1)
+       like every other adoption: a request held while another
+       route adopted a newer position must not rewind the
+       shared location. The label says 0分前 — the re-take
+       just read the stored position, and the adoption
+       corrects the age whenever it runs. */
+    publishSharedLocation({
+      lat: cameraRequest.lat,
+      lng: cameraRequest.lng,
+      label: "Pixelの位置（0分前）",
+      capturedAtMs: cameraRequest.capturedAtMs,
+    });
     /* The effect above already waits while the スポット tab is
        showing, but that check runs before the style wait: if the
        reader switches to the スポット tab while this camera
@@ -8817,6 +8895,7 @@ export function App() {
               target: "spots",
               lat: fresh.lat,
               lng: fresh.lng,
+              capturedAtMs: fresh.capturedAtMs,
             });
           }
           return;
@@ -8873,6 +8952,7 @@ export function App() {
           target,
           lat: fresh.lat,
           lng: fresh.lng,
+          capturedAtMs: fresh.capturedAtMs,
         });
         return { ok: true };
       }
