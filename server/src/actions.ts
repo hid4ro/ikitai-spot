@@ -16,12 +16,14 @@ import {
   recordedSectionFitsService,
   resolveRiddenService,
   serviceById,
+  serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
   sectionEndpointsKnownToService,
   SERVICE_MASTER_VERSION,
   SERVICE_MATCH_VERSION,
   stationRefById,
   usableRiddenService,
+  validateRideEndpoints,
   validateSectionEndpoints,
   type RideState,
   type ServiceLinkSource,
@@ -94,6 +96,10 @@ type RideFields = {
      rejected, not stored. The endpoints must be N02 station group
      codes (six digits) and two different stations — "bad" is not a
      station, and a section from a station to itself is no section.
+     They must also be stations of the service a rider can board
+     or leave at (validateRideEndpoints — the boarding counterpart
+     of the rule addRiddenSection enforces; batch review round 2,
+     high).
    - full: the service and a master version that reproduces its
      range are required — and the version must be one the master
      actually knows (the current version or the frozen migration
@@ -180,6 +186,28 @@ export function resolveRideFields(
         `resolveRideFields: partial ride for "${name}" needs two different stations`,
       );
     }
+    /* The endpoints must be stations of the service a rider can
+       actually board or leave at (validateRideEndpoints). The
+       format checks above let segment junctions through: they
+       are real N02 stations on the route, but no train of this
+       service stops there （西浦和・与野 on むさしの号）, and the
+       section was still aggregated as ridden distance (batch
+       review round 2, high). The validator is the boarding
+       counterpart of addRiddenSection's validateSectionEndpoints,
+       not that function itself: a section must be provable
+       against the blocks, but a fresh registration may record a
+       ride ending at a mid-segment stop the master knows from a
+       migrated ride （京王線 府中→聖蹟桜ヶ丘）. */
+    const endpointProblem = validateRideEndpoints(
+      service.id,
+      fromStationId,
+      toStationId,
+    );
+    if (endpointProblem) {
+      throw new Error(
+        `resolveRideFields: partial ride for "${name}": ${endpointProblem}`,
+      );
+    }
     return {
       ...link,
       recordedServiceId: service.id,
@@ -201,6 +229,18 @@ export function resolveRideFields(
   if (!masterVersion || !isKnownMasterVersion(masterVersion)) {
     throw new Error(
       `resolveRideFields: full ride for "${name}" needs a known master version (got ${JSON.stringify(masterVersion)})`,
+    );
+  }
+  /* The version must not only be known — its master must have
+     held this service. The frozen migration version predates
+     jr-musashino-omiya and jr-shimousa, so a NEW full ride
+     naming it for one of them was accepted with no snapshot,
+     claiming a range that version never contained (review
+     batch round 1, subtask 1593). Services the migration
+     version did hold keep saving at it as before. */
+  if (!serviceExistsAtMasterVersion(service.id, masterVersion)) {
+    throw new Error(
+      `resolveRideFields: full ride for "${name}" names master version ${masterVersion}, which did not contain "${service.id}"`,
     );
   }
   /* The snapshot is cut from the current master, so it is stored
@@ -1740,7 +1780,7 @@ export const Actions = {
 
   addRiddenLine: defineAction({
     description:
-      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet. An explicit serviceId on a new row must match the service named by the entry. The ride fields are validated per state (unknown carries no section, partial needs both endpoint station IDs and a known service, full needs a known service and a master version); by default the row links by name and starts unknown.",
+      "Records one railway line in the ridden-lines ledger (the chat-side trivia job calls this for each new line it delivers trivia for; also used by the in-page form). A context field records the trip context of the first ride (what the trip was for / on the way back from). A line already recorded (same name) keeps its first-ride date and note and is reported as not created, so repeat rides never duplicate or move the first-ride date; a context supplied for such a row is stored only when the row has none yet. An explicit serviceId on a new row must match the service named by the entry. The ride fields are validated per state (unknown carries no section, partial needs both endpoint station IDs, a known service and endpoints that are stations of that service, full needs a known service and a master version); by default the row links by name and starts unknown.",
     request: z
       .object({
         name: z.string().min(1).max(100),

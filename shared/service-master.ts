@@ -154,7 +154,7 @@ export type ServiceMasterEntry = {
 /* Bump when any entry's segments change. Full rides keep the version
    they were recorded at, so a later extension never silently claims
    a stretch the rider never rode. */
-export const SERVICE_MASTER_VERSION = "2026-11-24";
+export const SERVICE_MASTER_VERSION = "2026-11-26";
 
 const N02_SOURCE = "国土数値情報「鉄道データ」N02（2025年度版）";
 const LEDGER_SOURCE = "location-trivia/seen_lines.md（台帳の乗車記録）";
@@ -208,6 +208,132 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     sources: [N02_SOURCE, LEDGER_SOURCE],
     verifiedAt: null,
     verificationStatus: "draft",
+  },
+  {
+    id: "jr-musashino-omiya",
+    pathId: "jr-musashino-omiya",
+    displayName: "むさしの号",
+    ledgerNames: ["むさしの号"],
+    operator: "東日本旅客鉄道",
+    segments: [
+      {
+        formalLineName: "武蔵野線",
+        formalLineKey: "武蔵野線|東日本旅客鉄道",
+        from: { id: "003876", name: "府中本町", lng: 139.47718, lat: 35.66583 },
+        to: { id: "003014", name: "西浦和", lng: 139.62777, lat: 35.84419 },
+      },
+      {
+        formalLineName: "武蔵野線",
+        formalLineKey: "武蔵野線|東日本旅客鉄道",
+        from: { id: "003014", name: "西浦和", lng: 139.62777, lat: 35.84419 },
+        to: { id: "002947", name: "与野", lng: 139.63899, lat: 35.88437 },
+        note:
+          "大宮支線（西浦和－別所信号場－与野）。正式線名は武蔵野線のままで、N02の武蔵野線形状に支線のポリラインが含まれている。",
+      },
+      {
+        formalLineName: "東北線",
+        formalLineKey: "東北線|東日本旅客鉄道",
+        from: { id: "002947", name: "与野", lng: 139.63899, lat: 35.88437 },
+        to: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        note: "通称・東北本線。N02の路線単位名は東北線。",
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-musashino-omiya/b1",
+        from: { id: "003876", name: "府中本町", lng: 139.47718, lat: 35.66583 },
+        to: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        /* One block for the whole service: block boundaries
+           are stations the service stops at, and むさしの号
+           does not stop at 西浦和 — it is only the junction
+           where the path leaves the 武蔵野線 main line for
+           the 大宮支線, so it stays a segment endpoint and
+           never a block boundary (the same shape as
+           jr-shimousa's b1 spanning the 与野 junction).
+           Splitting the block there let a ride be recorded
+           FROM 西浦和, a station no むさしの号 calls at
+           (review batch round 1, subtask 1593).
+           Subtask 1590: the 2026-11-26 ride 北府中→大宮
+           （むさしの号) starts at 北府中, which sits inside
+           this block, so it is listed here (same stage-3
+           pattern as jr-musashino's own b1). Coordinates
+           are the N02 station-point centroids. */
+        stations: [
+          { id: "003771", name: "北府中", lng: 139.47179, lat: 35.68086 },
+        ],
+      },
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note:
+      "むさしの号（府中本町→大宮）は西浦和で本線から大宮支線へ分岐するため、線形パス前提の jr-musashino には足せず、別サービスとして持つ（subtask 1565 の調査）。与野は支線と東北線のつなぎ目（経由点）で、停車駅ではない。西浦和も停車駅ではないため、ブロック境界には置かずセグメントの接続点だけにしている（レビュー第1回、subtask 1593）。北府中→大宮の営業キロは約33.7km。西浦和→与野の形状長（約4.59km）と営業キロ（4.9km）の差、与野→大宮の実走行線路の人手照合は未了（draftのまま）。",
+  },
+  {
+    id: "jr-shimousa",
+    pathId: "jr-shimousa",
+    displayName: "しもうさ号",
+    ledgerNames: ["しもうさ号"],
+    operator: "東日本旅客鉄道",
+    segments: [
+      {
+        formalLineName: "東北線",
+        formalLineKey: "東北線|東日本旅客鉄道",
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002947", name: "与野", lng: 139.63899, lat: 35.88437 },
+        note: "通称・東北本線。N02の路線単位名は東北線。",
+      },
+      {
+        formalLineName: "武蔵野線",
+        formalLineKey: "武蔵野線|東日本旅客鉄道",
+        from: { id: "002947", name: "与野", lng: 139.63899, lat: 35.88437 },
+        to: { id: "003006", name: "武蔵浦和", lng: 139.64717, lat: 35.84559 },
+        /* The distributed shape measures this stretch at
+           6.855 km against a ~5 km physical run (~37% long,
+           including a 439 m artificial bridge), so distances
+           drawn from it are approximations (review batch
+           round 1, subtask 1593). The flag changes no
+           totals — the same shape is still measured. */
+        approximate: true,
+        note:
+          "西浦和支線・大宮支線（与野－別所信号場－武蔵浦和）。N02の武蔵野線形状で支線のポリラインは西浦和方から与野へ引かれており、本サービスは別所信号場付近で本線へ合流する形でその逆向きを辿る（439mのブリッジ含む）。",
+      },
+      {
+        formalLineName: "武蔵野線",
+        formalLineKey: "武蔵野線|東日本旅客鉄道",
+        from: { id: "003006", name: "武蔵浦和", lng: 139.64717, lat: 35.84559 },
+        to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
+      },
+    ],
+    blocks: [
+      {
+        id: "jr-shimousa/b1",
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "003006", name: "武蔵浦和", lng: 139.64717, lat: 35.84559 },
+      },
+      {
+        id: "jr-shimousa/b2",
+        from: { id: "003006", name: "武蔵浦和", lng: 139.64717, lat: 35.84559 },
+        to: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
+      },
+      {
+        id: "jr-shimousa/b3",
+        from: { id: "003004", name: "南浦和", lng: 139.66878, lat: 35.84796 },
+        to: { id: "003547", name: "西船橋", lng: 139.95907, lat: 35.70737 },
+        /* Stage 3 pattern (same as jr-musashino's own b2):
+           東松戸 sits inside this block, so it is listed here
+           rather than splitting it. Coordinates are the N02
+           station-point centroids. */
+        stations: [
+          { id: "003187", name: "東松戸", lng: 139.94311, lat: 35.77013 },
+        ],
+      },
+    ],
+    sources: [N02_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note:
+      "しもうさ号（大宮→西船橋）は与野から支線へ分岐するため、むさしの号（jr-musashino-omiya）と対の別サービスとして持つ（subtask 1565 の調査、1591 で乗車前に先回り収録。そのため出典はN02のみで、台帳の乗車記録はまだ無い）。与野は東北線と支線のつなぎ目（経由点）で、停車駅ではない。与野→武蔵浦和は、簡略化形状の合流位置が本線の西浦和側に寄っていることと439mブリッジの分で、アプリ計算では約6.85kmと実経路（約5km）より長めに出る（サービス全体では実測51.66km）。人手の地図照合は未了（draftのまま）。八王子発のむさしの号は、国立支線（国立－新小平）の形状がN02（2025年度版）とアセットの双方に無いため、今回は収録していない（subtask 1591 の報告）。",
   },
   {
     id: "hokuso",
@@ -275,6 +401,17 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "jr-chuo-rapid/b1",
         from: { id: "003766", name: "東京", lng: 139.76675, lat: 35.68128 },
         to: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        /* 神田 is the junction of this service's two segments
+           AND a station every rapid stops at, so unlike a
+           pass-through junction （西浦和 on むさしの号） it is a
+           boarding station: listing it here puts it in
+           serviceBoardingStationIds, so a fresh 神田→新宿
+           registration validates (batch review round 3, medium
+           — it was refused although the stretch aggregates as
+           9.08 km). */
+        stations: [
+          { id: "003677", name: "神田", lng: 139.77088, lat: 35.69242 },
+        ],
       },
       {
         id: "jr-chuo-rapid/b2",
@@ -929,23 +1066,13 @@ export function isExplicitlyUnlinked(row: RiddenServiceLink): boolean {
    a station the master does not know is "cannot judge", never
    "close enough". */
 export function serviceStationIds(serviceId: string): ReadonlySet<string> {
-  const ids = new Set<string>();
+  const ids = new Set(serviceBoardingStationIds(serviceId));
   const service = serviceById(serviceId);
   if (service) {
     for (const segment of service.segments) {
       ids.add(segment.from.id);
       ids.add(segment.to.id);
     }
-    for (const block of service.blocks) {
-      ids.add(block.from.id);
-      ids.add(block.to.id);
-      for (const station of block.stations ?? []) ids.add(station.id);
-    }
-  }
-  for (const ride of Object.values(MIGRATED_RIDES)) {
-    if (ride.serviceId !== serviceId) continue;
-    if (ride.from) ids.add(ride.from.id);
-    if (ride.to) ids.add(ride.to.id);
   }
   return ids;
 }
@@ -1238,6 +1365,70 @@ export function validateSectionEndpoints(
   return null;
 }
 
+/* The stations a rider can board or leave this service at: the
+   block boundaries and the stations listed on its blocks
+   (serviceOrderedStations), plus the endpoints of the rides the
+   SQL migration restored for the service — real mid-segment
+   stops like 聖蹟桜ヶ丘 on 京王線, which the master knows only
+   from those rides. Segment junctions are deliberately absent:
+   a junction （西浦和・与野 on むさしの号） is where the route
+   changes formal lines, not where its trains stop, so it is in
+   serviceStationIds (known to the service) but not here. */
+export function serviceBoardingStationIds(
+  serviceId: string,
+): ReadonlySet<string> {
+  const ids = new Set(
+    serviceOrderedStations(serviceId).map((station) => station.id),
+  );
+  for (const ride of Object.values(MIGRATED_RIDES)) {
+    if (ride.serviceId !== serviceId) continue;
+    if (ride.from) ids.add(ride.from.id);
+    if (ride.to) ids.add(ride.to.id);
+  }
+  return ids;
+}
+
+/* Validates the endpoints of a NEW row-level partial ride (a
+   line registered together with its section, via
+   resolveRideFields): both must be stations of the service a
+   rider can board or leave at (serviceBoardingStationIds).
+   This is the boarding counterpart of validateSectionEndpoints,
+   not the same rule: a section added to an existing row must
+   also be provable against the blocks, so it may not end at a
+   station the master only knows from a migrated ride — but a
+   fresh registration may record exactly such a ride （京王線
+   府中→聖蹟桜ヶ丘）, and refusing it would lose a real ride.
+   What both rules refuse is a segment junction: 西浦和→大宮 on
+   むさしの号 passed the format checks and was aggregated as
+   7.77 km ridden although no むさしの号 train stops at 西浦和
+   (batch review round 2, high). A loop service rejects here:
+   the row carries no direction, and a loop ride without one
+   cannot be read — loop sections are recorded through
+   addRiddenSection, which takes the direction. Returns an
+   error string, or null when the endpoints are valid. */
+export function validateRideEndpoints(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): string | null {
+  const service = serviceById(serviceId);
+  if (!service) return `unknown service "${serviceId}"`;
+  if (fromStationId === toStationId) {
+    return "a ride needs two different stations";
+  }
+  const boardable = serviceBoardingStationIds(serviceId);
+  if (!boardable.has(fromStationId)) {
+    return `"${fromStationId}" is not a station of ${service.displayName}`;
+  }
+  if (!boardable.has(toStationId)) {
+    return `"${toStationId}" is not a station of ${service.displayName}`;
+  }
+  if (serviceIsLoop(serviceId)) {
+    return `${service.displayName} is a loop: a ride with a section needs a direction (inner/outer)`;
+  }
+  return null;
+}
+
 /* The versioned path of a service, as a full ride records it: the
    path id, the master version it was cut at, and the segment list
    (formal line, endpoints, direction, approximate flag) as it
@@ -1432,3 +1623,27 @@ export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
     masterVersion: MIGRATED_MASTER_VERSION,
   },
 };
+
+/* Did the master at `version` hold this service at all? The
+   current version holds every service in SERVICE_MASTER. The
+   frozen migration version held exactly the nine services the
+   migration table above restores rides for — that table is the
+   whole master of 2026-11-24; jr-musashino-omiya and
+   jr-shimousa first appear at SERVICE_MASTER_VERSION
+   (2026-11-26). A full ride's range must be reproducible from
+   the version it names, so a version whose master never held
+   the service cannot record one (review batch round 1,
+   subtask 1593). An unknown version holds nothing. */
+export function serviceExistsAtMasterVersion(
+  serviceId: string,
+  version: string,
+): boolean {
+  const v = version.trim();
+  if (v === SERVICE_MASTER_VERSION) return serviceById(serviceId) != null;
+  if (v === MIGRATED_MASTER_VERSION) {
+    return Object.values(MIGRATED_RIDES).some(
+      (ride) => ride.serviceId === serviceId,
+    );
+  }
+  return false;
+}

@@ -25,6 +25,7 @@ import {
   parseFullPathSnapshot,
   sectionBounds,
   slicePolyline,
+  wholeLineBounds,
   distanceToLineGeometryM,
   type LineGeometryMap,
   type RideInterval,
@@ -80,6 +81,9 @@ const S = {
   印旛日本医大: station("003125", "印旛日本医大", 140.20276, 35.78782),
   東松戸: station("003187", "東松戸", 139.94311, 35.77013),
   北府中: station("003771", "北府中", 139.47179, 35.68086),
+  西浦和: station("003014", "西浦和", 139.62777, 35.84419),
+  与野: station("002947", "与野", 139.63899, 35.88437),
+  武蔵浦和: station("003006", "武蔵浦和", 139.64717, 35.84559),
   印西牧の原: station("003083", "印西牧の原", 140.16713, 35.80363),
   新松戸: station("003045", "新松戸", 139.92111, 35.82549),
   新鎌ヶ谷: station("003146", "新鎌ヶ谷", 139.99836, 35.77961),
@@ -173,6 +177,75 @@ describe("real asset: service totals against railway kilometres", () => {
       expect(path.totalKm).toBeGreaterThan(railKm * 0.95);
       expect(path.totalKm).toBeLessThan(railKm * 1.05);
     }
+  });
+
+  test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
+    /* 営業キロ （府中本町起点）: 北府中 1.7 + 北府中〜西浦和
+       26.1 + 大宮支線 西浦和〜与野 4.9 + 東北線 与野〜大宮
+       2.7 — so the whole service is 35.4 km and the ride
+       北府中→大宮 is 33.7 km. The path takes the 大宮支線
+       fork at 西浦和 (not the main line through 南浦和), so
+       the clip passes 西浦和 and 与野. */
+    const path = servicePath("jr-musashino-omiya");
+    expect(path.missing).toEqual([]);
+    expect(path.approximate).toBe(false);
+    expect(path.totalKm).toBeGreaterThan(35.4 * 0.95);
+    expect(path.totalKm).toBeLessThan(35.4 * 1.05);
+    const clip = clipServicePath(path, S.北府中, S.大宮)!;
+    expect(clip).not.toBeNull();
+    expect(clip.approximate).toBe(false);
+    expect(clip.lengthKm).toBeGreaterThan(33.7 * 0.95);
+    expect(clip.lengthKm).toBeLessThan(33.7 * 1.05);
+    const coords = clip.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.西浦和, S.与野]) {
+      expect(
+        coords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.5),
+      ).toBe(true);
+    }
+    /* And it does NOT swing through 南浦和 on the main line. */
+    expect(
+      coords.some(
+        (p) => haversineKm(p, [S.南浦和.lng, S.南浦和.lat]) < 0.5,
+      ),
+    ).toBe(false);
+  });
+
+  test("しもうさ号 runs the branch down to 武蔵浦和 (subtask 1591)", () => {
+    /* 営業キロの目安: 東北線 大宮〜与野 2.7 + 支線
+       与野〜武蔵浦和 約5 + 武蔵野線 武蔵浦和〜西船橋
+       42.1 = 約49.8 km. The app total runs high (51.66 km
+       measured) because the simplified shape joins the
+       branch at the 西浦和 end of the main-line piece plus
+       a 439 m bridge, so 与野→武蔵浦和 alone measures
+       6.85 km against a ~5 km physical run. The band is
+       wide enough to hold that known inflation and narrow
+       enough to catch a wrong route. That inflation is why
+       the branch segment is flagged approximate in the
+       master (review batch round 1, subtask 1593): the
+       path and any clip spanning the branch say so, while
+       the measured totals stay as they were. */
+    const path = servicePath("jr-shimousa");
+    expect(path.missing).toEqual([]);
+    expect(path.approximate).toBe(true);
+    expect(path.totalKm).toBeGreaterThan(48);
+    expect(path.totalKm).toBeLessThan(53);
+    const clip = clipServicePath(path, S.大宮, S.西船橋)!;
+    expect(clip).not.toBeNull();
+    expect(clip.approximate).toBe(true);
+    expect(clip.lengthKm).toBeGreaterThan(48);
+    expect(clip.lengthKm).toBeLessThan(53);
+    const coords = clip.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.与野, S.武蔵浦和, S.南浦和]) {
+      expect(
+        coords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.5),
+      ).toBe(true);
+    }
+    /* A point on the branch polyline itself (139.64441,
+       35.86957): only the 支線 passes there — the main
+       line stays ~2 km south, the 東北線 ~1.5 km north. */
+    expect(
+      coords.some((p) => haversineKm(p, [139.64441, 35.86957]) < 0.5),
+    ).toBe(true);
   });
 
   test("the Chuo rapid total is short only by the missing Tokyo–Kanda shape", () => {
@@ -843,6 +916,59 @@ describe("sectionBounds", () => {
     expect(minLat).toBeLessThan(35.66);
     expect(maxLat).toBeGreaterThan(35.68);
     expect(sectionBounds([])).toBeNull();
+  });
+});
+
+describe("wholeLineBounds (the whole-line focus fit, subtask 1589)", () => {
+  test("a partial ride frames the whole line, not just its section", () => {
+    /* 新宿→調布 only: the section bounds stop at 調布, but the
+       whole-line bounds must still reach 京王八王子 in the
+       west — the unridden remainder is part of the frame. */
+    const path = servicePath("keio");
+    const clip = clipServicePath(path, S.新宿, S.調布)!;
+    const section = sectionBounds(clip.legs)!;
+    expect(section[0][0]).toBeGreaterThan(139.44);
+    const whole = wholeLineBounds(clip.legs, GEOMETRIES);
+    expect(whole).not.toBeNull();
+    const [[minLng, minLat], [maxLng, maxLat]] = whole!;
+    expect(minLng).toBeLessThan(139.36);
+    expect(maxLng).toBeGreaterThan(139.69);
+    expect(minLat).toBeLessThan(35.66);
+    expect(maxLat).toBeGreaterThan(35.68);
+    /* And the whole line contains the section it widens. */
+    expect(minLng).toBeLessThanOrEqual(section[0][0]);
+    expect(minLat).toBeLessThanOrEqual(section[0][1]);
+    expect(maxLng).toBeGreaterThanOrEqual(section[1][0]);
+    expect(maxLat).toBeGreaterThanOrEqual(section[1][1]);
+  });
+
+  test("a full ride's whole-line bounds equal its section bounds' reach", () => {
+    const path = servicePath("keio");
+    const whole = wholeLineBounds(path.legs, GEOMETRIES)!;
+    const section = sectionBounds(path.legs)!;
+    expect(whole[0][0]).toBeLessThanOrEqual(section[0][0]);
+    expect(whole[1][0]).toBeGreaterThanOrEqual(section[1][0]);
+  });
+
+  test("empty legs give null, and a key missing from the asset falls back to the legs", () => {
+    expect(wholeLineBounds([], GEOMETRIES)).toBeNull();
+    const legs = [
+      {
+        key: "no|such|line",
+        edge: "edge:0",
+        fromT: 0,
+        toT: 1,
+        coords: [
+          [139.0, 35.0],
+          [139.1, 35.1],
+        ] as [number, number][],
+        lengthKm: 1,
+      },
+    ];
+    expect(wholeLineBounds(legs, GEOMETRIES)).toEqual([
+      [139.0, 35.0],
+      [139.1, 35.1],
+    ]);
   });
 });
 

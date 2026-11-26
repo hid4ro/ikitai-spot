@@ -45,6 +45,47 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
     expect(fields.masterVersion).toBe(MIGRATED_MASTER_VERSION);
   });
 
+  test("a full ride for a service the frozen version never held is rejected (subtask 1593)", () => {
+    // Review batch round 1: naming the frozen migration
+    // version for むさしの号 / しもうさ号 — services first
+    // added at the current version — was accepted with
+    // pathSnapshot: null, claiming a range that version's
+    // master never contained. A new full ride may only name
+    // a version whose master held the service. (Services the
+    // frozen version did hold, like 京王線 above, still save
+    // at it.)
+    for (const name of ["むさしの号", "しもうさ号"]) {
+      expect(() =>
+        resolveRideFields(name, {
+          rideState: "full",
+          masterVersion: MIGRATED_MASTER_VERSION,
+        }),
+      ).toThrow(/did not contain/);
+    }
+  });
+
+  test("a full ride for the newest services at the current version stores its snapshot (subtask 1593)", () => {
+    const musashino = resolveRideFields("むさしの号", {
+      rideState: "full",
+      masterVersion: SERVICE_MASTER_VERSION,
+    });
+    expect(musashino.serviceId).toBe("jr-musashino-omiya");
+    const musashinoSnapshot = JSON.parse(musashino.pathSnapshot!);
+    expect(musashinoSnapshot.pathId).toBe("jr-musashino-omiya");
+    expect(musashinoSnapshot.masterVersion).toBe(SERVICE_MASTER_VERSION);
+
+    const shimousa = resolveRideFields("しもうさ号", {
+      rideState: "full",
+      masterVersion: SERVICE_MASTER_VERSION,
+    });
+    expect(shimousa.serviceId).toBe("jr-shimousa");
+    const shimousaSnapshot = JSON.parse(shimousa.pathSnapshot!);
+    expect(shimousaSnapshot.pathId).toBe("jr-shimousa");
+    // The branch segment's approximate flag rides along in
+    // the snapshot (subtask 1593).
+    expect(shimousaSnapshot.segments[1].approximate).toBe(true);
+  });
+
   test("a full ride at the frozen version stores a snapshot only while the versions coincide (stage 2)", () => {
     // The snapshot is cut from the current master. While the
     // frozen migration version IS the current version, a ride at
@@ -56,7 +97,10 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
       rideState: "full",
       masterVersion: MIGRATED_MASTER_VERSION,
     });
-    if (MIGRATED_MASTER_VERSION === SERVICE_MASTER_VERSION) {
+    // Both versions are string-literal consts, so once they
+    // diverge (2026-11-26, subtask 1590) TS2367 rejects the
+    // direct comparison — widen one side to string.
+    if ((MIGRATED_MASTER_VERSION as string) === SERVICE_MASTER_VERSION) {
       expect(
         JSON.parse(fields.pathSnapshot!).masterVersion,
       ).toBe(SERVICE_MASTER_VERSION);
@@ -92,12 +136,15 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
   });
 
   test("a full ride with a padded version stores the trimmed version (review round 3, low)", () => {
-    // The reviewer passed " 2026-11-24 " and it validated but was
-    // saved with its spaces, so it no longer matched the known
-    // version constants. The validated string is what gets saved.
+    // The reviewer passed the then-current version padded with
+    // spaces (" 2026-11-24 " at the time) and it validated but
+    // was saved with its spaces, so it no longer matched the
+    // known version constants. The validated string is what
+    // gets saved. The padded value tracks the current version
+    // constant so the test survives a master version bump.
     const fields = resolveRideFields("京王線", {
       rideState: "full",
-      masterVersion: " 2026-11-24 ",
+      masterVersion: ` ${SERVICE_MASTER_VERSION} `,
     });
     expect(fields.masterVersion).toBe(SERVICE_MASTER_VERSION);
   });
@@ -148,6 +195,108 @@ describe("resolveRideFields: partial rides (review round 2, high)", () => {
         toStationId: "003821",
       }),
     ).toThrow(/two different stations/);
+  });
+});
+
+describe("resolveRideFields: partial endpoints must be stations of the service (batch review round 2, high)", () => {
+  // The reviewer's reproduction: the block merge (round 1,
+  // subtask 1593) made addRiddenSection refuse 西浦和 as an
+  // endpoint of むさしの号 — it is a segment junction the trains
+  // pass without stopping — but a NEW row saved with its section
+  // at once (addRiddenLine) only had the format checks, so
+  // 西浦和→大宮 was stored and aggregated as 7.77 km ridden.
+  test("むさしの号 from its junctions 西浦和 / 与野 is rejected", () => {
+    for (const fromStationId of ["003014", "002947"]) {
+      expect(() =>
+        resolveRideFields("むさしの号", {
+          rideState: "partial",
+          fromStationId,
+          toStationId: "002914",
+        }),
+      ).toThrow(/not a station of/);
+    }
+  });
+
+  test("むさしの号 北府中→大宮 is still accepted", () => {
+    const fields = resolveRideFields("むさしの号", {
+      rideState: "partial",
+      fromStationId: "003771",
+      toStationId: "002914",
+    });
+    expect(fields.rideState).toBe("partial");
+    expect(fields.recordedServiceId).toBe("jr-musashino-omiya");
+  });
+
+  test("the check is generic: しもうさ号 from its junction 与野 is rejected, a stopping pair is accepted", () => {
+    expect(() =>
+      resolveRideFields("しもうさ号", {
+        rideState: "partial",
+        fromStationId: "002947",
+        toStationId: "003547",
+      }),
+    ).toThrow(/not a station of/);
+    const fields = resolveRideFields("しもうさ号", {
+      rideState: "partial",
+      fromStationId: "003006",
+      toStationId: "003547",
+    });
+    expect(fields.rideState).toBe("partial");
+    expect(fields.recordedServiceId).toBe("jr-shimousa");
+  });
+
+  test("a mid-segment stop known from a migrated ride stays accepted", () => {
+    // 聖蹟桜ヶ丘 is no block boundary of 京王線; the master knows
+    // it from the migrated 府中→聖蹟桜ヶ丘 ride. It is a real
+    // stop, so a fresh registration may record the ride — the
+    // stricter block-provability rule stays with
+    // addRiddenSection (validateSectionEndpoints).
+    const fields = resolveRideFields("京王線", {
+      rideState: "partial",
+      fromStationId: "003821",
+      toStationId: "003971",
+    });
+    expect(fields.rideState).toBe("partial");
+    expect(fields.recordedServiceId).toBe("keio");
+  });
+
+  test("a real N02 station of another line is rejected too", () => {
+    // 西浦和 is a genuine station group code — just not 京王線's.
+    expect(() =>
+      resolveRideFields("京王線", {
+        rideState: "partial",
+        fromStationId: "003014",
+        toStationId: "003821",
+      }),
+    ).toThrow(/not a station of/);
+  });
+
+  test("中央線快速 神田→新宿 is accepted: a junction the trains stop at is boardable", () => {
+    // 神田 (003677) is the junction of jr-chuo-rapid's two
+    // segments, but every rapid stops there, so it is listed on
+    // block b1 and belongs to serviceBoardingStationIds — unlike
+    // the pass-through junctions above (batch review round 3,
+    // medium: it was refused although the stretch aggregates as
+    // ridden distance).
+    const fields = resolveRideFields("JR中央線（快速）", {
+      rideState: "partial",
+      fromStationId: "003677",
+      toStationId: "003700",
+    });
+    expect(fields.rideState).toBe("partial");
+    expect(fields.recordedServiceId).toBe("jr-chuo-rapid");
+  });
+
+  test("a loop partial is rejected: a row-level section carries no direction", () => {
+    // Loop sections belong to addRiddenSection, which takes the
+    // direction a directionless loop section cannot be read
+    // without.
+    expect(() =>
+      resolveRideFields("山手線", {
+        rideState: "partial",
+        fromStationId: "003766",
+        toStationId: "003700",
+      }),
+    ).toThrow(/direction/);
   });
 });
 

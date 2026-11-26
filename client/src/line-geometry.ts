@@ -1439,3 +1439,53 @@ export function sectionBounds(
     [maxLng, maxLat],
   ];
 }
+
+/* Bounding box of the WHOLE formal line(s) a set of painted legs
+   belongs to — the legs' own bounds unioned with the full asset
+   shape of every formal-line key the legs touch (subtask 1589,
+   the reader's request of 2026-11-26: a line focus frames the
+   whole line, unridden stretches included, not just the ridden
+   section). The asset shape is what the map draws — the painted
+   legs are paths through it and the unridden ghost is its
+   remainder — so the whole line as framed is the whole line as
+   drawn. A key missing from the asset contributes nothing (its
+   legs still count through their own coords), and legs with no
+   key at all fall back to sectionBounds. Null when neither the
+   legs nor their keys' shapes carry any point. */
+export function wholeLineBounds(
+  legs: readonly PathLeg[],
+  geometries: LineGeometryMap,
+): [[number, number], [number, number]] | null {
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  const extend = (lng: number, lat: number) => {
+    if (lng < minLng) minLng = lng;
+    if (lat < minLat) minLat = lat;
+    if (lng > maxLng) maxLng = lng;
+    if (lat > maxLat) maxLat = lat;
+  };
+  const keys = new Set<string>();
+  for (const leg of legs) {
+    keys.add(leg.key);
+    for (const [lng, lat] of leg.coords) extend(lng, lat);
+  }
+  for (const key of keys) {
+    const entry = geometries[key];
+    if (!entry) continue;
+    for (const piece of entry.geometry.coordinates) {
+      for (const point of piece) {
+        const lng = point[0];
+        const lat = point[1];
+        if (lng === undefined || lat === undefined) continue;
+        extend(lng, lat);
+      }
+    }
+  }
+  if (!Number.isFinite(minLng)) return null;
+  return [
+    [minLng, minLat],
+    [maxLng, maxLat],
+  ];
+}
