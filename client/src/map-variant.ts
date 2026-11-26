@@ -261,6 +261,39 @@ export function ensureUnriddenLineGhost(
   );
 }
 
+/* A computed ghost and the ledger it belongs to: the coverage
+   key is the fingerprint of the painted legs the features were
+   computed from (ghostCoverageKey in unridden-ghost.ts). */
+export type UnriddenGhostResult = {
+  coverageKey: string;
+  features: readonly UnriddenLineFeature[];
+};
+
+/* Applies the LATEST ghost result to the map — but only while
+   it still belongs to the CURRENT ledger (subtask 1457, review
+   round 3, finding 1). The deferred paths that reach the map
+   (the data effect's waiter, the mount callback) call this
+   with the latest result read from a ref AT EXECUTION TIME,
+   never with a value captured when the waiter was registered:
+   the first deferred cut captured the features at effect time,
+   so a waiter registered while the ghost was still empty could
+   fire after the real features had already been applied and
+   wipe the source back to empty — the layer stayed visible,
+   the ghost vanished. Reading the latest result at fire time
+   makes a late waiter re-apply the CURRENT ghost instead, and
+   the coverage-key check refuses a result whose ledger has
+   already moved on (its replacement is on its way through the
+   compute effect). Returns whether anything was applied. */
+export function applyUnriddenLineGhostLatest(
+  map: UnriddenGhostMap,
+  latest: UnriddenGhostResult | null,
+  currentCoverageKey: string,
+): boolean {
+  if (!latest || latest.coverageKey !== currentCoverageKey) return false;
+  ensureUnriddenLineGhost(map, latest.features);
+  return true;
+}
+
 /* The ledger row a tap on a painted line track belongs to: the
    FIRST row in ledger order whose service paints that formal
    line key. A formal line can carry several services （総武線
