@@ -24,6 +24,7 @@
 
 import {
   usableRiddenService,
+  type RideState,
   type RiddenServiceLink,
 } from "../../shared/service-master";
 import type { GeoJsonLineGeometry } from "./geojson";
@@ -148,9 +149,16 @@ export function variantPaintOps(variant: RecordMapVariant): {
     layout: [
       /* Unridden lines ghost only on the 路線 tab (the reader
          allowed it there); on the 市区町村 tab they would bury
-         the fills under 597 extra tracks. */
+         the fills under 597 extra tracks. The focused line's
+         unridden remainder (subtask 1589) rides the same rule:
+         it is a 路線-tab reading aid, meaningless elsewhere. */
       {
         layer: "unridden-lines-ghost",
+        name: "visibility",
+        value: linesHero ? "visible" : "none",
+      },
+      {
+        layer: "unridden-lines-focus",
         name: "visibility",
         value: linesHero ? "visible" : "none",
       },
@@ -214,6 +222,58 @@ export function applyVariantPaint(
 
 export const UNRIDDEN_LINES_SOURCE_ID = "unridden-lines";
 export const UNRIDDEN_LINES_LAYER_ID = "unridden-lines-ghost";
+export const UNRIDDEN_LINES_FOCUS_LAYER_ID = "unridden-lines-focus";
+
+/* The FOCUSED line's unridden remainder (subtask 1589, the
+   reader's request of 2026-11-26): while a line is focused, its
+   not-yet-ridden stretches repaint from the ghost's whisper to
+   a midway strength, so "where is this line still unridden"
+   reads at a glance. The paint keeps each line's OWN color
+   (the selection rule: emphasis never recolors) at a width /
+   opacity between the ghost (1.6 / 0.25) and a ridden section
+   (3.5 / 0.95) — clearly above the unselected lines' ghost,
+   clearly below the ridden paint and the focus highlight, and
+   never dashed (the reader's no-dash rule). App.tsx's focus
+   switching drives the layer's filter (the focused service's
+   formal-line keys; an empty key list matches nothing) and
+   excludes those keys from the ghost layer meanwhile, so each
+   stretch is painted exactly once, at exactly this strength. */
+export const UNRIDDEN_FOCUS_LINE_WIDTH = 2.4;
+export const UNRIDDEN_FOCUS_LINE_OPACITY = 0.5;
+
+/* The remainder layer's spec — ONE source of truth, shared by
+   App.tsx's mount overlay and the late join below (the ghost
+   layer's spec predates this sharing and is pinned equal by
+   test instead). A fresh object per call, so no two layers
+   ever share a mutable spec. The filter starts on an empty key
+   list: nothing is focused until a focus call says otherwise. */
+export type UnriddenLineFocusLayerSpec = {
+  id: string;
+  type: string;
+  source: string;
+  layout: Record<string, unknown>;
+  filter: unknown[];
+  paint: Record<string, unknown>;
+};
+
+export function unriddenLineFocusLayerSpec(): UnriddenLineFocusLayerSpec {
+  return {
+    id: UNRIDDEN_LINES_FOCUS_LAYER_ID,
+    type: "line",
+    source: UNRIDDEN_LINES_SOURCE_ID,
+    layout: {
+      "line-cap": "round",
+      "line-join": "round",
+      visibility: "none",
+    },
+    filter: ["in", ["get", "key"], ["literal", [] as string[]]],
+    paint: {
+      "line-color": ["get", "color"],
+      "line-width": UNRIDDEN_FOCUS_LINE_WIDTH,
+      "line-opacity": UNRIDDEN_FOCUS_LINE_OPACITY,
+    },
+  };
+}
 
 /* One formal line's unridden remainder as a map feature, in its
    own color — the shape App.tsx's ghost computation produces
@@ -236,7 +296,7 @@ export type UnriddenGhostMap = {
   getLayer: (id: string) => unknown;
 };
 
-/* Adds the unridden-lines ghost source + layer to a live map,
+/* Adds the unridden-lines ghost source + layers to a live map,
    or refreshes its data when they already exist. The layer spec
    mirrors App.tsx's mount overlay exactly, inserted below the
    ridden lines — the paint order the mount's sort gives the
@@ -253,19 +313,36 @@ export function ensureUnriddenLineGhost(
   features: readonly UnriddenLineFeature[],
 ): void {
   const data = { type: "FeatureCollection", features };
+  /* The family's insertion anchor: directly below the ridden
+     lines, the paint order the mount's sort gives it. */
+  const beforeId = () =>
+    [
+      "visited-lines-casing",
+      "visited-lines-color",
+      "visited-lines-unknown",
+      "list-spot-points-circle",
+    ].find((id) => map.getLayer(id));
+  /* The focused line's remainder layer (subtask 1589) joins
+     with the family, directly above the ghost: a map whose
+     ghost arrived through the mount already has it (the check
+     is a no-op there), and one built before the layer existed
+     gains it here. It arrives with its empty-key filter, so it
+     paints nothing until a focus call selects a line — a focus
+     already active when the ghost lands is re-applied by the
+     caller (App.tsx's ghost effect). */
+  const ensureFocusLayer = () => {
+    if (!map.getLayer(UNRIDDEN_LINES_FOCUS_LAYER_ID)) {
+      map.addLayer(unriddenLineFocusLayerSpec(), beforeId());
+    }
+  };
   const source = map.getSource(UNRIDDEN_LINES_SOURCE_ID);
   if (source) {
     source.setData(data);
+    ensureFocusLayer();
     return;
   }
   if (features.length === 0) return;
   map.addSource(UNRIDDEN_LINES_SOURCE_ID, { type: "geojson", data });
-  const beforeId = [
-    "visited-lines-casing",
-    "visited-lines-color",
-    "visited-lines-unknown",
-    "list-spot-points-circle",
-  ].find((id) => map.getLayer(id));
   map.addLayer(
     {
       id: UNRIDDEN_LINES_LAYER_ID,
@@ -282,8 +359,9 @@ export function ensureUnriddenLineGhost(
         "line-opacity": 0.25,
       },
     },
-    beforeId,
+    beforeId(),
   );
+  ensureFocusLayer();
 }
 
 /* A computed ghost and the ledger it belongs to: the coverage
@@ -317,6 +395,77 @@ export function applyUnriddenLineGhostLatest(
   if (!latest || latest.coverageKey !== currentCoverageKey) return false;
   ensureUnriddenLineGhost(map, latest.features);
   return true;
+}
+
+/* ---------------- the remainder focus's key decision ----------------
+   Which formal-line keys the focused row's unridden remainder
+   paints at midway strength (subtask 1589), decided from the
+   SELECTED ROW's own record — Codex review batch round 1,
+   finding 4. The painted legs are a per-SERVICE aggregate:
+   every row linked to one service contributes its sections to
+   the same entry, so when two rows share a service — a partial
+   「むさしの号」 and an unknown 「JRむさしの号」 — the aggregate's
+   unknown flag is false even for the unknown row. Deciding
+   from the aggregate alone singled out a remainder for a row
+   that recorded no section at all: an unknown ride has no
+   ridden section to have a remainder against (its whole path
+   is the focus highlight already), so the row's own rideState
+   vetoes the emphasis. A partial or full row keeps the
+   aggregate's keys, exactly as subtask 1589 painted them. */
+
+/* One service's painted legs, as the coverage computes them:
+   the legs it paints and whether the SERVICE's rides are all
+   unrecorded (unknown). */
+export type RemainderPaintedLegs = {
+  legs: readonly { key: string }[];
+  unknown: boolean;
+};
+
+/* The remainder keys for one selected row: the distinct keys
+   of its service's painted legs, or an empty list when nothing
+   may be singled out (no painted legs, a service-level
+   unknown, or the row's own unknown ride). An empty list is a
+   decision, not an absence: callers apply it, clearing any
+   emphasis a previous selection left on the layers. */
+export function unriddenRemainderKeysForRow(
+  row: { rideState: RideState },
+  painted: RemainderPaintedLegs | undefined,
+): string[] {
+  if (!painted || painted.legs.length === 0) return [];
+  if (painted.unknown) return [];
+  if (row.rideState === "unknown") return [];
+  return [...new Set(painted.legs.map((leg) => leg.key))];
+}
+
+/* The remainder keys for the CURRENT selection, resolved from
+   the ledger rows and the coverage — the re-apply the mount
+   completion and the ghost's late join share (Codex review
+   batch round 1, finding 3). A map rebuilt under a live
+   selection (a municipality data update remounts the map while
+   the ghost result stands, so the ghost effect never re-runs)
+   creates the remainder layer with its empty-key filter, and
+   only this re-apply restores the emphasis on it. Returns null
+   when there is no applicable selection — no focused row, a
+   focused row that has left the ledger or whose link is
+   unusable, or a service with no painted legs — meaning "leave
+   the layers as they are": at a mount that is the fresh
+   layer's empty filter, in the ghost effect the state the tap
+   already set. */
+export function unriddenRemainderKeysForSelection<
+  Row extends RiddenServiceLink & { id: number; rideState: RideState },
+>(
+  rows: readonly Row[],
+  perServiceLegs: ReadonlyMap<string, RemainderPaintedLegs>,
+  focusedRowId: number | null,
+): string[] | null {
+  if (focusedRowId === null) return null;
+  const row = rows.find((candidate) => candidate.id === focusedRowId);
+  if (!row) return null;
+  const service = usableRiddenService(row);
+  if (!service) return null;
+  const painted = perServiceLegs.get(service.id);
+  if (!painted || painted.legs.length === 0) return null;
+  return unriddenRemainderKeysForRow(row, painted);
 }
 
 /* The ledger row a tap on a painted line track belongs to: the

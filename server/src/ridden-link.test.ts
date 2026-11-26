@@ -469,6 +469,70 @@ test("a new explicitly recorded Chuo Rapid primary section counts Tokyo to Shinj
   });
 });
 
+test("a new むさしの号 row cannot be saved from a junction the trains do not stop at (batch review round 2, high)", async () => {
+  await withLedger(async (_, ctx) => {
+    // 西浦和 (003014) and 与野 (002947) are segment junctions of
+    // jr-musashino-omiya: the route passes them, no train stops.
+    // Saving the row with its section at once used to accept
+    // them and aggregate the stretch as ridden distance.
+    for (const fromStationId of ["003014", "002947"]) {
+      await expect(
+        Actions.addRiddenLine.handler(ctx, {
+          ...aRide,
+          name: "むさしの号",
+          rideState: "partial",
+          fromStationId,
+          toStationId: "002914",
+        }),
+      ).rejects.toThrow(/not a station of/);
+    }
+    expect((await Actions.listRiddenLines.handler(ctx, {})).lines).toEqual([]);
+    // 北府中→大宮 boards at stations the service stops at.
+    const saved = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "むさしの号",
+      rideState: "partial",
+      fromStationId: "003771",
+      toStationId: "002914",
+    });
+    expect(saved.created).toBe(true);
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      serviceId: "jr-musashino-omiya",
+      recordedServiceId: "jr-musashino-omiya",
+      rideState: "partial",
+      fromStationId: "003771",
+      toStationId: "002914",
+    });
+  });
+});
+
+test("a new Chuo Rapid row can be saved from 神田， a segment junction the trains stop at (batch review round 3, medium)", async () => {
+  await withLedger(async (_, ctx) => {
+    // 神田 (003677) joins jr-chuo-rapid's two segments. It is a
+    // real stop, so the boarding check accepts it — the contrast
+    // with the むさしの号 junctions above, which pass through.
+    const saved = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "JR中央線（快速）",
+      rideState: "partial",
+      fromStationId: "003677",
+      toStationId: "003700",
+    });
+    expect(saved.created).toBe(true);
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      recordedServiceId: "jr-chuo-rapid",
+      rideState: "partial",
+      fromStationId: "003677",
+      toStationId: "003700",
+    });
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-chuo-rapid")?.riddenKm).toBeCloseTo(9.08, 1);
+  });
+});
+
 test("a legacy blockless Tokyo to Shinjuku section cannot be relinked to Yamanote", async () => {
   await withLedger(async (_, ctx) => {
     const { lines: before } = await Actions.listRiddenLines.handler(ctx, {});

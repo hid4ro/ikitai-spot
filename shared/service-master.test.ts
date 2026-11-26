@@ -28,6 +28,7 @@ import {
   serviceBoundaryStations,
   serviceById,
   serviceByLedgerName,
+  serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
   serviceOrderedStations,
   serviceStationIds,
@@ -40,7 +41,7 @@ import { RIDDEN_LINE_GEOMETRIES } from "../client/src/assets/visited-lines";
 
 describe("master shape", () => {
   test("every entry carries the four required metadata fields", () => {
-    expect(SERVICE_MASTER.length).toBe(9);
+    expect(SERVICE_MASTER.length).toBe(11);
     for (const entry of SERVICE_MASTER) {
       expect(entry.id).toMatch(/^[a-z0-9-]+$/);
       expect(entry.sources.length).toBeGreaterThan(0);
@@ -160,6 +161,64 @@ describe("service → formal line expansion", () => {
       "東北線|東日本旅客鉄道",
       "東海道線|東日本旅客鉄道",
     ]);
+  });
+
+  test("むさしの号 forks off 武蔵野線 onto 東北線 at 西浦和 (subtask 1590)", () => {
+    // The 大宮 branch forks at 西浦和, which the linear path
+    // model cannot hold on jr-musashino itself — so むさしの号
+    // is its own service: 武蔵野線 府中本町〜西浦和, 武蔵野線
+    // （大宮支線） 西浦和〜与野, 東北線 与野〜大宮. The two
+    // 武蔵野線 segments share one asset key, so the expansion
+    // dedupes to two formal lines / two keys.
+    expect(formalLineNames("jr-musashino-omiya")).toEqual([
+      "武蔵野線",
+      "東北線",
+    ]);
+    expect(assetKeysForService("jr-musashino-omiya")).toEqual([
+      "武蔵野線|東日本旅客鉄道",
+      "東北線|東日本旅客鉄道",
+    ]);
+    const segments = expandService("jr-musashino-omiya");
+    expect(segments).toHaveLength(3);
+    expect(segments[0]!.from.name).toBe("府中本町");
+    expect(segments[0]!.to.name).toBe("西浦和");
+    expect(segments[1]!.to.name).toBe("与野");
+    expect(segments[2]!.to.name).toBe("大宮");
+    expect(serviceByLedgerName("むさしの号")?.id).toBe(
+      "jr-musashino-omiya",
+    );
+    // The parent line keeps its own identity.
+    expect(serviceByLedgerName("JR武蔵野線")?.id).toBe("jr-musashino");
+  });
+
+  test("しもうさ号 mirrors むさしの号 across the fork at 与野 (subtask 1591)", () => {
+    // The 大宮→西船橋 counterpart of むさしの号, recorded
+    // ahead of any ride: 東北線 大宮〜与野, 武蔵野線 （支線）
+    // 与野〜武蔵浦和, 武蔵野線 武蔵浦和〜西船橋. The two
+    // 武蔵野線 segments share one asset key, so the expansion
+    // dedupes to two formal lines / two keys.
+    expect(formalLineNames("jr-shimousa")).toEqual([
+      "東北線",
+      "武蔵野線",
+    ]);
+    expect(assetKeysForService("jr-shimousa")).toEqual([
+      "東北線|東日本旅客鉄道",
+      "武蔵野線|東日本旅客鉄道",
+    ]);
+    const segments = expandService("jr-shimousa");
+    expect(segments).toHaveLength(3);
+    expect(segments[0]!.from.name).toBe("大宮");
+    expect(segments[0]!.to.name).toBe("与野");
+    expect(segments[1]!.to.name).toBe("武蔵浦和");
+    expect(segments[2]!.to.name).toBe("西船橋");
+    // The branch segment's shape runs ~37% long against the
+    // physical run (see the master note), so it is flagged
+    // approximate; the other two segments are the lines
+    // themselves (review batch round 1, subtask 1593).
+    expect(segments[1]!.approximate).toBe(true);
+    expect(segments[0]!.approximate).toBeUndefined();
+    expect(segments[2]!.approximate).toBeUndefined();
+    expect(serviceByLedgerName("しもうさ号")?.id).toBe("jr-shimousa");
   });
 
   test("りんかい線 resolves to its official name 臨海副都心線", () => {
@@ -441,6 +500,34 @@ describe("save-time validation (review round 2)", () => {
     expect(isKnownMasterVersion("")).toBe(false);
     expect(isKnownMasterVersion(" ")).toBe(false);
     expect(isKnownMasterVersion("2026-11-25")).toBe(false);
+  });
+
+  test("serviceExistsAtMasterVersion tells which services a version's master held (subtask 1593)", () => {
+    // The current master holds every service, old and new.
+    expect(serviceExistsAtMasterVersion("keio", SERVICE_MASTER_VERSION)).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-musashino-omiya", SERVICE_MASTER_VERSION),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-shimousa", SERVICE_MASTER_VERSION),
+    ).toBe(true);
+    // The frozen migration master held the nine migrated
+    // services — and not the two added on 2026-11-26.
+    expect(serviceExistsAtMasterVersion("keio", MIGRATED_MASTER_VERSION)).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-musashino", MIGRATED_MASTER_VERSION),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-musashino-omiya", MIGRATED_MASTER_VERSION),
+    ).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("jr-shimousa", MIGRATED_MASTER_VERSION),
+    ).toBe(false);
+    // Unknown versions and unknown services hold nothing.
+    expect(serviceExistsAtMasterVersion("keio", "bogus")).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("no-such-service", SERVICE_MASTER_VERSION),
+    ).toBe(false);
   });
 });
 
@@ -761,6 +848,77 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toBeNull();
   });
 
+  test("validateSectionEndpoints: the むさしの号 ride 北府中→大宮 passes (subtask 1590)", () => {
+    // 北府中 is listed on jr-musashino-omiya/b1 and 大宮 is the
+    // block's far boundary: the 2026-11-26 ride resolves as a
+    // section of the new service, in either direction.
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "003771", "002914"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "002914", "003771"),
+    ).toBeNull();
+    // The whole service also passes.
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "003876", "002914"),
+    ).toBeNull();
+    // 西浦和 is only the junction where the path forks onto
+    // the 大宮支線 — むさしの号 does not stop there, so it is
+    // not an endpoint, in either direction or against itself
+    // (review batch round 1, subtask 1593; the block no
+    // longer splits at 西浦和).
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "003014", "002914"),
+    ).toMatch(/not a station of/);
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "002914", "003014"),
+    ).toMatch(/not a station of/);
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "003014", "003014"),
+    ).toMatch(/two different stations/);
+    // 南浦和 is a station of the parent jr-musashino service but
+    // the むさしの号 never calls there — it is not an endpoint
+    // of this service.
+    expect(
+      validateSectionEndpoints("jr-musashino-omiya", "003004", "002914"),
+    ).toMatch(/not a station of/);
+    // Ordered stations: the two block boundaries with the
+    // listed mid-block station interleaved; 西浦和 and 与野
+    // are only segment junctions, so neither appears.
+    expect(
+      serviceOrderedStations("jr-musashino-omiya").map((s) => s.id),
+    ).toEqual(["003876", "003771", "002914"]);
+  });
+
+  test("validateSectionEndpoints: しもうさ号 endpoints (subtask 1591)", () => {
+    // The whole service passes in either direction, and a
+    // section ending at a listed mid-block station （東松戸
+    // on b3) resolves too.
+    expect(
+      validateSectionEndpoints("jr-shimousa", "002914", "003547"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-shimousa", "003547", "002914"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-shimousa", "002914", "003187"),
+    ).toBeNull();
+    // 西浦和 is not a station of this service: the しもうさ号
+    // joins the main line at 別所信号場 without calling there
+    // (the simplified shape's junction sits near 西浦和, but
+    // the station is not the service's).
+    expect(
+      validateSectionEndpoints("jr-shimousa", "003014", "003547"),
+    ).toMatch(/not a station of/);
+    // Ordered stations: block boundaries with the listed
+    // mid-block station interleaved; 与野 is only a segment
+    // junction, so it does not appear (same as on
+    // jr-musashino-omiya).
+    expect(
+      serviceOrderedStations("jr-shimousa").map((s) => s.id),
+    ).toEqual(["002914", "003006", "003004", "003187", "003547"]);
+  });
+
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {
     // 新宿→渋谷 inner runs yamanote/b2 （渋谷〜新宿) end to
     // end — a real ride. The old block-direction check
@@ -830,7 +988,10 @@ describe("stage 2 blocks (subtask 1421)", () => {
   test("the full-path snapshot keeps the path id and version", () => {
     const snapshot = serviceFullPathSnapshot("jr-saikyo")!;
     expect(snapshot.pathId).toBe("jr-saikyo");
-    expect(snapshot.masterVersion).toBe(MIGRATED_MASTER_VERSION);
+    // A fresh snapshot is stamped with the CURRENT master
+    // version (2026-11-26 since subtask 1590) — it equalled
+    // MIGRATED_MASTER_VERSION only while the two coincided.
+    expect(snapshot.masterVersion).toBe(SERVICE_MASTER_VERSION);
     expect(snapshot.segments.length).toBe(4);
     expect(snapshot.segments[0]!.formalLineKey).toBe(
       "山手線|東日本旅客鉄道",
