@@ -87,6 +87,9 @@ const S = {
   印西牧の原: station("003083", "印西牧の原", 140.16713, 35.80363),
   新松戸: station("003045", "新松戸", 139.92111, 35.82549),
   新鎌ヶ谷: station("003146", "新鎌ヶ谷", 139.99836, 35.77961),
+  春日部: station("002785", "春日部", 139.75238, 35.98),
+  七光台: station("002803", "七光台", 139.85295, 35.97085),
+  柏: station("002984", "柏", 139.97046, 35.86198),
 };
 
 function servicePath(serviceId: string): ServicePath {
@@ -170,6 +173,7 @@ describe("real asset: service totals against railway kilometres", () => {
       ["jr-musashino", 71.8],
       ["hokuso", 32.3],
       ["rinkai", 12.3],
+      ["tobu-noda", 62.7],
     ];
     for (const [serviceId, railKm] of cases) {
       const path = servicePath(serviceId);
@@ -207,6 +211,32 @@ describe("real asset: service totals against railway kilometres", () => {
       coords.some(
         (p) => haversineKm(p, [S.南浦和.lng, S.南浦和.lat]) < 0.5,
       ),
+    ).toBe(false);
+  });
+
+  test("東武野田線 totals its timetable kilometres and clips 大宮→七光台 (subtask 1566)", () => {
+    /* 営業キロ: 全線 大宮〜船橋 62.7 km、乗車区間
+       大宮〜七光台 25.1 km（大宮起点：春日部 15.2 km、
+       七光台 25.1 km）。N02 形状ベースでも全長 61.76 km、
+       大宮→七光台 25.05 km と営業キロに近い。 */
+    const path = servicePath("tobu-noda");
+    expect(path.missing).toEqual([]);
+    expect(path.approximate).toBe(false);
+    expect(path.totalKm).toBeGreaterThan(62.7 * 0.95);
+    expect(path.totalKm).toBeLessThan(62.7 * 1.05);
+    const clip = clipServicePath(path, S.大宮, S.七光台)!;
+    expect(clip).not.toBeNull();
+    expect(clip.approximate).toBe(false);
+    expect(clip.lengthKm).toBeGreaterThan(25.1 * 0.95);
+    expect(clip.lengthKm).toBeLessThan(25.1 * 1.05);
+    const coords = clip.legs.flatMap((leg) => leg.coords);
+    /* The clip passes 春日部 on the way … */
+    expect(
+      coords.some((p) => haversineKm(p, [S.春日部.lng, S.春日部.lat]) < 0.5),
+    ).toBe(true);
+    /* … and stops well short of 柏. */
+    expect(
+      coords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
     ).toBe(false);
   });
 
@@ -566,6 +596,7 @@ describe("coverage: dedup and per-service isolation", () => {
       "jr-musashino",
       "hokuso",
       "rinkai",
+      "tobu-noda",
     ]) {
       paths.set(service, servicePath(service));
     }
@@ -663,6 +694,7 @@ describe("coverage: dedup and per-service isolation", () => {
       "jr-musashino",
       "hokuso",
       "rinkai",
+      "tobu-noda",
     ]) {
       const intervals = blocksForService(serviceId).map((block) => ({
         serviceId,
@@ -679,8 +711,8 @@ describe("coverage: dedup and per-service isolation", () => {
 
   test("the unprepared-lines note counts the lines the master does not cover", () => {
     const coverage = coverageFor(new Map());
-    /* 11 formal keys across the 9 services' paths. */
-    expect(coverage.unpreparedLines).toBe(597 - 11);
+    /* 12 formal keys across the 12 services' paths. */
+    expect(coverage.unpreparedLines).toBe(597 - 12);
   });
 
   test("perServiceLegs paints the clipped sections, not the whole path", () => {
