@@ -96,6 +96,7 @@ import {
   decideSpotDataRemount,
   GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
+  mapPaneBlockRendered,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
   spotsInitialCamera,
@@ -110,7 +111,11 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
-import { createAutoFitShots, fitBoundsPadding } from "./map-framing";
+import {
+  autoFitGate,
+  createAutoFitShots,
+  fitBoundsPadding,
+} from "./map-framing";
 import { acquireScrollLock } from "./scroll-lock";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
@@ -3768,10 +3773,22 @@ function VisitedMapSection({
   /* fitBounds padding for this section's framing moves: in
      fullscreen the fitted frame must end above the bottom tab
      bar, which floats over the map's lower edge (v89 review
-     round 1, finding 6). */
+     round 1, finding 6). The flag is read through a ref and
+     the bar height from the live DOM, both at the moment the
+     fit is applied to the camera: every caller runs inside a
+     live-map callback, which can land long after the closure
+     was created — a location read that resolves after the
+     reader toggled fullscreen mid-flight must frame with the
+     CURRENT state, not the state at request time (v89 review
+     round 2, finding 4). */
+  const fullscreenRef = useRef(fullscreen);
+  fullscreenRef.current = fullscreen;
   const mapFitPadding = (base = 36) =>
-    fitBoundsPadding(fullscreen, bottomTabBarHeightPx(), base);
-  const frameCurrentMunicipality = async (manual: boolean): Promise<boolean> => {
+    fitBoundsPadding(fullscreenRef.current, bottomTabBarHeightPx(), base);
+  const frameCurrentMunicipality = async (
+    manual: boolean,
+    onApplied?: () => void,
+  ): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
     if (manual) setLocBusy(false);
@@ -3818,6 +3835,11 @@ function VisitedMapSection({
             { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
         }
+        /* The fit landed on the camera (the tab guard above
+           passed): the auto-fit caller spends its one shot
+           here, never at request time (v89 review round 2,
+           finding 1). */
+        onApplied?.();
       } catch {
         /* framing is best-effort; a failure leaves the current view */
       }
@@ -3830,7 +3852,7 @@ function VisitedMapSection({
      initial camera instead of leaving the スポット tab's view.
      Falls back to the whole-country camera when nothing is
      placeable. */
-  const frameVisitedBounds = () => {
+  const frameVisitedBounds = (onApplied?: () => void) => {
     withLiveMapRef.current((map) => {
       if (variantRef.current === "spots") return;
       try {
@@ -3867,6 +3889,10 @@ function VisitedMapSection({
         } else {
           resetSpotsCamera(map);
         }
+        /* The fallback fit landed: same spend-on-apply rule
+           as the primary framing (v89 review round 2,
+           finding 1). */
+        onApplied?.();
       } catch {
         /* framing is best-effort; a failure leaves the current view */
       }
@@ -3885,7 +3911,9 @@ function VisitedMapSection({
      back to the visited bounds when there is none. Runs only
      while the 路線 tab is showing: a location read that outlives
      a tab switch must not yank the new tab's camera. */
-  const frameNearestRiddenLine = async (): Promise<boolean> => {
+  const frameNearestRiddenLine = async (
+    onApplied?: () => void,
+  ): Promise<boolean> => {
     const loc = await resolveCurrentLocation();
     if (!loc) {
       return false;
@@ -3927,6 +3955,13 @@ function VisitedMapSection({
           ],
           { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
         );
+        /* The fit landed on the camera (the lines tab guard
+           above passed): the auto-fit caller spends its one
+           shot here. A run the guard dropped — the reader
+           left for 市区町村 while the location read was out —
+           never reaches this line, so its shot survives for
+           the return visit (v89 review round 2, finding 1). */
+        onApplied?.();
       } catch {
         /* framing is best-effort; a failure leaves the current view */
       }
@@ -3936,10 +3971,13 @@ function VisitedMapSection({
   /* The record tabs' one-shot default framing: the 路線 tab fits
      the recorded line nearest the current location (subtask
      1483), the 市区町村 tab fits the municipality the reader is
-     in. Returns whether a location was found at all. */
-  const frameRecordDefault = (): Promise<boolean> => {
-    if (variantRef.current === "lines") return frameNearestRiddenLine();
-    return frameCurrentMunicipality(false);
+     in. Returns whether a location was found at all. onApplied
+     is forwarded to whichever framing runs: it fires from
+     inside the live-map callback, once the fit has actually
+     been issued to the camera (v89 review round 2, finding 1). */
+  const frameRecordDefault = (onApplied?: () => void): Promise<boolean> => {
+    if (variantRef.current === "lines") return frameNearestRiddenLine(onApplied);
+    return frameCurrentMunicipality(false, onApplied);
   };
   const frameRecordDefaultRef = useRef(frameRecordDefault);
   frameRecordDefaultRef.current = frameRecordDefault;
@@ -3957,41 +3995,80 @@ function VisitedMapSection({
        entered. This effect is the ONE entry point for the
        record tabs' initial framing (v89 review round 1,
        finding 3): it waits for the map AND for both ledgers
-       before the shot is spent, so a slow ridden-lines ledger
+       before framing starts, so a slow ridden-lines ledger
        can no longer let an empty-ledger framing win the race
        through a side path. The variant-change effect below
        therefore does no framing of its own — when the map is
        not ready yet this effect simply stays pending and runs
-       when mapReady rises. */
+       when mapReady rises. Whether the shot may run, must
+       wait, or is spent without framing is autoFitGate's call
+       (map-framing.ts): it reads THIS tab's own picked focus
+       only, so a municipality picked on the 市区町村 tab no
+       longer spends — or suppresses — the 路線 tab's first
+       fit (v89 review round 2, finding 1). */
     if (variant === "spots") return;
     if (autoFitShotsRef.current.used(variant)) return;
-    if (mapFailed) {
+    const gate = autoFitGate(variant, {
+      mapFailed,
+      mapReady: mapReady !== 0,
+      visitedPending: visitedQuery.isPending,
+      riddenPending: riddenQuery.isPending,
+      focusPicked: {
+        municipalities: focusedIdRef.current !== null,
+        lines: focusedLineIdRef.current !== null,
+      },
+    });
+    if (gate === "wait") return;
+    if (gate === "spend-without-framing") {
       autoFitShotsRef.current.consume(variant);
       return;
     }
-    if (mapReady === 0 || visitedQuery.isPending) return;
-    /* The 路線 tab's default needs the ridden-lines ledger (its
-       nearest line is picked from the rows): on that tab the
-       one shot waits for it too, instead of framing the
-       location-only fallback before the rows arrive. */
-    if (variant === "lines" && riddenQuery.isPending) return;
-    /* A municipality the reader picked before the default framing
-       landed wins — never yank the camera away from it. */
-    autoFitShotsRef.current.consume(variant);
-    if (focusedIdRef.current !== null) return;
-    void frameRecordDefaultRef.current().then((located) => {
+    /* The shot is spent only when a fit actually lands on the
+       camera: spendShot rides into the framing functions and
+       fires from inside their live-map callbacks, past their
+       tab guards. A run the reader's tab switch drops on the
+       way — the 路線 location read landing after a move to
+       市区町村 — spends nothing, so the shot is still there
+       when the reader comes back and this effect frames the
+       tab then (v89 review round 2, finding 1). */
+    const shotTab = variant;
+    const spendShot = () => autoFitShotsRef.current.consume(shotTab);
+    void frameRecordDefaultRef.current(spendShot).then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
          visited municipalities' bounds, not the スポット tab's
-         view left behind (review round 1, finding 4). */
-      if (
-        !located &&
-        focusedIdRef.current === null &&
-        variantRef.current !== "spots"
-      ) {
-        frameVisitedBoundsRef.current();
+         view left behind (review round 1, finding 4). The focus
+         that holds the fallback back is the target tab's own,
+         as with the primary fit above. */
+      if (located) return;
+      const ownFocusPicked =
+        shotTab === "lines"
+          ? focusedLineIdRef.current !== null
+          : focusedIdRef.current !== null;
+      if (!ownFocusPicked && variantRef.current !== "spots") {
+        frameVisitedBoundsRef.current(spendShot);
       }
     });
   }, [mapReady, visitedQuery.isPending, riddenQuery.isPending, mapFailed, variant]);
+  /* Fullscreen needs a pane to own (v89 review round 2,
+     finding 2): the shared flag lives in App, but the pane
+     block below renders only when a tab has something to
+     plot (mapPaneBlockRendered) — with zero records a record
+     tab shows the empty state instead, toggle button and
+     all. Carrying fullscreen in from スポット would leave
+     the flag (and App's scroll lock) on with no map and no
+     rendered way out, freezing the record form behind a
+     scroll lock touch cannot release, so the section hands
+     the flag back the moment its pane is not rendered. The
+     その他 tab is App's own effect's business (it exits
+     fullscreen there directly). */
+  useEffect(() => {
+    if (
+      fullscreen &&
+      !mapPaneBlockRendered(variant, totalVisited, hasRiddenLines)
+    ) {
+      onToggleFullscreen();
+    }
+  }, [fullscreen, variant, totalVisited, hasRiddenLines, onToggleFullscreen]);
   /* Follow the Pixel while the reader stays on this tab: the
      location job stores a fresh position about once a minute, so
      re-read it on the same cadence and move ONLY the blue marker
@@ -6687,7 +6764,7 @@ function VisitedMapSection({
             : undefined
         }
       >
-      {(totalVisited > 0 || hasRiddenLines || variant === "spots") && (
+      {(mapPaneBlockRendered(variant, totalVisited, hasRiddenLines)) && (
         <>
           {/* Sticky map first — the exact same wrapper as the
               スポット tab's pinned map (sticky, -mx-4 full-bleed,
@@ -9408,9 +9485,14 @@ export function App() {
      handler sits on document, ahead of the fullscreen map's window
      listener, so one Esc press closes only this front layer and
      leaves fullscreen for the next press (v89 review round 1,
-     finding 5). */
+     finding 5). The handler lives only while the detail itself
+     is on screen — the スポット tab: the selection can outlive
+     its pane when the reader carries it into a record tab (and
+     into fullscreen there), and an invisible detail must not
+     sit in front of the fullscreen map's own Esc (v89 review
+     round 2, finding 3). */
   useEffect(() => {
-    if (selectedId === null || confirmDelete) return;
+    if (selectedId === null || confirmDelete || tab !== "spots") return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
@@ -9426,7 +9508,7 @@ export function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selectedId, confirmDelete, editing]);
+  }, [selectedId, confirmDelete, editing, tab]);
 
   /* The delete confirmation dialog owns Escape while it is open
      (phase 5): it closes exactly like its キャンセル button and the

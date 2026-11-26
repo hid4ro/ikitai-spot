@@ -1,9 +1,10 @@
 /* Camera-framing decisions shared by the record map: the
-   per-tab one-shot auto-fit state (v89 review round 1,
-   finding 1) and the fitBounds padding that keeps a fullscreen
-   map's frame clear of the bottom tab bar (finding 6). Kept
-   dependency-light so both rules are regression-testable
-   without mounting the map — see map-framing.test.ts. */
+   per-tab one-shot auto-fit state and its gate (v89 review
+   round 1, finding 1; round 2, finding 1) and the fitBounds
+   padding that keeps a fullscreen map's frame clear of the
+   bottom tab bar (finding 6). Kept dependency-light so both
+   rules are regression-testable without mounting the map —
+   see map-framing.test.ts. */
 
 /* The two record tabs that own a default framing. The 路線
    tab's initialization is independent of the 市区町村 tab's:
@@ -16,9 +17,15 @@ export type AutoFitTab = "municipalities" | "lines";
 export type AutoFitShots = {
   /* Whether this tab's one-shot default framing has run. */
   used: (tab: AutoFitTab) => boolean;
-  /* Spend this tab's shot (the framing ran, or the tab was
-     entered in a state — map failed, a focus already picked —
-     where it must not run later). */
+  /* Spend this tab's shot. Spent ONLY when the framing
+     actually landed on the camera, or when the tab is in a
+     terminal state where it must never run later (the map
+     failed, or this tab's OWN focus was already picked — see
+     autoFitGate). A framing run a tab switch drops on the way
+     — the location read landing after the reader left, the
+     tab guard refusing the fit — spends nothing, so the shot
+     is still there when the reader comes back (v89 review
+     round 2, finding 1). */
   consume: (tab: AutoFitTab) => void;
   /* Hand both shots back: returning to the スポット tab, a
      map remount over stale data, or a manual map retry — the
@@ -42,6 +49,45 @@ export function createAutoFitShots(): AutoFitShots {
       shots.lines = false;
     },
   };
+}
+
+/* Whether a record tab's one-shot default framing may run
+   now, must wait for its inputs, or is spent without framing
+   (v89 review round 1, finding 3 — the single entry point —
+   and round 2, finding 1). The focus suppression reads the
+   TARGET tab's own pick only: the two focuses are mutually
+   exclusive in the UI, but a municipality picked on the
+   市区町村 tab stays picked while the reader first switches
+   to 路線, and the old wiring let that pick spend the 路線
+   shot and suppress its first fit. The other tab's pick is
+   simply not an input to this tab's decision. */
+export type AutoFitGateInput = {
+  mapFailed: boolean;
+  mapReady: boolean;
+  visitedPending: boolean;
+  /* Only the 路線 shot waits for this ledger (its nearest
+     line is picked from the rows); the 市区町村 shot frames
+     from the visited ledger alone. */
+  riddenPending: boolean;
+  focusPicked: Record<AutoFitTab, boolean>;
+};
+
+export type AutoFitGateDecision =
+  | "wait"
+  | "spend-without-framing"
+  | "frame";
+
+export function autoFitGate(
+  tab: AutoFitTab,
+  input: AutoFitGateInput,
+): AutoFitGateDecision {
+  /* A failed map never frames later, so its shot is spent
+     even while the ledgers are still out. */
+  if (input.mapFailed) return "spend-without-framing";
+  if (!input.mapReady || input.visitedPending) return "wait";
+  if (tab === "lines" && input.riddenPending) return "wait";
+  if (input.focusPicked[tab]) return "spend-without-framing";
+  return "frame";
 }
 
 /* fitBounds padding for the record map. Off fullscreen the

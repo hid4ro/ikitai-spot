@@ -1,9 +1,15 @@
 /* Regression tests for the record map's framing decisions:
-   the per-tab auto-fit shots (v89 review round 1, finding 1)
-   and the fullscreen fitBounds padding (finding 6).
+   the per-tab auto-fit shots and their gate (v89 review
+   round 1, finding 1; round 2, finding 1) and the fullscreen
+   fitBounds padding (finding 6).
    Run with: bun test client/src/map-framing.test.ts */
 import { describe, expect, test } from "bun:test";
-import { createAutoFitShots, fitBoundsPadding } from "./map-framing";
+import {
+  autoFitGate,
+  createAutoFitShots,
+  fitBoundsPadding,
+  type AutoFitGateInput,
+} from "./map-framing";
 
 describe("createAutoFitShots (the record tabs' default framing)", () => {
   test("each record tab owns an independent shot", () => {
@@ -28,6 +34,95 @@ describe("createAutoFitShots (the record tabs' default framing)", () => {
     shots.reset();
     expect(shots.used("municipalities")).toBe(false);
     expect(shots.used("lines")).toBe(false);
+  });
+
+  test("a run dropped before applying leaves the shot for the next visit", () => {
+    /* Round 2, finding 1: the 路線 framing starts a location
+       read, the reader switches to 市区町村 before it lands,
+       and the tab guard drops the fit. The shot is spent ONLY
+       by an applied fit, so the dropped run consumes nothing
+       and the return to 路線 frames again — the old wiring
+       spent the shot up front and the tab never framed. */
+    const shots = createAutoFitShots();
+    const ready: AutoFitGateInput = {
+      mapFailed: false,
+      mapReady: true,
+      visitedPending: false,
+      riddenPending: false,
+      focusPicked: { municipalities: false, lines: false },
+    };
+    expect(autoFitGate("lines", ready)).toBe("frame");
+    /* …the fit is dropped by the tab guard: no consume call. */
+    expect(shots.used("lines")).toBe(false);
+    /* Back on 路線 the gate still offers the framing… */
+    expect(autoFitGate("lines", ready)).toBe("frame");
+    /* …and only the run that actually lands spends the shot. */
+    shots.consume("lines");
+    expect(shots.used("lines")).toBe(true);
+  });
+});
+
+describe("autoFitGate (when a record tab's one shot may run)", () => {
+  const ready: AutoFitGateInput = {
+    mapFailed: false,
+    mapReady: true,
+    visitedPending: false,
+    riddenPending: false,
+    focusPicked: { municipalities: false, lines: false },
+  };
+
+  test("frames once the map and both ledgers are in", () => {
+    expect(autoFitGate("municipalities", ready)).toBe("frame");
+    expect(autoFitGate("lines", ready)).toBe("frame");
+  });
+
+  test("waits for the map and the visited ledger on both tabs", () => {
+    expect(autoFitGate("lines", { ...ready, mapReady: false })).toBe("wait");
+    expect(autoFitGate("municipalities", { ...ready, visitedPending: true })).toBe(
+      "wait",
+    );
+  });
+
+  test("the 路線 shot also waits for the ridden-lines ledger; 市区町村 does not", () => {
+    expect(autoFitGate("lines", { ...ready, riddenPending: true })).toBe("wait");
+    expect(autoFitGate("municipalities", { ...ready, riddenPending: true })).toBe(
+      "frame",
+    );
+  });
+
+  test("a failed map spends the shot without framing", () => {
+    expect(autoFitGate("lines", { ...ready, mapFailed: true })).toBe(
+      "spend-without-framing",
+    );
+    /* …even while the ledgers are still out: a failed map never
+       frames later, so the shot must not stay pending. */
+    expect(
+      autoFitGate("municipalities", {
+        ...ready,
+        mapFailed: true,
+        visitedPending: true,
+      }),
+    ).toBe("spend-without-framing");
+  });
+
+  test("only the tab's OWN picked focus suppresses its framing", () => {
+    /* Round 2, finding 1: a municipality picked on the
+       市区町村 tab must not suppress — or spend — the 路線
+       tab's first fit when the reader first switches over. */
+    const municipalityPicked: AutoFitGateInput = {
+      ...ready,
+      focusPicked: { municipalities: true, lines: false },
+    };
+    expect(autoFitGate("lines", municipalityPicked)).toBe("frame");
+    expect(autoFitGate("municipalities", municipalityPicked)).toBe(
+      "spend-without-framing",
+    );
+    const linePicked: AutoFitGateInput = {
+      ...ready,
+      focusPicked: { municipalities: false, lines: true },
+    };
+    expect(autoFitGate("lines", linePicked)).toBe("spend-without-framing");
+    expect(autoFitGate("municipalities", linePicked)).toBe("frame");
   });
 });
 
