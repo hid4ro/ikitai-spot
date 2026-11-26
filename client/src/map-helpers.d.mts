@@ -59,12 +59,14 @@ export type MapLibreLike = {
   isStyleLoaded: () => boolean;
   once: (event: string, cb: () => void) => void;
   /* For the persistent focus highlight's tap handling: press start
-     (mousedown / touchstart) snapshots the center via getCenter, and
-     click compares it so a drag does not count as a tap. Click
-     handlers receive the event with its canvas `point`, which the
-     painted-shape hit test feeds to queryRenderedFeatures; `lngLat`
-     carries the tapped ground coordinate (the distribution map sorts
-     its tap candidates by distance from it). */
+     (mousedown / touchstart) and click both carry the canvas
+     `point`, and the tap-vs-drag decision compares those points
+     (tap-guard.ts) so a drag does not count as a tap while a tap
+     made during a camera animation still does. The click's `point`
+     also feeds the painted-shape hit test via
+     queryRenderedFeatures; `lngLat` carries the tapped ground
+     coordinate (the distribution map sorts its tap candidates by
+     distance from it). */
   on: (
     event: string,
     cb: (e: { point?: unknown; lngLat?: { lng: number; lat: number } }) => void,

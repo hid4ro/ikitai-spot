@@ -113,6 +113,11 @@ import {
 import { conquestTimelineForVariant } from "./conquest-timeline";
 import { formatProgressValue, progressTickFraction } from "./progress-format";
 import {
+  isTapAfterPress,
+  pointFromMapEvent,
+  type PressSnapshot,
+} from "./tap-guard";
+import {
   autoFitGate,
   autoFitMayApply,
   autoFitMayPublishLocation,
@@ -3645,10 +3650,12 @@ function VisitedMapSection({
   };
   const mapWaitersRef = useRef(new Set<MapWaiter>());
   /* The map instance the blank-tap clear listeners are attached to, and
-     the camera center when the current press started (so a drag, which
-     also produces a click, does not clear the highlight). */
+     a snapshot of the current press (canvas point + camera center) so
+     a drag, which also produces a click, does not count as a tap
+     (see tap-guard.ts for the decision and why the pointer, not the
+     camera, decides). */
   const focusListenerMapRef = useRef<MapLibreLike | null>(null);
-  const pressCenterRef = useRef<{ lng: number; lat: number } | null>(null);
+  const pressSnapshotRef = useRef<PressSnapshot | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
   const [basemapReady, setBasemapReady] = useState(false);
   /* The loading overlay's fade-out (the reader asked for a fade
@@ -6139,9 +6146,11 @@ function VisitedMapSection({
 
   /* Attaches the map tap listeners to a live map, once per map
      instance. A press that turns into a drag also produces a click on
-     release, so the press-start center is remembered and a click
-     after real camera movement is ignored — only a genuine tap on
-     the spot counts. On a tap, the painted layers are hit-tested: a
+     release, so the press is snapshotted (canvas point + camera
+     center) and the click counts only when the POINTER stayed put —
+     the camera may still be settling from the tab's own auto-fit
+     when a genuine tap lands, and that must not eat the tap
+     (tap-guard.ts, subtask 1580). On a tap, the painted layers are hit-tested: a
      tap on a visited shape selects that municipality (highlight +
      scroll to its ledger row); a tap on an unvisited shape names
      that municipality instead (highlight + name label, no row, no
@@ -6161,30 +6170,28 @@ function VisitedMapSection({
         /* the marker is a cue only */
       }
     }
-    const rememberPress = () => {
+    const rememberPress = (e: unknown) => {
+      let center: { lng: number; lat: number } | null = null;
       try {
-        pressCenterRef.current = map.getCenter();
+        center = map.getCenter();
       } catch {
-        pressCenterRef.current = null;
+        center = null;
       }
+      pressSnapshotRef.current = { point: pointFromMapEvent(e), center };
     };
     map.on("mousedown", rememberPress);
     map.on("touchstart", rememberPress);
     map.on("click", (e) => {
-      const start = pressCenterRef.current;
-      pressCenterRef.current = null;
-      if (start) {
-        try {
-          const now = map.getCenter();
-          if (
-            Math.abs(now.lng - start.lng) > 0.000001 ||
-            Math.abs(now.lat - start.lat) > 0.000001
-          ) {
-            return;
-          }
-        } catch {
-          /* fall through and treat it as a tap */
-        }
+      const press = pressSnapshotRef.current;
+      pressSnapshotRef.current = null;
+      let center: { lng: number; lat: number } | null = null;
+      try {
+        center = map.getCenter();
+      } catch {
+        center = null;
+      }
+      if (!isTapAfterPress(press, { point: pointFromMapEvent(e), center })) {
+        return;
       }
       /* Unification (subtask 1460): on the スポット tab the
          municipality fills and the lines are ghosts, and their
@@ -6327,42 +6334,43 @@ function VisitedMapSection({
      SpotListMap, unchanged except for the variant gate): the
      callback lives in a ref so the map listener (attached once
      per map instance) always calls the latest one, and the
-     press-start center is remembered so a press that turned
-     into a drag does not count as a tap — the same contract as
-     the fill map's focus listeners. The handler only acts while
+     press is snapshotted so a press that turned into a drag
+     does not count as a tap — the same contract as the fill
+     map's focus listeners (tap-guard.ts). The handler only acts while
      the スポット tab is showing; on the record tabs the same
      click is the focus listeners' to handle. */
   const onSpotTapRef = useRef(onSpotTap);
   onSpotTapRef.current = onSpotTap;
   const spotTapListenerMapRef = useRef<MapLibreLike | null>(null);
-  const spotTapPressCenterRef = useRef<{ lng: number; lat: number } | null>(null);
+  const spotTapPressSnapshotRef = useRef<PressSnapshot | null>(null);
   const attachSpotTap = (map: MapLibreLike) => {
     if (spotTapListenerMapRef.current === map) return;
     spotTapListenerMapRef.current = map;
-    const rememberPress = () => {
+    const rememberPress = (e: unknown) => {
+      let center: { lng: number; lat: number } | null = null;
       try {
-        spotTapPressCenterRef.current = map.getCenter();
+        center = map.getCenter();
       } catch {
-        spotTapPressCenterRef.current = null;
+        center = null;
       }
+      spotTapPressSnapshotRef.current = {
+        point: pointFromMapEvent(e),
+        center,
+      };
     };
     map.on("mousedown", rememberPress);
     map.on("touchstart", rememberPress);
     map.on("click", (e) => {
-      const start = spotTapPressCenterRef.current;
-      spotTapPressCenterRef.current = null;
-      if (start) {
-        try {
-          const now = map.getCenter();
-          if (
-            Math.abs(now.lng - start.lng) > 0.000001 ||
-            Math.abs(now.lat - start.lat) > 0.000001
-          ) {
-            return;
-          }
-        } catch {
-          /* fall through and treat it as a tap */
-        }
+      const press = spotTapPressSnapshotRef.current;
+      spotTapPressSnapshotRef.current = null;
+      let center: { lng: number; lat: number } | null = null;
+      try {
+        center = map.getCenter();
+      } catch {
+        center = null;
+      }
+      if (!isTapAfterPress(press, { point: pointFromMapEvent(e), center })) {
+        return;
       }
       if (variantRef.current !== "spots") return;
       const handler = onSpotTapRef.current;
@@ -6546,7 +6554,31 @@ function VisitedMapSection({
         stop();
         return;
       }
-      if (fullyVisible() || attempts > 24) {
+      if (fullyVisible()) {
+        stop();
+        return;
+      }
+      if (attempts > 24) {
+        /* The corrections never landed the row in view. On the
+           window path that can mean window.scrollTo is not what
+           moves the reader's page at all — inside the hosting
+           app's WebView the visible scroll can belong to an
+           ancestor scroller the window calls cannot reach, in
+           which case scrollPos() never changed and every pass
+           above was a no-op (subtask 1580). scrollIntoView is
+           the one primitive that scrolls EVERY scrollable
+           ancestor, the window included, so it lands the row
+           either way; it fires only here, after the precise
+           loop has had its ~3 s, never instead of it. The pane
+           path scrolls its own element directly and does not
+           need the fallback. */
+        if (!paneActive) {
+          try {
+            row.scrollIntoView({ block: "center", behavior: "auto" });
+          } catch {
+            /* a detached row has nothing to scroll to */
+          }
+        }
         stop();
         return;
       }
