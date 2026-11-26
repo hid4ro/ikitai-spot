@@ -14,17 +14,17 @@
    section, since no single track stands for the whole service. */
 
 import type { GeoJsonLineGeometry } from "./geojson";
-import { distanceToLineGeometryM } from "./line-geometry";
+import {
+  buildServicePath,
+  distanceToLineGeometryM,
+  servicePathCoords,
+  type LineGeometryMap,
+} from "./line-geometry";
 import { resolveRiddenLineKey } from "./line-resolution";
 import {
-  assetKeysForService,
   resolveRiddenService,
   type RiddenServiceLink,
 } from "../../shared/service-master";
-
-type LineGeometryMap = Readonly<
-  Record<string, { operator: string; geometry: GeoJsonLineGeometry }>
->;
 
 /* The operator of the row's resolved asset line or service. A
    multi-line service still has an operator in the master. Rows
@@ -103,15 +103,23 @@ export function groupLinesByOperator<
 
 /* The recorded line nearest a location (subtask 1483): the
    路線 tab's default framing fits this line's whole extent.
-   A row counts when it resolves to a geometry — a service row
-   through its asset keys (a multi-line service's whole extent
-   is the union of the formal lines it runs on), a plain row
-   through its resolved formal-line key. Rows held for review,
+   A row counts when it resolves to a geometry — a plain row
+   through its resolved formal-line key, a service row through
+   the route its service actually runs. Rows held for review,
    and rows with no geometry at all, never count. The distance
-   is to the line's FULL geometry, so a line counts as near
-   wherever its track runs, not only where it was ridden. Ties
-   keep the earlier ledger row. Null when no row can be
-   placed. */
+   is to the line's running extent, so a line counts as near
+   wherever its service runs, not only where it was ridden.
+   Ties keep the earlier ledger row. Null when no row can be
+   placed.
+
+   A service row is measured against buildServicePath's route
+   (v89 review round 1, finding 2): the formal lines a service
+   borrows extend far beyond the service itself — JR埼京線
+   rides the 東北線 only 赤羽〜大宮, but the 東北線 asset runs
+   to 青森, so measuring against the borrowed lines' full
+   extents made 埼京線 the "nearest" line in 仙台. The framing
+   bounds come from the same route, so the frame covers the
+   service, not its landlords. */
 export type NearestRiddenLine<Row> = {
   row: Row;
   /* The line's whole extent — the bounds the default framing
@@ -132,18 +140,28 @@ export function nearestRiddenLine<
   for (const row of rows) {
     const { service, needsReview } = resolveRiddenService(row);
     if (needsReview) continue;
-    const keys = service
-      ? assetKeysForService(service.id)
-      : [resolveRiddenLineKey(row, geometries, keyByName)];
+    /* The geometry this row is measured and framed by: a
+       service row's own running route (see above), a plain
+       row's formal line. Empty when the row cannot be placed. */
+    const rowGeometries: GeoJsonLineGeometry[] = [];
+    if (service) {
+      const coords = servicePathCoords(
+        buildServicePath(service, geometries),
+      );
+      if (coords.length > 0) {
+        rowGeometries.push({ type: "MultiLineString", coordinates: coords });
+      }
+    } else {
+      const key = resolveRiddenLineKey(row, geometries, keyByName);
+      const geometry = key ? geometries[key]?.geometry : undefined;
+      if (geometry) rowGeometries.push(geometry);
+    }
     let distanceM: number | null = null;
     let minLng = Infinity;
     let minLat = Infinity;
     let maxLng = -Infinity;
     let maxLat = -Infinity;
-    for (const key of keys) {
-      if (!key) continue;
-      const geometry = geometries[key]?.geometry;
-      if (!geometry) continue;
+    for (const geometry of rowGeometries) {
       const d = distanceToLineGeometryM(point, geometry);
       if (d !== null && (distanceM === null || d < distanceM)) {
         distanceM = d;

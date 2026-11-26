@@ -110,6 +110,8 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
+import { createAutoFitShots, fitBoundsPadding } from "./map-framing";
+import { acquireScrollLock } from "./scroll-lock";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
 
@@ -127,6 +129,17 @@ const FIELDS = actionFields<typeof Actions>();
    60dvh / 32rem pane far too big). Horizontally the pane breaks out
    of the page column's side padding and runs edge to edge. */
 const MAP_PANE_HEIGHT = "h-[min(40dvh,20rem)]";
+
+/* The fixed bottom tab bar's real height (content + safe-area
+   inset), measured from the live element: fullscreen framing
+   pads the map's bottom by it (map-framing.ts's
+   fitBoundsPadding), so the number must track the bar itself,
+   never a copied constant. 0 when the bar is not mounted. */
+function bottomTabBarHeightPx(): number {
+  if (typeof document === "undefined") return 0;
+  const bar = document.querySelector<HTMLElement>("[data-bottom-tab-bar]");
+  return bar ? bar.getBoundingClientRect().height : 0;
+}
 
 /* Fullscreen toggle for the two map panes (subtask 1484): one
    button per map, top-right over the canvas. The fullscreen itself
@@ -3752,6 +3765,12 @@ function VisitedMapSection({
      automatically when the map and the ledger are ready (unless the
      reader has already picked a municipality), and again whenever
      the 「今いる市区町村に合わせる」 button is pressed. */
+  /* fitBounds padding for this section's framing moves: in
+     fullscreen the fitted frame must end above the bottom tab
+     bar, which floats over the map's lower edge (v89 review
+     round 1, finding 6). */
+  const mapFitPadding = (base = 36) =>
+    fitBoundsPadding(fullscreen, bottomTabBarHeightPx(), base);
   const frameCurrentMunicipality = async (manual: boolean): Promise<boolean> => {
     if (manual) setLocBusy(true);
     const loc = await resolveCurrentLocation();
@@ -3786,7 +3805,7 @@ function VisitedMapSection({
         const bounds = hit ? geometryBounds(hit.geometry) : null;
         if (bounds) {
           map.fitBounds(bounds, {
-            padding: 36,
+            padding: mapFitPadding(),
             maxZoom: 15,
             duration: reduceMotion ? 0 : 1200,
           });
@@ -3796,7 +3815,7 @@ function VisitedMapSection({
               [loc.lng - 0.04, loc.lat - 0.03],
               [loc.lng + 0.04, loc.lat + 0.03],
             ],
-            { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+            { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
         }
       } catch {
@@ -3843,7 +3862,7 @@ function VisitedMapSection({
               [minLng, minLat],
               [maxLng, maxLat],
             ],
-            { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+            { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
           );
         } else {
           resetSpotsCamera(map);
@@ -3906,7 +3925,7 @@ function VisitedMapSection({
             [minLng, minLat],
             [maxLng, maxLat],
           ],
-          { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+          { padding: mapFitPadding(), maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
         );
       } catch {
         /* framing is best-effort; a failure leaves the current view */
@@ -3924,20 +3943,30 @@ function VisitedMapSection({
   };
   const frameRecordDefaultRef = useRef(frameRecordDefault);
   frameRecordDefaultRef.current = frameRecordDefault;
-  const didAutoFitRef = useRef(false);
+  /* One-shot default framing state, one shot PER record tab
+     (map-framing.ts): the tabs' initializations are independent
+     (v89 review round 1, finding 1) — consuming 市区町村's shot
+     must not spend 路線's, or 路線 would open on whatever
+     camera 市区町村 left behind. */
+  const autoFitShotsRef = useRef(createAutoFitShots());
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
        (unification, subtask 1460): its framing effect fits
        location + nearest, so the record auto-fit stays pending
        — without consuming its one shot — until a record tab is
-       entered. On that entry this effect frames when the map is
-       already live (it runs before the variant-change effect in
-       the same commit, which therefore only covers the
-       map-not-ready-yet entry). */
+       entered. This effect is the ONE entry point for the
+       record tabs' initial framing (v89 review round 1,
+       finding 3): it waits for the map AND for both ledgers
+       before the shot is spent, so a slow ridden-lines ledger
+       can no longer let an empty-ledger framing win the race
+       through a side path. The variant-change effect below
+       therefore does no framing of its own — when the map is
+       not ready yet this effect simply stays pending and runs
+       when mapReady rises. */
     if (variant === "spots") return;
-    if (didAutoFitRef.current) return;
+    if (autoFitShotsRef.current.used(variant)) return;
     if (mapFailed) {
-      didAutoFitRef.current = true;
+      autoFitShotsRef.current.consume(variant);
       return;
     }
     if (mapReady === 0 || visitedQuery.isPending) return;
@@ -3948,7 +3977,7 @@ function VisitedMapSection({
     if (variant === "lines" && riddenQuery.isPending) return;
     /* A municipality the reader picked before the default framing
        landed wins — never yank the camera away from it. */
-    didAutoFitRef.current = true;
+    autoFitShotsRef.current.consume(variant);
     if (focusedIdRef.current !== null) return;
     void frameRecordDefaultRef.current().then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
@@ -4227,7 +4256,7 @@ function VisitedMapSection({
               Math.max(current.lat, best.point.lat),
             ],
           ],
-          { padding: 56, maxZoom: 15 },
+          { padding: mapFitPadding(56), maxZoom: 15 },
         );
       }
     } catch {
@@ -5306,10 +5335,7 @@ function VisitedMapSection({
      map is re-measured too: at xl the record tabs lay the pane
      out inside the grid while the スポット tab keeps it full
      width, so the container's size changes with the variant. */
-  const prevVariantRef = useRef(variant);
   useEffect(() => {
-    const prevVariant = prevVariantRef.current;
-    prevVariantRef.current = variant;
     /* This callback closes over the variant of THIS run. A style
        wait can outlive a second switch, and the held variant
        would then paint the wrong tab — a スポット paint landing
@@ -5341,40 +5367,25 @@ function VisitedMapSection({
           /* the ring is a cue only */
         }
       }
-      if (variant !== "spots" && prevVariant === "spots") {
-        /* A municipality the reader picked before the switch
-           wins — never yank the camera away from it. The
-           auto-fit effect above covers the map-live switch
-           (it runs first in the same commit and consumes its
-           one shot framing); this covers only the
-           map-not-ready-yet entry, and consumes the auto-fit's
-           one shot so it does not frame twice. */
-        if (focusedIdRef.current !== null) return;
-        if (didAutoFitRef.current) return;
-        didAutoFitRef.current = true;
-        void frameRecordDefaultRef.current().then((located) => {
-          /* No Pixel position: the record tabs' initial camera is
-             the visited municipalities' bounds, not the スポット
-             tab's view left behind (review round 1, finding 4). */
-          if (
-            !located &&
-            focusedIdRef.current === null &&
-            variantRef.current !== "spots"
-          ) {
-            frameVisitedBoundsRef.current();
-          }
-        });
-      }
-      /* Dropping this waiter leaves didAutoFitRef unconsumed, so
-         the auto-fit effect above still frames when the map
-         becomes ready — nothing is lost, only deferred. */
+      /* No framing happens here (v89 review round 1,
+         finding 3): the auto-fit effect above is the single
+         entry point for the record tabs' initial camera, and
+         it spends a tab's shot only once the map is live and
+         the ledgers it needs have landed. This effect used to
+         frame a spots → record switch itself when the map was
+         already live — a second entry that never checked the
+         ridden-lines ledger, so a slow ledger let the initial
+         framing settle on an empty one. */
+      /* Dropping this waiter leaves the tab's auto-fit shot
+         unconsumed, so the auto-fit effect still frames when
+         the map becomes ready — nothing is lost, only deferred. */
     }, { when: () => variantRef.current === variant });
     if (variant === "spots") {
       /* The next record entry gets its one-shot auto-fit back
          (review round 1, finding 4: the flag used to stick after
          the first entry, so re-entering a record tab never
          re-framed). */
-      didAutoFitRef.current = false;
+      autoFitShotsRef.current.reset();
       /* A record focus would linger highlighted over the ghost
          fills with no ledger row to explain it — the fresh
          mount used to drop it with the map. */
@@ -5411,12 +5422,12 @@ function VisitedMapSection({
        now that a record tab is showing, and hand the new mount
        its one-shot auto-fit back so it frames the current
        municipality instead of opening on the runtime's default
-       place-fit. This runs after the paint above, so the
-       spots→record branch in the same commit still sees the
-       auto-fit as consumed and does not frame the old map. */
+       place-fit. The auto-fit effect re-runs for the new mount
+       (mapReady falls and rises), so the fresh mount frames
+       through the single entry point. */
     if (variant !== "spots" && mapDataStaleRef.current) {
       mapDataStaleRef.current = false;
-      didAutoFitRef.current = false;
+      autoFitShotsRef.current.reset();
       setMapAttempt((n) => n + 1);
     }
   }, [variant]);
@@ -6253,7 +6264,7 @@ function VisitedMapSection({
           setFocusGeometry(map, geometry, m);
           if (bounds) {
             map.fitBounds(bounds, {
-              padding: 36,
+              padding: mapFitPadding(),
               maxZoom: 15,
               duration: reduceMotion ? 0 : 1200,
             });
@@ -6356,7 +6367,7 @@ function VisitedMapSection({
           if (service) setFocusSection(map, service.id, painted.legs);
           if (bounds) {
             map.fitBounds(bounds, {
-              padding: 36,
+              padding: mapFitPadding(),
               maxZoom: 15,
               duration: reduceMotion ? 0 : 1200,
             });
@@ -6601,7 +6612,7 @@ function VisitedMapSection({
      automatic-retry budget is restored, and the default framing may
      run again for the new map. */
   const retryVisitedMap = () => {
-    didAutoFitRef.current = false;
+    autoFitShotsRef.current.reset();
     mapRetryCountRef.current = 0;
     setMapFailureReason(null);
     setMapFailed(false);
@@ -6755,6 +6766,11 @@ function VisitedMapSection({
                     target="_blank"
                     rel="noopener"
                     className="pointer-events-auto absolute bottom-0 right-0 bg-[var(--bg)] px-1 text-[10px]"
+                    style={
+                      fullscreen
+                        ? { bottom: bottomTabBarHeightPx() }
+                        : undefined
+                    }
                   >
                     © OpenStreetMap contributors, Map Data Legal Notices
                   </a>
@@ -8773,20 +8789,36 @@ export function App() {
   }, []);
   /* Esc leaves fullscreen (the CSS fullscreen has no browser
      chrome to do it), and the page behind the fixed map must not
-     scroll while the map owns the viewport. */
+     scroll while the map owns the viewport. The scroll lock is
+     the shared one (scroll-lock.ts): the spot detail sheet can
+     hold it at the same time, and the page unlocks only when
+     the last holder leaves. Escape is NOT consumed here when a
+     foreground layer already handled it: the detail sheet and
+     the delete dialog listen on document — ahead of this
+     window listener — and stop the event's propagation when
+     they close, so one Esc press closes only the front layer
+     (v89 review round 1, finding 5). */
   useEffect(() => {
     if (!mapFullscreen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMapFullscreen(false);
     };
     window.addEventListener("keydown", onKeyDown);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    const releaseScrollLock = acquireScrollLock();
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = prevOverflow;
+      releaseScrollLock();
     };
   }, [mapFullscreen]);
+  /* Fullscreen is carried between the MAP tabs only (v89 review
+     round 1, finding 4): the その他 tab has no map, so moving
+     there exits fullscreen — otherwise the map and its exit
+     button unmount while the flag (and the scroll lock above)
+     stay on, freezing the dashboard's scroll until the reader
+     happens back onto a map tab. */
+  useEffect(() => {
+    if (tab === "more") setMapFullscreen(false);
+  }, [tab]);
   /* Save-failure messages rendered next to the control that failed.
      Each mutation below reports through onError into one of these, so
      the SDK's bottom failure notice never duplicates an in-page error. */
@@ -9372,12 +9404,17 @@ export function App() {
 
   /* Escape closes the detail — or, while editing, first cancels the
      edit back to the detail view. The delete dialog, when open, owns
-     the key instead. */
+     the key instead. The event's propagation stops here: this
+     handler sits on document, ahead of the fullscreen map's window
+     listener, so one Esc press closes only this front layer and
+     leaves fullscreen for the next press (v89 review round 1,
+     finding 5). */
   useEffect(() => {
     if (selectedId === null || confirmDelete) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
+      e.stopPropagation();
       if (editing) {
         setEditing(null);
         requestAnimationFrame(() => {
@@ -9401,6 +9438,7 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
+      e.stopPropagation();
       setConfirmDelete(null);
     };
     document.addEventListener("keydown", onKey);
@@ -9448,11 +9486,14 @@ export function App() {
       }
     };
     document.addEventListener("keydown", onKey, true);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    /* The shared scroll lock (scroll-lock.ts), not a private
+       save/restore: over the fullscreen map this sheet is the
+       second holder, and the page unlocks only when both have
+       released (v89 review round 1, finding 5). */
+    const releaseScrollLock = acquireScrollLock();
     return () => {
       document.removeEventListener("keydown", onKey, true);
-      document.body.style.overflow = prevOverflow;
+      releaseScrollLock();
     };
   }, [sheetOpenMobile]);
 
@@ -10554,6 +10595,7 @@ export function App() {
       {/* ===== bottom tab bar ===== */}
       <nav
         aria-label="画面の切り替え"
+        data-bottom-tab-bar
         className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--border)] bg-[var(--surface)] pb-[env(safe-area-inset-bottom)]"
       >
         <div className="mx-auto flex w-full max-w-3xl xl:max-w-5xl 2xl:max-w-7xl">
