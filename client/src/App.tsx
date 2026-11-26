@@ -3105,16 +3105,16 @@ function ensureLineFocusLayers(map: MapLibreLike) {
    line key: two services can share one key — 総武本線 and
    総武快速線 both paint JR・総武線 — and focusing one must not
    hide the other (integrated review round 1, medium). Null
-   restores every line. The dashed unknown layer is excluded the
+   restores every line. The unknown layer is excluded the
    same way: a focused unknown ride must not show both as a
-   dashed whole path and as the focus highlight. */
+   thin whole path and as the focus highlight. */
 function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
   const filter = serviceId
-    ? ["all", ["!=", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["!=", ["get", "dashed"], true];
-  const dashedFilter = serviceId
-    ? ["all", ["==", ["get", "dashed"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["==", ["get", "dashed"], true];
+    ? ["all", ["!=", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
+    : ["!=", ["get", "unknown"], true];
+  const unknownFilter = serviceId
+    ? ["all", ["==", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
+    : ["==", ["get", "unknown"], true];
   if (map.getLayer("visited-lines-casing")) {
     map.setFilter("visited-lines-casing", filter);
   }
@@ -3122,7 +3122,7 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
     map.setFilter("visited-lines-color", filter);
   }
   if (map.getLayer("visited-lines-unknown")) {
-    map.setFilter("visited-lines-unknown", dashedFilter);
+    map.setFilter("visited-lines-unknown", unknownFilter);
   }
 }
 
@@ -3522,9 +3522,9 @@ function VisitedMapSection({
 
   /* The overlay features: one per painted leg, so a partial ride
      paints only its ridden section and an unknown ride paints
-     its whole path dashed. A leg's key is its formal line; the
+     its whole path thin. A leg's key is its formal line; the
      color comes from the asset entry for that key. `key`,
-     `serviceId` and `dashed` ride along so a line focus can
+     `serviceId` and `unknown` ride along so a line focus can
      filter its legs OUT of the normal line layers while the
      focus highlight replaces them (see setNormalLineExclusion)
      and so a map tap can resolve the SERVICE that painted the
@@ -3539,7 +3539,7 @@ function VisitedMapSection({
         key: string;
         serviceId: string;
         color: string;
-        dashed: boolean;
+        unknown: boolean;
       };
       geometry: {
         type: "LineString";
@@ -3556,7 +3556,7 @@ function VisitedMapSection({
             key: leg.key,
             serviceId,
             color: entry.color,
-            dashed: painted.unknown,
+            unknown: painted.unknown,
           },
           geometry: { type: "LineString", coordinates: leg.coords },
         });
@@ -5235,7 +5235,7 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "dashed"], true],
+              filter: ["!=", ["get", "unknown"], true],
               paint: {
                 "line-color": "#ffffff",
                 "line-width": 5.5,
@@ -5247,7 +5247,7 @@ function VisitedMapSection({
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "dashed"], true],
+              filter: ["!=", ["get", "unknown"], true],
               paint: {
                 "line-color": ["get", "color"],
                 "line-width": 3.5,
@@ -5255,21 +5255,25 @@ function VisitedMapSection({
               },
             },
             /* Unknown rides (a row with no section on record):
-               the whole path as a thin dashed line in the
-               service's color — visible, but clearly not a
-               ridden section. The minutes' rule: unknown is
-               never painted as if it were ridden. */
+               the whole path as a thin solid line in the
+               service's color — the same look as the unridden
+               ghost, never a ridden section's strength. The
+               reader's rule: ridden = solid, unridden and
+               unknown = thin, no dashes. The layer stays
+               separate from the ghost so a tap on the track
+               still resolves to the ride's ledger row and a
+               line focus can filter it out (see
+               setNormalLineExclusion). */
             {
               id: "visited-lines-unknown",
               type: "line",
               source: "visited-lines",
               layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["==", ["get", "dashed"], true],
+              filter: ["==", ["get", "unknown"], true],
               paint: {
                 "line-color": ["get", "color"],
-                "line-width": 2,
-                "line-opacity": 0.6,
-                "line-dasharray": [2, 2],
+                "line-width": 1.6,
+                "line-opacity": 0.25,
               },
             },
           ],
@@ -6624,7 +6628,7 @@ function VisitedMapSection({
      row emphasis applies. The highlight is the row's painted
      legs from the line coverage — a partial ride frames only its
      ridden section, a full ride its whole path, an unknown ride
-     its whole path dashed — so a multi-line service (JR埼京線)
+     its whole path — so a multi-line service (JR埼京線)
      finally has a track to frame. Delete / context-edit controls
      carry data-map-no-fly and never reach here (they are separate
      buttons, checked in RiddenLinesBlock). */
@@ -7321,7 +7325,7 @@ function VisitedMapSection({
             </p>
             {variant === "lines" && (
               <p className="mt-1 text-xs text-[var(--dim)]">
-                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
+                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は薄い線で描き、距離には数えません
               </p>
             )}
             {/* Legend, split per tab (subtask 1564): one shared
@@ -7383,7 +7387,7 @@ function VisitedMapSection({
               </span>
               <span className="flex items-center gap-1.5">
                 <span aria-hidden className="inline-block h-0 w-6 border-t-2 border-[#64748b] opacity-40" />
-                乗っていない区間（薄く表示）
+                乗っていない区間・区間不明（薄く表示）
               </span>
             </div>
             )}

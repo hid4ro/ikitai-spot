@@ -47,19 +47,21 @@ const layoutValue = (
 describe("variantPaintOps", () => {
   test("the ridden lines are the hero on the 路線 tab, the ghost on the 市区町村 tab", () => {
     /* Hero = the mount spec in App.tsx (casing 0.55 / 5.5, color
-       0.95 / 3.5, unknown 0.6). On the 市区町村 tab the lines are
-       the other tab's data, so they drop to ghost strength —
-       present as an underlay, never competing with the fills. */
+       0.95 / 3.5, unknown 0.25 — the unridden ghost's strength,
+       since an unknown ride paints in the unridden look). On the
+       市区町村 tab the lines are the other tab's data, so they
+       drop to ghost strength — present as an underlay, never
+       competing with the fills. */
     expect(paintValue("lines", "visited-lines-color", "line-opacity")).toBe(0.95);
     expect(paintValue("lines", "visited-lines-color", "line-width")).toBe(3.5);
     expect(paintValue("lines", "visited-lines-casing", "line-opacity")).toBe(0.55);
     expect(paintValue("lines", "visited-lines-casing", "line-width")).toBe(5.5);
-    expect(paintValue("lines", "visited-lines-unknown", "line-opacity")).toBe(0.6);
+    expect(paintValue("lines", "visited-lines-unknown", "line-opacity")).toBe(0.25);
     expect(paintValue("municipalities", "visited-lines-color", "line-opacity")).toBe(0.32);
     expect(paintValue("municipalities", "visited-lines-color", "line-width")).toBe(2);
     expect(paintValue("municipalities", "visited-lines-casing", "line-opacity")).toBe(0.15);
     expect(paintValue("municipalities", "visited-lines-casing", "line-width")).toBe(3);
-    expect(paintValue("municipalities", "visited-lines-unknown", "line-opacity")).toBe(0.28);
+    expect(paintValue("municipalities", "visited-lines-unknown", "line-opacity")).toBe(0.15);
   });
 
   test("municipalities are the hero on their tab and the ghost on the 路線 tab", () => {
@@ -107,7 +109,7 @@ describe("variantPaintOps", () => {
     expect(paintValue("spots", "visited-lines-color", "line-opacity")).toBe(0.32);
     expect(paintValue("spots", "visited-lines-color", "line-width")).toBe(2);
     expect(paintValue("spots", "visited-lines-casing", "line-opacity")).toBe(0.15);
-    expect(paintValue("spots", "visited-lines-unknown", "line-opacity")).toBe(0.28);
+    expect(paintValue("spots", "visited-lines-unknown", "line-opacity")).toBe(0.15);
     expect(
       paintValue("spots", "visited-areas-outline", "line-opacity"),
     ).toEqual(["interpolate", ["linear"], ["zoom"], 7, 0.22, 10, 0.32]);
