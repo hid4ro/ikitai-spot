@@ -254,6 +254,23 @@ export function createSharedLocationPublisher(): SharedLocationPublisher {
   };
 }
 
+/* Called when the live map is ready to move. A request may have
+   waited on another tab or for the map style while a newer position
+   was adopted. Consume stale requests too, so a later render cannot
+   replay them. A superseded or duplicate callback consumes nothing. */
+export function consumeRecordRetakeCameraRequest(
+  request: { seq: number; capturedAtMs: number },
+  latestRequestSeq: number | undefined,
+  appliedSeq: { current: number },
+  publisher: Pick<SharedLocationPublisher, "mayAdopt">,
+): boolean {
+  if (request.seq !== latestRequestSeq || request.seq <= appliedSeq.current) {
+    return false;
+  }
+  appliedSeq.current = request.seq;
+  return publisher.mayAdopt(request.capturedAtMs);
+}
+
 /* Which coordinates a framing run frames on after its
    publish attempt (v89 review round 6, P2-2). A read
    whose publish was refused — superseded, or an older

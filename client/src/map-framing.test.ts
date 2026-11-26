@@ -15,6 +15,7 @@ import {
   autoFitGate,
   autoFitMayApply,
   autoFitMayPublishLocation,
+  consumeRecordRetakeCameraRequest,
   createAutoFitRuns,
   createAutoFitShots,
   createSharedLocationPublisher,
@@ -646,5 +647,59 @@ describe("frame location after a refused publish (round 6, P2-2)", () => {
        owns the framing, so there is nothing to frame on and
        the run reports located as before. */
     expect(resolveFrameLocation({ lat: 35.6, lng: 139.6 }, false, null)).toBeNull();
+  });
+});
+
+describe("record-tab retake camera requests", () => {
+  const retake = { seq: 1, lat: 35.6, lng: 139.6, capturedAtMs: 1000 };
+  const polled = { lat: 35.7, lng: 139.7, capturedAtMs: 2000 };
+
+  test("a retake that finishes on Spots cannot move the record map on return after a newer poll", () => {
+    const publisher = createSharedLocationPublisher();
+    const appliedSeq = { current: 0 };
+
+    // The reader switched to Spots before the retake completed.
+    // The result is published, but its record-tab camera request waits.
+    expect(publisher.publish(retake)).toBe(true);
+    expect(appliedSeq.current).toBe(0);
+    expect(publisher.publish(polled)).toBe(true);
+
+    // Returning to the record tab releases the camera request.
+    expect(publisher.publish(retake)).toBe(false);
+    expect(consumeRecordRetakeCameraRequest(retake, retake.seq, appliedSeq, publisher)).toBe(false);
+    expect(appliedSeq.current).toBe(retake.seq);
+    expect(publisher.adopted()).toEqual(polled);
+  });
+
+  test("a retake still waiting for the map style is checked against a later poll", () => {
+    const publisher = createSharedLocationPublisher();
+    const appliedSeq = { current: 0 };
+    expect(publisher.publish(retake)).toBe(true);
+    const onMapReady = () =>
+      consumeRecordRetakeCameraRequest(retake, retake.seq, appliedSeq, publisher);
+
+    expect(publisher.publish(polled)).toBe(true);
+    expect(onMapReady()).toBe(false);
+    expect(appliedSeq.current).toBe(retake.seq);
+  });
+
+  test("a current retake at the adopted position moves the camera once", () => {
+    const publisher = createSharedLocationPublisher();
+    const appliedSeq = { current: 0 };
+    expect(publisher.publish(retake)).toBe(true);
+
+    expect(consumeRecordRetakeCameraRequest(retake, retake.seq, appliedSeq, publisher)).toBe(true);
+    expect(consumeRecordRetakeCameraRequest(retake, retake.seq, appliedSeq, publisher)).toBe(false);
+  });
+
+  test("a superseded callback does not consume the latest request", () => {
+    const publisher = createSharedLocationPublisher();
+    const appliedSeq = { current: 0 };
+    const latest = { ...retake, seq: 2 };
+    expect(publisher.publish(latest)).toBe(true);
+
+    expect(consumeRecordRetakeCameraRequest(retake, latest.seq, appliedSeq, publisher)).toBe(false);
+    expect(appliedSeq.current).toBe(0);
+    expect(consumeRecordRetakeCameraRequest(latest, latest.seq, appliedSeq, publisher)).toBe(true);
   });
 });

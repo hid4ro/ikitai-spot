@@ -115,6 +115,7 @@ import {
   autoFitGate,
   autoFitMayApply,
   autoFitMayPublishLocation,
+  consumeRecordRetakeCameraRequest,
   createAutoFitRuns,
   createAutoFitShots,
   createSharedLocationPublisher,
@@ -4445,21 +4446,21 @@ function VisitedMapSection({
       label: "Pixelの位置（0分前）",
       capturedAtMs: cameraRequest.capturedAtMs,
     });
-    /* The effect above already waits while the スポット tab is
-       showing, but that check runs before the style wait: if the
-       reader switches to the スポット tab while this camera
-       move is waiting, the move must not land on the スポット
-       map (review round 2, finding 6). The guard re-checks at
-       execution time, and the request is only marked applied
-       inside the callback — so a waiter dropped by the guard
-       leaves the request unapplied, and the variant change
-       re-runs this effect when a record tab returns. A duplicate
-       waiter (the effect re-running while one is still pending)
-       is harmless: the marker draw and the marking are
-       idempotent. */
+    /* A style wait can outlive a tab switch or a newer location
+       adoption. Leave requests pending on スポット, and check the
+       request and capture time again when the live map will move. */
     withLiveMapRef.current(
       (map) => {
-        appliedCameraSeqRef.current = cameraRequest.seq;
+        if (
+          !consumeRecordRetakeCameraRequest(
+            cameraRequest,
+            cameraRequestRef.current?.seq,
+            appliedCameraSeqRef,
+            sharedLocationPublisherRef.current,
+          )
+        ) {
+          return;
+        }
         try {
           drawCurrentLocationMarker(map, cameraRequest.lat, cameraRequest.lng, true);
         } catch {
