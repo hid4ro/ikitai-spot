@@ -75,7 +75,10 @@ import {
   type LineCoverage,
   type LineGeometryMap,
 } from "./line-geometry";
-import { simplifyGhostGeometry } from "./ghost-line-geometry";
+import {
+  ghostPointKey,
+  simplifyGhostRemainder,
+} from "./ghost-line-geometry";
 import {
   JAPAN_LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
@@ -3358,17 +3361,43 @@ function VisitedMapSection({
      the mount as one thin layer whose visibility the variant
      paint toggles. The remainder is then coarsened with the
      ghost simplification (subtask 1457): the pieces chained
-     and simplified at a 100 m tolerance, about a third of the
-     coordinates — the faint underlay does not need the record's
-     precision, and the ridden legs above it still draw at full
-     precision. The subtraction makes the remainder depend on
-     the coverage, so the per-key static cache behind
-     getGhostLineGeometry no longer applies: simplifyGhostGeometry
-     runs on the remainder inside this useMemo, which re-runs
-     only when the coverage changes. Slice endpoints survive
-     simplification exactly, so the painted/ghost boundary keeps
-     its precision. */
+     and simplified at the spec's 60 m tolerance, under half
+     the coordinates — the faint underlay does not need the
+     record's precision, and the ridden legs above it still
+     draw at full precision. The subtraction makes the
+     remainder depend on the coverage, so it is simplified per
+     key through simplifyGhostRemainder, whose memo re-runs a
+     line only when its remainder actually changed (review
+     round 1: a coverage change used to re-simplify all 597
+     lines). The painted legs' endpoints on each key ride along
+     as protected points, so the points where ghost meets paint
+     are pinned exactly — unpinned, chaining plus DP could drop
+     a shared point mid-run and the ghost slid off the paint
+     (17.5 m on 山手線）. Slice endpoints survive simplification
+     exactly, so the painted/ghost boundary keeps its
+     precision. */
   const unriddenLineFeatures = useMemo(() => {
+    /* Contact points with the solid paint, per formal-line
+       key: the endpoints of every known painted leg. Unknown
+       rides paint dashed over the ghost and subtract nothing,
+       so they contribute no contacts. */
+    const contactsByKey = new Map<string, Set<string>>();
+    for (const [, painted] of lineCoverage.perServiceLegs) {
+      if (painted.unknown) continue;
+      for (const leg of painted.legs) {
+        let set = contactsByKey.get(leg.key);
+        if (!set) {
+          set = new Set<string>();
+          contactsByKey.set(leg.key, set);
+        }
+        for (const end of [
+          leg.coords[0]!,
+          leg.coords[leg.coords.length - 1]!,
+        ]) {
+          set.add(ghostPointKey(end));
+        }
+      }
+    }
     const features: {
       type: "Feature";
       properties: { key: string; color: string };
@@ -3383,10 +3412,7 @@ function VisitedMapSection({
       features.push({
         type: "Feature",
         properties: { key, color: entry.color },
-        geometry: simplifyGhostGeometry({
-          type: "MultiLineString",
-          coordinates: legs.map((leg) => leg.coords),
-        }),
+        geometry: simplifyGhostRemainder(key, legs, contactsByKey.get(key)),
       });
     }
     return features;
