@@ -417,6 +417,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "jr-chuo-rapid/b2",
         from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
         to: { id: "003634", name: "立川", lng: 139.41396, lat: 35.69793 },
+        /* 国分寺 is a station every rapid stops at, so listing
+           it here puts it in serviceBoardingStationIds and
+           serviceOrderedStations, and the restored 2026-11-15
+           ride 国分寺→東京 can be registered as a section
+           (subtask 1572 — until now it was known only from the
+           migrated ride and validateSectionEndpoints refused it). */
+        stations: [
+          { id: "003606", name: "国分寺", lng: 139.48013, lat: 35.70045 },
+        ],
       },
       {
         id: "jr-chuo-rapid/b3",
@@ -522,6 +531,14 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "keio/b3",
         from: { id: "003821", name: "府中", lng: 139.4801, lat: 35.67219 },
         to: { id: "003934", name: "京王八王子", lng: 139.34298, lat: 35.65805 },
+        /* 聖蹟桜ヶ丘 is a station every 京王線 train stops at,
+           so listing it here makes the restored 2026-11-22 ride
+           府中→聖蹟桜ヶ丘 registerable as a section (subtask
+           1572 — until now it was known only from the migrated
+           ride and validateSectionEndpoints refused it). */
+        stations: [
+          { id: "003971", name: "聖蹟桜ヶ丘", lng: 139.44687, lat: 35.65079 },
+        ],
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -571,6 +588,14 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         from: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
         to: { id: "003390", name: "池袋", lng: 139.71108, lat: 35.72981 },
         direction: "outer",
+        /* 新宿 is a station every 埼京線 train stops at, so
+           listing it here makes the restored 2026-11-24 ride
+           新宿→大崎 registerable as a section (subtask 1572 —
+           until now it was known only from the migrated ride
+           and validateSectionEndpoints refused it). */
+        stations: [
+          { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        ],
       },
       {
         id: "jr-saikyo/b2",
@@ -617,6 +642,15 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         id: "rinkai/b1",
         from: { id: "003997", name: "新木場", lng: 139.82668, lat: 35.64587 },
         to: { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+        /* 品川シーサイド is a station every りんかい線 train
+           stops at, so listing it here makes the restored
+           2026-11-24 ride 大崎→品川シーサイド registerable as
+           a section (subtask 1572 — until now it was known
+           only from the migrated ride and validateSectionEndpoints
+           refused it). */
+        stations: [
+          { id: "004182", name: "品川シーサイド", lng: 139.7498, lat: 35.60979 },
+        ],
       },
     ],
     sources: [N02_SOURCE, LEDGER_SOURCE],
@@ -666,9 +700,13 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
            線→大崎, 内回り) can be recorded without widening the
            section to 品川. 大崎's coordinates are the master's
            existing value (also a segment end on 埼京線・りんかい
-           線). */
+           線). 目黒 sits inside this block too, so the restored
+           2026-11-24 ride 大崎→目黒 (outer) can be registered
+           as a section (subtask 1572 — until now it was known
+           only from the migrated ride). */
         stations: [
           { id: "004135", name: "大崎", lng: 139.72807, lat: 35.61985 },
+          { id: "004072", name: "目黒", lng: 139.71568, lat: 35.63272 },
         ],
       },
       {

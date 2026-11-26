@@ -804,12 +804,18 @@ describe("stage 2 blocks (subtask 1421)", () => {
   });
 
   test("validateSectionEndpoints: unlisted stations fail, reversed order passes (review round 1)", () => {
-    // 国分寺 is a real station on 中央線 but is known only from a
-    // migrated ride — it is listed on no block, so it still cannot
-    // be a section endpoint (stage 3 lists stations on blocks;
-    // migrated endpoints stay out).
+    // 国分寺 used to be the example here: a real station on 中央線
+    // known only from a migrated ride, listed on no block, so it
+    // could not be a section endpoint. Subtask 1572 listed it on
+    // jr-chuo-rapid/b2, so it now resolves (the five restored
+    // sections are covered in the subtask 1572 test below).
     expect(
       validateSectionEndpoints("jr-chuo-rapid", "003606", "004029"),
+    ).toBeNull();
+    // A station of another service still fails: 調布 is 京王線's
+    // block boundary, not 中央線's.
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003966", "004029"),
     ).toMatch(/not a station of/);
     // A section is one stretch of the line, travelled either
     // way: 高尾→東京 is the same stretch as 東京→高尾, so the
@@ -961,6 +967,62 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toEqual(["002914", "002785", "002803", "002984", "003589"]);
   });
 
+  test("validateSectionEndpoints: the five restored sections register (subtask 1572)", () => {
+    // The five ledger rides of 2026-11-15〜11-24 that were known
+    // only from their migrated endpoints: each far end is now
+    // listed on a block, so addRiddenSection accepts the section.
+    // Non-loop sections pass in either direction.
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003606", "003766"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-chuo-rapid", "003766", "003606"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-saikyo", "003700", "004135"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("jr-saikyo", "004135", "003700"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("rinkai", "004135", "004182"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("rinkai", "004182", "004135"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio", "003821", "003971"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio", "003971", "003821"),
+    ).toBeNull();
+    // The loop section needs its direction: 大崎→目黒 runs
+    // outer-loop order (via 五反田), the short way round.
+    expect(
+      validateSectionEndpoints("yamanote", "004135", "004072"),
+    ).toMatch(/needs a direction/);
+    expect(
+      validateSectionEndpoints("yamanote", "004135", "004072", "outer"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("yamanote", "004135", "004072", "inner"),
+    ).toBeNull();
+    // Ordered stations: block boundaries with the listed
+    // mid-block stations interleaved in running order.
+    expect(
+      serviceOrderedStations("jr-chuo-rapid").map((s) => s.id),
+    ).toEqual(["003766", "003677", "003700", "003606", "003634", "004029"]);
+    expect(
+      serviceOrderedStations("jr-saikyo").map((s) => s.id),
+    ).toEqual(["004135", "003700", "003390", "003155", "002914", "002909"]);
+    expect(
+      serviceOrderedStations("rinkai").map((s) => s.id),
+    ).toEqual(["003997", "004182", "004135"]);
+    expect(
+      serviceOrderedStations("keio").map((s) => s.id),
+    ).toEqual(["003700", "003966", "003821", "003971", "003934"]);
+  });
+
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {
     // 新宿→渋谷 inner runs yamanote/b2 （渋谷〜新宿) end to
     // end — a real ride. The old block-direction check
@@ -988,11 +1050,13 @@ describe("stage 2 blocks (subtask 1421)", () => {
       serviceOrderedStations("hokuso").map((s) => s.id),
     ).toEqual(["003248", "003187", "003083", "003125"]);
     // A loop closes on its first station, like the boundaries.
+    // 目黒 sits between 大崎 and 渋谷 on b1 (subtask 1572).
     expect(
       serviceOrderedStations("yamanote").map((s) => s.id),
     ).toEqual([
       "004095",
       "004135",
+      "004072",
       "003922",
       "003700",
       "003390",
@@ -1051,8 +1115,10 @@ describe("stage 2 blocks (subtask 1421)", () => {
     // A block boundary that is no segment end （調布 is a 京王線
     // block boundary only).
     expect(stationRefById("003966")?.name).toBe("調布");
-    // A migrated endpoint that is neither （国分寺 is only in the
-    // restored 中央線 section; 聖蹟桜ヶ丘 only in the 京王線 one).
+    // A migrated endpoint that is neither a segment end nor a
+    // block boundary （国分寺 was only in the restored 中央線
+    // section, 聖蹟桜ヶ丘 only in the 京王線 one, until subtask
+    // 1572 listed both on blocks as well).
     expect(stationRefById("003606")?.name).toBe("国分寺");
     expect(stationRefById("003971")?.name).toBe("聖蹟桜ヶ丘");
     // A station listed on a block (stage 3, subtask 1455).
@@ -1115,7 +1181,7 @@ describe("integrated review round 1: an explicit unlink is a confirmed answer", 
     const keio = serviceStationIds("keio");
     expect(keio.has("003700")).toBe(true); // 新宿, a segment end
     expect(keio.has("003966")).toBe(true); // 調布, a block boundary only
-    expect(keio.has("003971")).toBe(true); // 聖蹟桜ヶ丘, a migrated endpoint only
+    expect(keio.has("003971")).toBe(true); // 聖蹟桜ヶ丘, a migrated endpoint (listed on keio/b3 since subtask 1572)
     expect(keio.has("003606")).toBe(false); // 国分寺 belongs to 中央線
     const chuo = serviceStationIds("jr-chuo-rapid");
     expect(chuo.has("003606")).toBe(true);
