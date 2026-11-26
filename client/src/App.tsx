@@ -1208,8 +1208,13 @@ function buildCumulativeSeries(
    per-operator line bars (only operators with at least one ridden
    line), and the cumulative growth chart. Every number is computed
    here from the same ledger rows and bundled totals the map and the
-   headline counts above it use. */
+   headline counts above it use. The block is split per tab
+   (subtask 1482): the 市区町村 tab shows only the municipality
+   family's stats, the 路線 tab only the line family's — the same
+   graphs used to show on both tabs. The numbers themselves are
+   unchanged; only which family renders is gated by `variant`. */
 function ConquestCharts({
+  variant,
   municipalities,
   prefectures,
   totalVisited,
@@ -1222,6 +1227,12 @@ function ConquestCharts({
   lineProgressPct,
   onOperatorSelect,
 }: {
+  /* Which record tab shows this block (tab split, subtask 1482):
+     "municipalities" renders the municipality donut, the
+     per-prefecture bars and the municipality growth series;
+     "lines" renders the line donut, the per-operator bars and
+     the line growth series. */
+  variant: "municipalities" | "lines";
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
   totalVisited: number;
@@ -1282,25 +1293,29 @@ function ConquestCharts({
       <h3 className="font-[family-name:var(--font-display)] text-base font-bold">制覇グラフ</h3>
 
       <div className="mt-1 flex flex-wrap justify-center gap-2">
-        <ProgressDonut
-          title="市区町村"
-          value={totalVisited}
-          total={JAPAN_MUNICIPALITY_TOTAL}
-          pctText={municipalityProgressPct}
-          color={CHART_MUNICIPALITY_COLOR}
-          doneLabel="訪問済み"
-        />
-        <ProgressDonut
-          title="路線"
-          value={networkRiddenKm}
-          total={JAPAN_LINE_TOTAL_KM}
-          pctText={lineProgressPct}
-          color={CHART_LINE_COLOR}
-          doneLabel="乗車済み"
-          unit="km"
-        />
+        {variant === "municipalities" && (
+          <ProgressDonut
+            title="市区町村"
+            value={totalVisited}
+            total={JAPAN_MUNICIPALITY_TOTAL}
+            pctText={municipalityProgressPct}
+            color={CHART_MUNICIPALITY_COLOR}
+            doneLabel="訪問済み"
+          />
+        )}
+        {variant === "lines" && (
+          <ProgressDonut
+            title="路線"
+            value={networkRiddenKm}
+            total={JAPAN_LINE_TOTAL_KM}
+            pctText={lineProgressPct}
+            color={CHART_LINE_COLOR}
+            doneLabel="乗車済み"
+            unit="km"
+          />
+        )}
       </div>
-      {(completeServiceCount > 0 || unpreparedLines > 0) && (
+      {variant === "lines" && (completeServiceCount > 0 || unpreparedLines > 0) && (
         <p className="mt-1 text-center text-xs text-[var(--dim)]">
           {completeServiceCount > 0 && `完乗 ${completeServiceCount}系統`}
           {completeServiceCount > 0 && unpreparedLines > 0 && " ・ "}
@@ -1308,7 +1323,7 @@ function ConquestCharts({
         </p>
       )}
 
-      {prefRows.length > 0 && (
+      {variant === "municipalities" && prefRows.length > 0 && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">都道府県別（市区町村）</h4>
           <div className="mt-1">
@@ -1326,6 +1341,7 @@ function ConquestCharts({
         </div>
       )}
 
+      {variant === "lines" && (
       <div className="mt-4">
         <h4 className="text-sm font-medium">事業者別（路線）</h4>
         {operatorRows.length > 0 ? (
@@ -1372,6 +1388,7 @@ function ConquestCharts({
           </p>
         )}
       </div>
+      )}
 
       {timeline.length > 0 && (
         <div className="mt-4">
@@ -1395,8 +1412,12 @@ function ConquestCharts({
                   formatter={(value, name) => [`${Number(value).toLocaleString()}件`, name]}
                 />
                 <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                <Area type="stepAfter" dataKey="municipalities" name="市区町村" stroke={CHART_MUNICIPALITY_COLOR} fill={CHART_MUNICIPALITY_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
-                <Area type="stepAfter" dataKey="lines" name="路線" stroke={CHART_LINE_COLOR} fill={CHART_LINE_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
+                {variant === "municipalities" && (
+                  <Area type="stepAfter" dataKey="municipalities" name="市区町村" stroke={CHART_MUNICIPALITY_COLOR} fill={CHART_MUNICIPALITY_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
+                )}
+                {variant === "lines" && (
+                  <Area type="stepAfter" dataKey="lines" name="路線" stroke={CHART_LINE_COLOR} fill={CHART_LINE_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
+                )}
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -6839,24 +6860,36 @@ function VisitedMapSection({
 
           {variant !== "spots" && (
           <div className="mt-2 xl:col-start-1 xl:row-start-3">
-            {prefectures.length > 0 && (
+            {/* The stats under the map are split per tab (subtask
+                1482), like the 制覇グラフ below: the 市区町村 tab
+                shows only the municipality headline, the 路線 tab
+                only the line headline and its distance note. The
+                border legend underneath stays on both tabs — it
+                explains the map itself, not one family's stats. */}
+            {variant === "municipalities" && prefectures.length > 0 && (
               <p className="text-sm">
                 {prefectures.map((p) => `${p.name} ${p.total}`).join(" ・ ")}
               </p>
             )}
             <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-              <span>
-                市区町村 {totalVisited.toLocaleString()} /{" "}
-                {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
-              </span>
-              <span>
-                路線 {networkRiddenKmText} /{" "}
-                {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
-              </span>
+              {variant === "municipalities" && (
+                <span>
+                  市区町村 {totalVisited.toLocaleString()} /{" "}
+                  {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
+                </span>
+              )}
+              {variant === "lines" && (
+                <span>
+                  路線 {networkRiddenKmText} /{" "}
+                  {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
+                </span>
+              )}
             </p>
-            <p className="mt-1 text-xs text-[var(--dim)]">
-              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
-            </p>
+            {variant === "lines" && (
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
+              </p>
+            )}
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
                 ward borders dashed and lightest) is not
@@ -6892,6 +6925,7 @@ function VisitedMapSection({
               </span>
             </div>
             <ConquestCharts
+              variant={variant}
               municipalities={municipalities}
               prefectures={prefectures}
               totalVisited={totalVisited}
