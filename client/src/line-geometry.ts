@@ -1440,19 +1440,28 @@ export function sectionBounds(
   ];
 }
 
-/* Bounding box of the WHOLE formal line(s) a set of painted legs
-   belongs to — the legs' own bounds unioned with the full asset
-   shape of every formal-line key the legs touch (subtask 1589,
-   the reader's request of 2026-11-26: a line focus frames the
-   whole line, unridden stretches included, not just the ridden
-   section). The asset shape is what the map draws — the painted
-   legs are paths through it and the unridden ghost is its
-   remainder — so the whole line as framed is the whole line as
-   drawn. A key missing from the asset contributes nothing (its
-   legs still count through their own coords), and legs with no
-   key at all fall back to sectionBounds. Null when neither the
-   legs nor their keys' shapes carry any point. */
+/* Bounding box of the WHOLE SERVICE a set of painted legs
+   belongs to — the legs' own bounds unioned with the service's
+   full path (subtask 1589, the reader's request of 2026-11-26:
+   a line focus frames the whole line, unridden stretches
+   included, not just the ridden section). The "whole line" a
+   focus frames is the SERVICE's whole run: for a service that
+   is one formal line end to end the two coincide, but a branch
+   service runs on only a slice of its formal lines — むさしの号
+   touches 東北線 for just 与野〜大宮, while the formal line's
+   asset shape runs 東京〜青森. Unioning the asset shapes (the
+   pre-1618 behaviour) framed that whole shape, so focusing
+   むさしの号 zoomed the map out to all of Japan (subtask 1618,
+   the reader's report of 2026-11-27). The path is rebuilt from
+   the CURRENT master: a full ride recorded at an older master
+   version keeps its snapshot path in the coverage, and those
+   painted legs are unioned in here too, so the frame covers
+   the recorded run as well. A service whose path cannot be
+   built (a segment missing from the asset) contributes nothing
+   beyond the painted legs. Null when neither the legs nor the
+   path carry any point. */
 export function wholeLineBounds(
+  service: ServiceMasterEntry,
   legs: readonly PathLeg[],
   geometries: LineGeometryMap,
 ): [[number, number], [number, number]] | null {
@@ -1466,22 +1475,12 @@ export function wholeLineBounds(
     if (lng > maxLng) maxLng = lng;
     if (lat > maxLat) maxLat = lat;
   };
-  const keys = new Set<string>();
   for (const leg of legs) {
-    keys.add(leg.key);
     for (const [lng, lat] of leg.coords) extend(lng, lat);
   }
-  for (const key of keys) {
-    const entry = geometries[key];
-    if (!entry) continue;
-    for (const piece of entry.geometry.coordinates) {
-      for (const point of piece) {
-        const lng = point[0];
-        const lat = point[1];
-        if (lng === undefined || lat === undefined) continue;
-        extend(lng, lat);
-      }
-    }
+  const path = buildServicePath(service, geometries);
+  for (const leg of path.legs) {
+    for (const [lng, lat] of leg.coords) extend(lng, lat);
   }
   if (!Number.isFinite(minLng)) return null;
   return [

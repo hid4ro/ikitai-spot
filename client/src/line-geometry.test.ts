@@ -37,6 +37,7 @@ import {
   SERVICE_MASTER_VERSION,
   serviceById,
   serviceFullPathSnapshot,
+  type ServiceMasterEntry,
   type StationRef,
 } from "../../shared/service-master";
 
@@ -979,7 +980,7 @@ describe("sectionBounds", () => {
   });
 });
 
-describe("wholeLineBounds (the whole-line focus fit, subtask 1589)", () => {
+describe("wholeLineBounds (the whole-service focus fit, subtasks 1589 + 1618)", () => {
   test("a partial ride frames the whole line, not just its section", () => {
     /* 新宿→調布 only: the section bounds stop at 調布, but the
        whole-line bounds must still reach 京王八王子 in the
@@ -988,7 +989,7 @@ describe("wholeLineBounds (the whole-line focus fit, subtask 1589)", () => {
     const clip = clipServicePath(path, S.新宿, S.調布)!;
     const section = sectionBounds(clip.legs)!;
     expect(section[0][0]).toBeGreaterThan(139.44);
-    const whole = wholeLineBounds(clip.legs, GEOMETRIES);
+    const whole = wholeLineBounds(serviceById("keio")!, clip.legs, GEOMETRIES);
     expect(whole).not.toBeNull();
     const [[minLng, minLat], [maxLng, maxLat]] = whole!;
     expect(minLng).toBeLessThan(139.36);
@@ -1004,14 +1005,73 @@ describe("wholeLineBounds (the whole-line focus fit, subtask 1589)", () => {
 
   test("a full ride's whole-line bounds equal its section bounds' reach", () => {
     const path = servicePath("keio");
-    const whole = wholeLineBounds(path.legs, GEOMETRIES)!;
+    const whole = wholeLineBounds(serviceById("keio")!, path.legs, GEOMETRIES)!;
     const section = sectionBounds(path.legs)!;
     expect(whole[0][0]).toBeLessThanOrEqual(section[0][0]);
     expect(whole[1][0]).toBeGreaterThanOrEqual(section[1][0]);
   });
 
-  test("empty legs give null, and a key missing from the asset falls back to the legs", () => {
-    expect(wholeLineBounds([], GEOMETRIES)).toBeNull();
+  test("a branch service frames only its own run, not its formal lines' full shapes (subtask 1618)", () => {
+    /* むさしの号 runs 府中本町→大宮 but touches 東北線 for just
+       与野〜大宮; the formal line's asset shape runs 東京〜青森
+       (lat up to ~39.7). Framing the asset shape zoomed the map
+       out to all of Japan — the frame must stay on the service's
+       own run (lat below 36, the 大宮 area). The 2026-11-26 ride
+       北府中→大宮 is the painted section here. */
+    const path = servicePath("jr-musashino-omiya");
+    const clip = clipServicePath(path, S.北府中, S.大宮)!;
+    const whole = wholeLineBounds(
+      serviceById("jr-musashino-omiya")!,
+      clip.legs,
+      GEOMETRIES,
+    )!;
+    expect(whole).toEqual(sectionBounds(path.legs)!);
+    expect(whole[1][1]).toBeLessThan(36);
+    /* しもうさ号 shares the same 東北線 slice the other way:
+       its frame likewise stays on 大宮〜西船橋. */
+    const shimousaPath = servicePath("jr-shimousa");
+    const shimousaWhole = wholeLineBounds(
+      serviceById("jr-shimousa")!,
+      shimousaPath.legs,
+      GEOMETRIES,
+    )!;
+    expect(shimousaWhole).toEqual(sectionBounds(shimousaPath.legs)!);
+    expect(shimousaWhole[1][1]).toBeLessThan(36);
+    /* 京王新線 shares 京王線's key with the main-line service:
+       its frame is 新宿〜笹塚 only, never out to 高尾. */
+    const newLinePath = servicePath("keio-new-line");
+    const newLineWhole = wholeLineBounds(
+      serviceById("keio-new-line")!,
+      newLinePath.legs,
+      GEOMETRIES,
+    )!;
+    expect(newLineWhole).toEqual(sectionBounds(newLinePath.legs)!);
+    expect(newLineWhole[0][0]).toBeGreaterThan(139.6);
+  });
+
+  test("a service whose path cannot be built falls back to the painted legs, and no points at all give null", () => {
+    /* A segment on a formal line the asset does not carry:
+       buildServicePath records it missing and yields no legs,
+       so the frame is the painted legs' own bounds. */
+    const unbuildable: ServiceMasterEntry = {
+      id: "test-unbuildable",
+      pathId: "test-unbuildable",
+      displayName: "テスト",
+      ledgerNames: ["テスト"],
+      operator: "テスト鉄道",
+      segments: [
+        {
+          formalLineName: "no",
+          formalLineKey: "no|such|line",
+          from: S.新宿,
+          to: S.調布,
+        },
+      ],
+      blocks: [],
+      sources: [],
+      verifiedAt: null,
+      verificationStatus: "draft",
+    };
     const legs = [
       {
         key: "no|such|line",
@@ -1025,10 +1085,11 @@ describe("wholeLineBounds (the whole-line focus fit, subtask 1589)", () => {
         lengthKm: 1,
       },
     ];
-    expect(wholeLineBounds(legs, GEOMETRIES)).toEqual([
+    expect(wholeLineBounds(unbuildable, legs, GEOMETRIES)).toEqual([
       [139.0, 35.0],
       [139.1, 35.1],
     ]);
+    expect(wholeLineBounds(unbuildable, [], GEOMETRIES)).toBeNull();
   });
 });
 
