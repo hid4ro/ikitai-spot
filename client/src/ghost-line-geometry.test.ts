@@ -466,6 +466,77 @@ describe("pinned junctions and contacts (review round 1)", () => {
   });
 });
 
+describe("endpoint touches (review round 2)", () => {
+  test("a chord through a nearby branch's tip does not connect the branch", () => {
+    /* The reviewer's synthetic case: the main line bows 30 m
+       through P, and a branch's tip T sits exactly on the main
+       line's end-to-end chord, ~30 m clear of the original
+       polyline. Proper-crossing checks see nothing (the chord
+       and the branch only TOUCH, at T), so unguarded DP draws
+       the chord straight through T and the branch reads as
+       joined to the main line. The touch check reverts the
+       chord to the original points, and the branch stays the
+       full 30 m clear. */
+    const T = M(500, 0);
+    const P = M(500, 30);
+    const g = geometry([
+      [M(0, 0), P, M(1000, 0)],
+      [T, M(500, -200)],
+    ]);
+    /* The fixture's premise: T is ~30 m from the original main
+       line (nearest approach to either leg of the bow). */
+    const clearance = distanceToPolylineM(T, g.coordinates[0]! as Pt[]);
+    expect(clearance).toBeGreaterThan(25);
+    expect(clearance).toBeLessThan(35);
+    const coarse = simplifyGhostGeometry(g, 60);
+    const main = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(0, 0)[0] && p[1] === M(0, 0)[1]),
+    );
+    expect(main).toBeDefined();
+    /* Not connected: the drawn main line keeps its distance
+       from the tip instead of passing through it. */
+    expect(distanceToPolylineM(T, main! as Pt[])).toBeGreaterThan(25);
+    /* The chord fell back to the original span: P survives as
+       an exact vertex. */
+    expect(main!.some((p) => p[0] === P[0] && p[1] === P[1])).toBe(true);
+    /* The branch itself is untouched, with T still its end. */
+    const branch = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(500, -200)[0] && p[1] === M(500, -200)[1]),
+    );
+    expect(branch).toBeDefined();
+    const branchEnds = [
+      branch![0]!,
+      branch![branch!.length - 1]!,
+    ];
+    expect(
+      branchEnds.some((p) => p[0] === T[0] && p[1] === T[1]),
+    ).toBe(true);
+  });
+
+  test("a chord through a junction the span does not hold is reverted too", () => {
+    /* The touch rule is not only about dead-end tips: here the
+       main line's chord passes through J, a junction of two
+       OTHER strands crossing there. The original main line
+       passes 30 m north of J and never touches it; drawing the
+       chord through J would plant the main line on their
+       junction. */
+    const J = M(500, 0);
+    const P = M(500, 30);
+    const g = geometry([
+      [M(0, 0), P, M(1000, 0)],
+      [M(500, -200), J],
+      [J, M(500, 200)],
+    ]);
+    const coarse = simplifyGhostGeometry(g, 60);
+    const main = coarse.coordinates.find((run) =>
+      run.some((p) => p[0] === M(0, 0)[0] && p[1] === M(0, 0)[1]),
+    );
+    expect(main).toBeDefined();
+    expect(distanceToPolylineM(J, main! as Pt[])).toBeGreaterThan(25);
+    expect(main!.some((p) => p[0] === P[0] && p[1] === P[1])).toBe(true);
+  });
+});
+
 describe("simplifyGhostRemainder memo (review round 1)", () => {
   const leg = (toT: number, coords: Pt[]): GhostRemainderLeg => ({
     edge: "edge:1",

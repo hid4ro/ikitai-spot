@@ -37,12 +37,19 @@
  * strand (鹿児島線 gained three self-crossings that way). After
  * simplification, any chord that properly crosses an original
  * segment, or another chord whose original span it does not
- * cross, is replaced by the original points of its span.
+ * cross, is replaced by the original points of its span. The
+ * same holds for a contact: a chord that touches an original
+ * vertex its span never touched glues that vertex's strand onto
+ * the line (review round 2 — a branch tip 30 m clear of the
+ * original shape landed exactly on the simplified main line), so
+ * such a chord falls back to its span's original points too.
  *
  * Guarantee: every vertex of the original shape sits within
  * GHOST_SIMPLIFY_TOLERANCE_M of the coarse shape; run endpoints,
  * junctions and caller-protected points are kept exactly; and
- * the coarse shape has no proper crossings the original lacks.
+ * the coarse shape has no proper crossings the original lacks
+ * and touches no original vertex the touching span does not
+ * already touch.
  *
  * Caching: the static per-key cache (getGhostLineGeometry) fits
  * the whole-line ghost of a line with no rides. The 路線 tab's
@@ -285,21 +292,28 @@ function segmentsProperlyCross(
    span between those two indices. */
 type RunWork = { orig: LngLat[]; kept: number[] };
 
-/* Find the simplified segments that would draw a crossing the
-   original shape does not have, as "run:segment" keys. Two
-   passes (review round 1):
+/* Find the simplified segments that would draw a crossing — or,
+   since review round 2, a contact — the original shape does not
+   have, as "run:segment" keys. Three passes:
  *  1. A chord properly crossing ANY original segment is new —
      the original draws no segment between the chord's ends, so
      even a crossing with the chord's own span (a hairpin the
      chord cuts across) is invented by the simplification.
+ *  1b. A chord touching an original vertex outside its own span
+     is new: the vertex is another strand's tip (or a vertex of
+     one), the span never touched it, and the drawn chord glues
+     the strand onto this line. A vertex the span itself holds
+     (a shared junction point is one of the span's own vertices)
+     is a genuine contact and passes.
  *  2. Two chords properly crossing each other are new unless
      their original spans already cross (parallel strands the
      asset itself entwines). A chord already reverted in pass 1
-     needs no pass-2 check: the other chord was tested against
-     its span's segments in pass 1, so reverting the first chord
-     to its span cannot leave a new crossing behind.
+     or 1b needs no pass-2 check: the other chord was tested
+     against its span's segments in pass 1 and against its
+     span's vertices in pass 1b, so reverting the first chord
+     to its span cannot leave a new crossing or contact behind.
  * Reverted segments are replaced by their spans' original
- * points, which by construction cross nothing new. */
+ * points, which by construction cross and touch nothing new. */
 function findNewCrossingSegments(runs: readonly RunWork[]): Set<string> {
   type Seg = { a: LngLat; b: LngLat };
   const origSegs: Seg[] = [];
@@ -369,6 +383,56 @@ function findNewCrossingSegments(runs: readonly RunWork[]): Set<string> {
         break;
       }
     }
+  }
+  /* Pass 1b (review round 2): the endpoint-touch check. The
+     distance is to the segment (the helper clamps the
+     projection), so a strand tip landing just past a chord's
+     end counts too — within TOUCH_EPS_M the two read as
+     connected at any zoom the ghost is drawn at (a 1.6 px line,
+     ~2 m per pixel at zoom 15). */
+  const TOUCH_EPS_M = 1;
+  const vertexByKey = new Map<string, LngLat>();
+  for (const rw of runs) {
+    for (const p of rw.orig) {
+      if (!vertexByKey.has(pointKey(p))) vertexByKey.set(pointKey(p), p);
+    }
+  }
+  const vertexList = [...vertexByKey.values()];
+  const vertGrid = new Map<string, number[]>();
+  vertexList.forEach((p, id) => {
+    const k = `${Math.floor(p[0] / CELL)},${Math.floor(p[1] / CELL)}`;
+    const list = vertGrid.get(k) ?? [];
+    list.push(id);
+    vertGrid.set(k, list);
+  });
+  for (const s of simpSegs) {
+    if (reverted.has(`${s.run}:${s.pos}`)) continue;
+    const spanKeys = new Set<string>();
+    for (let i = s.from; i <= s.to; i++) {
+      spanKeys.add(pointKey(runs[s.run]!.orig[i]!));
+    }
+    /* Candidate vertices live in the cells the chord's bounding
+       box overlaps, padded by a hair so a tip just across a
+       cell edge is not missed. */
+    const PAD = 0.0001;
+    const minX = Math.floor((Math.min(s.a[0], s.b[0]) - PAD) / CELL);
+    const maxX = Math.floor((Math.max(s.a[0], s.b[0]) + PAD) / CELL);
+    const minY = Math.floor((Math.min(s.a[1], s.b[1]) - PAD) / CELL);
+    const maxY = Math.floor((Math.max(s.a[1], s.b[1]) + PAD) / CELL);
+    let touched = false;
+    for (let x = minX; x <= maxX && !touched; x++) {
+      for (let y = minY; y <= maxY && !touched; y++) {
+        for (const id of vertGrid.get(`${x},${y}`) ?? []) {
+          const p = vertexList[id]!;
+          if (spanKeys.has(pointKey(p))) continue;
+          if (perpendicularDistanceM(p, s.a, s.b) <= TOUCH_EPS_M) {
+            touched = true;
+            break;
+          }
+        }
+      }
+    }
+    if (touched) reverted.add(`${s.run}:${s.pos}`);
   }
   const spansCross = (
     a: (typeof simpSegs)[number],
