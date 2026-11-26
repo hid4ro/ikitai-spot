@@ -41,7 +41,7 @@ import { RIDDEN_LINE_GEOMETRIES } from "../client/src/assets/visited-lines";
 
 describe("master shape", () => {
   test("every entry carries the four required metadata fields", () => {
-    expect(SERVICE_MASTER.length).toBe(12);
+    expect(SERVICE_MASTER.length).toBe(13);
     for (const entry of SERVICE_MASTER) {
       expect(entry.id).toMatch(/^[a-z0-9-]+$/);
       expect(entry.sources.length).toBeGreaterThan(0);
@@ -144,6 +144,7 @@ describe("service → formal line expansion", () => {
     expect(formalLineNames("jr-sobu-rapid")).toEqual(["総武線"]);
     expect(formalLineNames("jr-sobu-local")).toEqual(["総武線"]);
     expect(formalLineNames("keio")).toEqual(["京王線"]);
+    expect(formalLineNames("keio-new-line")).toEqual(["京王線"]);
     expect(formalLineNames("rinkai")).toEqual(["臨海副都心線"]);
     expect(formalLineNames("tobu-noda")).toEqual(["野田線"]);
   });
@@ -264,6 +265,11 @@ describe("ledger-name lookup", () => {
     expect(serviceByLedgerName("東武アーバンパークライン")?.id).toBe(
       "tobu-noda",
     );
+  });
+
+  test("「京王新線」 is its own service, not the 京王線 (subtask 1574)", () => {
+    expect(serviceByLedgerName("京王新線")?.id).toBe("keio-new-line");
+    expect(serviceByLedgerName("京王線")?.id).toBe("keio");
   });
 
   test("「臨海副都心線（りんかい線）」 with the parenthetical is the rinkai service (review round 2)", () => {
@@ -522,8 +528,12 @@ describe("save-time validation (review round 2)", () => {
     expect(
       serviceExistsAtMasterVersion("tobu-noda", SERVICE_MASTER_VERSION),
     ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("keio-new-line", SERVICE_MASTER_VERSION),
+    ).toBe(true);
     // The frozen migration master held the nine migrated
-    // services — and not the two added on 2026-11-26.
+    // services — and not the two added on 2026-11-26, nor the
+    // two added on 2026-11-27.
     expect(serviceExistsAtMasterVersion("keio", MIGRATED_MASTER_VERSION)).toBe(true);
     expect(
       serviceExistsAtMasterVersion("jr-musashino", MIGRATED_MASTER_VERSION),
@@ -536,6 +546,9 @@ describe("save-time validation (review round 2)", () => {
     ).toBe(false);
     expect(
       serviceExistsAtMasterVersion("tobu-noda", MIGRATED_MASTER_VERSION),
+    ).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("keio-new-line", MIGRATED_MASTER_VERSION),
     ).toBe(false);
     // Unknown versions and unknown services hold nothing.
     expect(serviceExistsAtMasterVersion("keio", "bogus")).toBe(false);
@@ -1021,6 +1034,48 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       serviceOrderedStations("keio").map((s) => s.id),
     ).toEqual(["003700", "003966", "003821", "003971", "003934"]);
+  });
+
+  test("validateSectionEndpoints: the 京王新線 sections register (subtask 1574)", () => {
+    // The four stations of the new service: any pair registers,
+    // either way round (non-loop). The 2026-11-25 ride 新宿→幡ヶ谷
+    //付近 is NOT registered — its alighting station is unconfirmed
+    // — but the master entry makes a future ride registerable.
+    expect(
+      validateSectionEndpoints("keio-new-line", "003700", "003764"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003764", "003700"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003764", "003791"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003791", "003764"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003791", "003806"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003806", "003791"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003700", "003806"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("keio-new-line", "003806", "003700"),
+    ).toBeNull();
+    // A station of the parent 京王線 that the 新線 never calls at
+    // is not an endpoint here: 調布 is keio's block boundary, not
+    // a 京王新線 station.
+    expect(
+      validateSectionEndpoints("keio-new-line", "003700", "003966"),
+    ).toMatch(/not a station of/);
+    // Ordered stations: boundaries with the listed mid-block
+    // stations interleaved in running order.
+    expect(
+      serviceOrderedStations("keio-new-line").map((s) => s.id),
+    ).toEqual(["003700", "003764", "003791", "003806"]);
   });
 
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {

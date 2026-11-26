@@ -792,6 +792,44 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     note:
       "東武アーバンパークラインの愛称でも呼ばれる（ledgerNames に両方持つ）。大宮の座標はマスタの既存値（jr-saikyo・jr-musashino-omiya と同一。野田線形状からの距離は約126mで、300mのしきい値の内側）。全長は営業キロ62.7km。2026-11-26の乗車は大宮→七光台（約25.1km）。人手の地図照合は未了（draftのまま）。",
   },
+  {
+    id: "keio-new-line",
+    pathId: "keio-new-line",
+    displayName: "京王新線",
+    ledgerNames: ["京王新線"],
+    operator: "京王電鉄",
+    segments: [
+      {
+        formalLineName: "京王線",
+        formalLineKey: "京王線|京王電鉄",
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003806", name: "笹塚", lng: 139.66717, lat: 35.67366 },
+      },
+    ],
+    blocks: [
+      {
+        id: "keio-new-line/b1",
+        from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
+        to: { id: "003806", name: "笹塚", lng: 139.66717, lat: 35.67366 },
+        /* 初台・幡ヶ谷 are stations every 京王新線 train stops
+           at, so listing them here makes a ride between any two
+           of the four stations registerable as a section (subtask
+           1574 — the 2026-11-25 ride 新宿→幡ヶ谷付近 is NOT
+           registered: its alighting station is unconfirmed, so
+           only the master entry is added). Coordinates are the
+           N02 station-point centroids. */
+        stations: [
+          { id: "003764", name: "初台", lng: 139.68827, lat: 35.68142 },
+          { id: "003791", name: "幡ヶ谷", lng: 139.67772, lat: 35.67676 },
+        ],
+      },
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note:
+      "N02（2025年度版）に「京王新線」の独立した路線単位は無く、4駅はすべて京王線|京王電鉄に含まれる（新線新宿は新宿と同一コード 003700）。そのため formalLineKey は既存の keio と同じ「京王線|京王電鉄」を使う（監督の判断、むさしの号と同じ形）。新宿→笹塚の形状は新線側の分岐（N02グラフで 3.57km、営業キロ 3.6km）で、本線側より短い。新宿の座標はマスタ既存値（keio・jr-saikyo と同一。N02の路線別重心とは約110mの開きがあるが、300mのしきい値の内側）を再利用し、同一駅に2つの座標を作らない。2026-11-25の乗車（新宿→幡ヶ谷付近）は降車駅が未確定のため区間登録はしない。人手の地図照合は未了（draftのまま）。",
+  },
 ];
 
 export function serviceById(id: string): ServiceMasterEntry | undefined {
@@ -1716,10 +1754,12 @@ export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
    whole master of 2026-11-24; jr-musashino-omiya and
    jr-shimousa first appear at SERVICE_MASTER_VERSION
    (2026-11-26), and tobu-noda first appears at
-   SERVICE_MASTER_VERSION (2026-11-27). A full ride's range must be reproducible from
-   the version it names, so a version whose master never held
-   the service cannot record one (review batch round 1,
-   subtask 1593). An unknown version holds nothing. */
+   SERVICE_MASTER_VERSION (2026-11-27). keio-new-line also first
+   appears at SERVICE_MASTER_VERSION (2026-11-27, subtask 1574).
+   A full ride's range must be reproducible from the version it
+   names, so a version whose master never held the service cannot
+   record one (review batch round 1, subtask 1593). An unknown
+   version holds nothing. */
 export function serviceExistsAtMasterVersion(
   serviceId: string,
   version: string,
