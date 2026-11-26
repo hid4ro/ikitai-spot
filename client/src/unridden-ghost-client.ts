@@ -186,8 +186,8 @@ async function createBlobWorkerTransport(
       };
     },
     setOnError: (cb) => {
-      worker.onerror = () => cb();
-      worker.onmessageerror = () => cb();
+      worker.addEventListener("error", cb);
+      worker.addEventListener("messageerror", cb);
     },
     close: () => {
       worker.terminate();

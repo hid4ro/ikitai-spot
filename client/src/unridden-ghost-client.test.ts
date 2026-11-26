@@ -7,6 +7,7 @@
    client/src/unridden-ghost-client.test.ts */
 import { describe, expect, test } from "bun:test";
 import {
+  createUnriddenGhostClient,
   UnriddenGhostClient,
   type GhostWorkerTransport,
 } from "./unridden-ghost-client";
@@ -216,5 +217,34 @@ describe("UnriddenGhostClient", () => {
     });
     expect(inlineCalls).toEqual([wireB]);
     expect(transport.closed).toBe(true);
+  });
+
+  test("a browser messageerror event falls back from the Blob worker", async () => {
+    const originalWorker = Object.getOwnPropertyDescriptor(globalThis, "Worker")!;
+    const posted = Promise.withResolvers<void>();
+    let terminated = false;
+    class WorkerWithMessageError extends EventTarget {
+      postMessage(): void {
+        posted.resolve();
+        this.dispatchEvent(new MessageEvent("messageerror"));
+      }
+      terminate(): void {
+        terminated = true;
+      }
+    }
+    Object.defineProperty(globalThis, "Worker", {
+      ...originalWorker,
+      value: WorkerWithMessageError,
+    });
+    try {
+      const script = encodeURIComponent(JSON.stringify("/* test worker */"));
+      const client = createUnriddenGhostClient(`data:application/json,${script}`);
+      const result = client.request(wireA);
+      await posted.promise;
+      expect(terminated).toBe(true);
+      expect((await result)?.features).toHaveLength(597);
+    } finally {
+      Object.defineProperty(globalThis, "Worker", originalWorker);
+    }
   });
 });
