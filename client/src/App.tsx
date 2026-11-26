@@ -111,6 +111,7 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
+import { formatProgressValue, progressTickLabel } from "./progress-format";
 import {
   autoFitGate,
   autoFitMayApply,
@@ -1194,9 +1195,9 @@ function StackedProgressBars({
   return (
     <div className="text-[var(--dim)]" aria-hidden="true">
       <ResponsiveContainer width="100%" height={rows.length * 38 + 46}>
-        <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 0 }}>
+        <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
           <CartesianGrid horizontal={false} stroke="currentColor" strokeOpacity={0.12} />
-          <XAxis type="number" domain={[0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} />
+          <XAxis type="number" domain={[0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} tickFormatter={(value: number) => formatProgressValue(value)} />
           <YAxis
             type="category"
             dataKey="name"
@@ -1204,14 +1205,11 @@ function StackedProgressBars({
             tick={{ fontSize: 11 }}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(name: string) => {
-              const row = byName.get(name);
-              return row ? `${name} ${row.done}/${row.total}` : name;
-            }}
+            tickFormatter={(name: string) => progressTickLabel(name, byName.get(name))}
           />
           <Tooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(value, name) => [Number(value).toLocaleString(), name]}
+            formatter={(value, name) => [formatProgressValue(Number(value)), name]}
           />
           <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
           <Bar dataKey="done" name={doneName} stackId="total" fill={color} barSize={16} isAnimationActive={false}>
