@@ -46,6 +46,28 @@ const OUTLINE_OPACITY_GHOST = [
   "interpolate", ["linear"], ["zoom"], 7, 0.22, 10, 0.32,
 ];
 
+/* The ghost-spot dots' paint (subtask 1481): the unvisited spots
+   drawn as an underlay on the record tabs, in the spot tab's own
+   orange (#ea580c) so they still read as the same data, but far
+   below the hero dots (0.6, radius 3.5–6). The reader found the
+   old ghost (0.32, radius 2.5–4.5, 1px stroke at 0.4) too loud
+   on the other tabs, so the strength drops to about a quarter
+   of the hero's — in line with the other ghost families (fills
+   0.1 / 0.38, lines 0.32 / 0.95) — and the dots shrink, so the
+   underlay reads as a background, not a second set of dots.
+   Lives here, not inline in App.tsx, so the values are pinned
+   by test like the other hero / ghost paint decisions. */
+export const GHOST_SPOT_PAINT: Record<string, unknown> = {
+  "circle-radius": [
+    "interpolate", ["linear"], ["zoom"], 3, 2, 10, 2.5, 14, 3,
+  ],
+  "circle-color": "#ea580c",
+  "circle-opacity": 0.16,
+  "circle-stroke-width": 0.5,
+  "circle-stroke-color": "#ea580c",
+  "circle-stroke-opacity": 0.15,
+};
+
 /* Every paint / layout value a variant pins down. All variants
    set the FULL set for all three families, so a switch lands in
    the target state regardless of what the previous variant (or a
