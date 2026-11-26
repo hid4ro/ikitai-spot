@@ -10,6 +10,7 @@ import {
   applyVariantPaint,
   decideSpotDataRemount,
   ensureUnriddenLineGhost,
+  GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
   municipalityRowForPaintedName,
@@ -384,6 +385,32 @@ describe("applyUnriddenLineGhostLatest (a late waiter must not wipe the ghost, r
     ).toBe(true);
     expect(sourceFeatures(map)).toHaveLength(2);
   });
+});
+
+describe("ghostSpotPaint (the unvisited-spot underlay, subtask 1481)", () => {
+  test("the ghost dots stay a faint underlay, well below the hero dots", () => {
+    /* Hero = the mount spec in App.tsx (circle-opacity 0.6,
+       radius 3.5 at zoom 3 → 6 at zoom 14, no stroke). The
+       reader found the old ghost (0.32, radius 2.5–4.5, 1px
+       stroke at 0.4) too loud on the record tabs, so the ghost
+       now sits at about a quarter of the hero's strength — in
+       line with the other ghost families — and shrinks, with
+       the stroke thinned to a whisper. The hue stays #ea580c
+       so the dots still read as the same data. */
+    expect(GHOST_SPOT_PAINT["circle-color"]).toBe("#ea580c");
+    expect(GHOST_SPOT_PAINT["circle-opacity"]).toBe(0.16);
+    expect(GHOST_SPOT_PAINT["circle-radius"]).toEqual([
+      "interpolate", ["linear"], ["zoom"], 3, 2, 10, 2.5, 14, 3,
+    ]);
+    expect(GHOST_SPOT_PAINT["circle-stroke-width"]).toBe(0.5);
+    expect(GHOST_SPOT_PAINT["circle-stroke-color"]).toBe("#ea580c");
+    expect(GHOST_SPOT_PAINT["circle-stroke-opacity"]).toBe(0.15);
+    /* Guardrails, not just pinned numbers: a future edit that
+       creeps the ghost back toward hero strength fails here. */
+    expect(GHOST_SPOT_PAINT["circle-opacity"] as number).toBeLessThan(0.6 / 2);
+    expect(GHOST_SPOT_PAINT["circle-stroke-opacity"] as number).toBeLessThan(
+      0.2,
+    );  });
 });
 
 describe("lineRowForPaintedKey (map line tap → ledger row)", () => {

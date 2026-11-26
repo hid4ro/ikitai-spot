@@ -93,6 +93,7 @@ import {
   applyUnriddenLineGhostLatest,
   applyVariantPaint,
   decideSpotDataRemount,
+  GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
   municipalityRowForPaintedName,
   shouldMountLiveMap,
@@ -2657,18 +2658,13 @@ function ensureGhostSpotPoints(
       id: GHOST_SPOTS_LAYER_ID,
       type: "circle",
       source: GHOST_SPOTS_SOURCE_ID,
-      paint: {
-        /* The spot tab's own dots are #ea580c at 0.6; the ghost
-           keeps the hue at a whisper of the strength and size. */
-        "circle-radius": [
-          "interpolate", ["linear"], ["zoom"], 3, 2.5, 10, 3.5, 14, 4.5,
-        ],
-        "circle-color": "#ea580c",
-        "circle-opacity": 0.32,
-        "circle-stroke-width": 1,
-        "circle-stroke-color": "#ea580c",
-        "circle-stroke-opacity": 0.4,
-      },
+      /* The paint spec lives in map-variant.ts (GHOST_SPOT_PAINT):
+         the spot tab's own dots are #ea580c at 0.6, and the ghost
+         keeps the hue at about a quarter of the strength and
+         size, so the underlay reads as a background (subtask
+         1481 — the old 0.32 / 2.5–4.5 dots were too loud on the
+         record tabs). */
+      paint: GHOST_SPOT_PAINT,
     },
     beforeId,
   );
