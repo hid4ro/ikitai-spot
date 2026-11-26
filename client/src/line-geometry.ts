@@ -1198,6 +1198,71 @@ export function computeLineCoverage(
   };
 }
 
+/* The 路線 tab's ghost, edge by edge (subtask 1456, review round
+   1): for each formal line, the drawing shape minus the
+   solid-painted ranges — so a partially ridden line keeps
+   exactly its unridden stretches as ghost, and a line leaves
+   the ghost only when nothing unridden is left on it. No
+   threshold: any unpainted stretch, however short, stays as a
+   thin line (the user's rule: 乗った区間＝実線、乗ってない区
+   間＝薄い線、破線なし）.
+ *
+ * The subtraction runs on graph edges, the same basis the
+   painted legs are measured on: a painted leg names its edge
+   and its [fromT, toT] span, so the remainder of an edge is
+   the complement of the merged painted spans on it. Bridges
+   are not part of the asset shape, so they never appear in the
+   ghost — a painted bridge leg draws over the gap, as before.
+   Unknown rides paint dashed and count nothing, so their legs
+   are not subtracted either: the ghost stays under the dashed
+   paint, as before.
+ *
+ * A line with no painted leg at all keeps its whole shape, and
+   a fully ridden service still leaves its line's off-spine
+   pieces (parallel strands and spurs the shortest path never
+   takes — e.g. a small remainder on 赤羽線 after a full 埼京線
+   ride): the ghost is the remainder of the SHAPE, not of the
+   service, so the map and the painted distance can only agree
+   by construction. */
+export function ghostLineLegs(
+  coverage: LineCoverage,
+  geometries: LineGeometryMap,
+): ReadonlyMap<string, readonly PathLeg[]> {
+  /* Painted spans per (formal-line key, graph edge), merged
+     across services — two services on one key (総武線) or two
+     blocks of one service count once. */
+  const covered = new Map<string, [number, number][]>();
+  for (const [, painted] of coverage.perServiceLegs) {
+    if (painted.unknown) continue;
+    for (const leg of painted.legs) {
+      const composite = `${leg.key}\u0000${leg.edge}`;
+      const list = covered.get(composite) ?? [];
+      list.push([leg.fromT, leg.toT]);
+      covered.set(composite, list);
+    }
+  }
+  const out = new Map<string, PathLeg[]>();
+  for (const key of Object.keys(geometries)) {
+    const graph = getLineGraph(key, geometries);
+    if (!graph) continue;
+    const legs: PathLeg[] = [];
+    for (const edge of graph.edges) {
+      if (edge.bridge) continue;
+      const ranges = mergeRanges(
+        covered.get(`${key}\u0000edge:${edge.id}`) ?? [],
+      );
+      let cursor = 0;
+      for (const [a, b] of ranges) {
+        if (a > cursor + 1e-9) legs.push(...sliceEdge(key, edge, cursor, a));
+        cursor = Math.max(cursor, b);
+      }
+      if (cursor < 1 - 1e-9) legs.push(...sliceEdge(key, edge, cursor, 1));
+    }
+    if (legs.length > 0) out.set(key, legs);
+  }
+  return out;
+}
+
 /* The snapshot a full ride stores, parsed back — null when the
    row has no snapshot (a full ride recorded before stage 2, or a
    row whose snapshot fails to parse: the current master stands
