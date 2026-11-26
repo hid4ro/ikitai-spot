@@ -86,6 +86,7 @@ import {
 import {
   firstLineByOperator,
   groupLinesByOperator,
+  nearestRiddenLine,
   operatorOfLine,
   UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
@@ -108,6 +109,7 @@ import {
   createSelectionSequencer,
   fallbackPhaseAfterReady,
 } from "./spot-selection";
+import { conquestTimelineForVariant } from "./conquest-timeline";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
 
@@ -125,6 +127,42 @@ const FIELDS = actionFields<typeof Actions>();
    60dvh / 32rem pane far too big). Horizontally the pane breaks out
    of the page column's side padding and runs edge to edge. */
 const MAP_PANE_HEIGHT = "h-[min(40dvh,20rem)]";
+
+/* Fullscreen toggle for the two map panes (subtask 1484): one
+   button per map, top-right over the canvas. The fullscreen itself
+   is CSS, not the Fullscreen API — the API would hide the bottom
+   tab bar, and the reader asked for the bar to stay on top of the
+   map so tabs can still be switched while fullscreen. The button
+   lives in the pane's wrapper (the element that goes fixed), so it
+   stays visible in the fallback / failure states too. */
+function MapFullscreenButton({
+  fullscreen,
+  onToggle,
+}: {
+  fullscreen: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
+      aria-pressed={fullscreen}
+      title={fullscreen ? "全画面表示を終了" : "地図を全画面表示"}
+      className="absolute right-2 top-2 z-20 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--dim)] shadow-[0_2px_8px_rgb(0_0_0/0.18)]"
+    >
+      {fullscreen ? (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
+        </svg>
+      ) : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 /* Save failures that no mutation handles itself surface as a bottom
    notice; word it in Japanese to match the page. Mutations that render
@@ -1153,64 +1191,23 @@ function StackedProgressBars({
   );
 }
 
-/* Cumulative counts by month (YYYY-MM), expanded to a continuous
-   month axis from the first to the last recorded month so the time
-   spacing is real. A series' value at a month is its total up to
-   that month — defined for every month once counting starts, and 0
-   before its first record. */
-function buildCumulativeSeries(
-  municipalityDates: readonly string[],
-  lineDates: readonly string[],
-): { month: string; municipalities: number; lines: number }[] {
-  const monthOf = (d: string) => (/^\d{4}-\d{2}/.test(d) ? d.slice(0, 7) : null);
-  const muniMonths = municipalityDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const lineMonths = lineDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const all = [...muniMonths, ...lineMonths].sort();
-  const first = all[0];
-  const last = all[all.length - 1];
-  if (!first || !last) return [];
-  const [startYear = 1970, startMonth = 1] = first.split("-").map(Number);
-  const [endYear = 1970, endMonth = 1] = last.split("-").map(Number);
-  const rows: { month: string; municipalities: number; lines: number }[] = [];
-  let mi = 0;
-  let li = 0;
-  let mc = 0;
-  let lc = 0;
-  let year = startYear;
-  let month = startMonth;
-  while (year < endYear || (year === endYear && month <= endMonth)) {
-    const key = `${year}-${String(month).padStart(2, "0")}`;
-    while (mi < muniMonths.length && (muniMonths[mi] ?? "") <= key) {
-      mc++;
-      mi++;
-    }
-    while (li < lineMonths.length && (lineMonths[li] ?? "") <= key) {
-      lc++;
-      li++;
-    }
-    rows.push({ month: key, municipalities: mc, lines: lc });
-    month++;
-    if (month > 12) {
-      month = 1;
-      year++;
-    }
-  }
-  return rows;
-}
+/* The growth chart's cumulative series and its per-tab model
+   live in ./conquest-timeline (subtask 1482): the month axis and
+   the chart's visibility are decided by the selected tab's
+   records alone. */
 
 /* The 制覇グラフ block under the fill map: overall donuts for
    municipalities and lines, per-prefecture municipality bars,
    per-operator line bars (only operators with at least one ridden
    line), and the cumulative growth chart. Every number is computed
    here from the same ledger rows and bundled totals the map and the
-   headline counts above it use. */
+   headline counts above it use. The block is split per tab
+   (subtask 1482): the 市区町村 tab shows only the municipality
+   family's stats, the 路線 tab only the line family's — the same
+   graphs used to show on both tabs. The numbers themselves are
+   unchanged; only which family renders is gated by `variant`. */
 function ConquestCharts({
+  variant,
   municipalities,
   prefectures,
   totalVisited,
@@ -1223,6 +1220,12 @@ function ConquestCharts({
   lineProgressPct,
   onOperatorSelect,
 }: {
+  /* Which record tab shows this block (tab split, subtask 1482):
+     "municipalities" renders the municipality donut, the
+     per-prefecture bars and the municipality growth series;
+     "lines" renders the line donut, the per-operator bars and
+     the line growth series. */
+  variant: "municipalities" | "lines";
   municipalities: VisitedMunicipality[];
   prefectures: { name: string; total: number }[];
   totalVisited: number;
@@ -1271,7 +1274,10 @@ function ConquestCharts({
         b.done - a.done || b.total - a.total || a.name.localeCompare(b.name, "ja"),
     );
 
-  const timeline = buildCumulativeSeries(
+  /* The growth chart's month axis and visibility come from the
+     selected tab's records alone (./conquest-timeline). */
+  const timeline = conquestTimelineForVariant(
+    variant,
     municipalities.map((m) => m.visitedOn),
     riddenLines
       .filter((line) => !resolveRiddenService(line).needsReview)
@@ -1283,25 +1289,29 @@ function ConquestCharts({
       <h3 className="font-[family-name:var(--font-display)] text-base font-bold">制覇グラフ</h3>
 
       <div className="mt-1 flex flex-wrap justify-center gap-2">
-        <ProgressDonut
-          title="市区町村"
-          value={totalVisited}
-          total={JAPAN_MUNICIPALITY_TOTAL}
-          pctText={municipalityProgressPct}
-          color={CHART_MUNICIPALITY_COLOR}
-          doneLabel="訪問済み"
-        />
-        <ProgressDonut
-          title="路線"
-          value={networkRiddenKm}
-          total={JAPAN_LINE_TOTAL_KM}
-          pctText={lineProgressPct}
-          color={CHART_LINE_COLOR}
-          doneLabel="乗車済み"
-          unit="km"
-        />
+        {variant === "municipalities" && (
+          <ProgressDonut
+            title="市区町村"
+            value={totalVisited}
+            total={JAPAN_MUNICIPALITY_TOTAL}
+            pctText={municipalityProgressPct}
+            color={CHART_MUNICIPALITY_COLOR}
+            doneLabel="訪問済み"
+          />
+        )}
+        {variant === "lines" && (
+          <ProgressDonut
+            title="路線"
+            value={networkRiddenKm}
+            total={JAPAN_LINE_TOTAL_KM}
+            pctText={lineProgressPct}
+            color={CHART_LINE_COLOR}
+            doneLabel="乗車済み"
+            unit="km"
+          />
+        )}
       </div>
-      {(completeServiceCount > 0 || unpreparedLines > 0) && (
+      {variant === "lines" && (completeServiceCount > 0 || unpreparedLines > 0) && (
         <p className="mt-1 text-center text-xs text-[var(--dim)]">
           {completeServiceCount > 0 && `完乗 ${completeServiceCount}系統`}
           {completeServiceCount > 0 && unpreparedLines > 0 && " ・ "}
@@ -1309,7 +1319,7 @@ function ConquestCharts({
         </p>
       )}
 
-      {prefRows.length > 0 && (
+      {variant === "municipalities" && prefRows.length > 0 && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">都道府県別（市区町村）</h4>
           <div className="mt-1">
@@ -1327,6 +1337,7 @@ function ConquestCharts({
         </div>
       )}
 
+      {variant === "lines" && (
       <div className="mt-4">
         <h4 className="text-sm font-medium">事業者別（路線）</h4>
         {operatorRows.length > 0 ? (
@@ -1373,13 +1384,14 @@ function ConquestCharts({
           </p>
         )}
       </div>
+      )}
 
-      {timeline.length > 0 && (
+      {timeline.visible && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">これまでの伸び（月ごとの累計）</h4>
           <div className="mt-1 text-[var(--dim)]" aria-hidden="true">
             <ResponsiveContainer width="100%" height={210}>
-              <AreaChart data={timeline} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+              <AreaChart data={timeline.rows} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
                 <CartesianGrid vertical={false} stroke="currentColor" strokeOpacity={0.12} />
                 <XAxis
                   dataKey="month"
@@ -1396,8 +1408,17 @@ function ConquestCharts({
                   formatter={(value, name) => [`${Number(value).toLocaleString()}件`, name]}
                 />
                 <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                <Area type="stepAfter" dataKey="municipalities" name="市区町村" stroke={CHART_MUNICIPALITY_COLOR} fill={CHART_MUNICIPALITY_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
-                <Area type="stepAfter" dataKey="lines" name="路線" stroke={CHART_LINE_COLOR} fill={CHART_LINE_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
+                <Area
+                  type="stepAfter"
+                  dataKey="count"
+                  name={timeline.seriesName}
+                  stroke={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fill={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fillOpacity={0.16}
+                  strokeWidth={2}
+                  dot={{ r: 2.5, strokeWidth: 0 }}
+                  isAnimationActive={false}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -3105,6 +3126,8 @@ function VisitedMapSection({
   search,
   centerGetterRef,
   onSpotTap,
+  fullscreen,
+  onToggleFullscreen,
   children,
 }: {
   active: boolean;
@@ -3116,6 +3139,12 @@ function VisitedMapSection({
      which ledger renders below it. See map-variant.ts for the
      paint side. */
   variant: RecordMapVariant;
+  /* Fullscreen (subtask 1484): the shared App flag — every map
+     tab reads the same value through this one section, so
+     switching tabs while fullscreen keeps the newly shown map
+     fullscreen too. */
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
   /* The maps' shared Pixel position (App state) — the SAME position
      the スポット tab's map receives. Updated every time any
      stored-position read (a re-take on either tab, or the initial
@@ -3776,10 +3805,6 @@ function VisitedMapSection({
     });
     return true;
   };
-  /* Kept in a ref so the auto-fit effect below always calls the
-     latest version without re-running. */
-  const frameCurrentRef = useRef(frameCurrentMunicipality);
-  frameCurrentRef.current = frameCurrentMunicipality;
   /* Fit the camera to every visited municipality the reader can
      place (review round 1, finding 4): entering a record tab
      with no Pixel position must still restore the record tabs'
@@ -3830,6 +3855,75 @@ function VisitedMapSection({
   };
   const frameVisitedBoundsRef = useRef(frameVisitedBounds);
   frameVisitedBoundsRef.current = frameVisitedBounds;
+  /* The 路線 tab's default framing (subtask 1483): fit the camera
+     to the whole extent of the recorded line nearest the current
+     location, so the full line is in view at the tab's default
+     scale. With no recorded line to place (no rides, or none
+     resolving to a geometry), a small box around the location
+     itself is fitted instead — the same box the municipality
+     framing uses when no boundary contains the position. Returns
+     whether a location was found at all, so the caller can fall
+     back to the visited bounds when there is none. Runs only
+     while the 路線 tab is showing: a location read that outlives
+     a tab switch must not yank the new tab's camera. */
+  const frameNearestRiddenLine = async (): Promise<boolean> => {
+    const loc = await resolveCurrentLocation();
+    if (!loc) {
+      return false;
+    }
+    currentLocRef.current = { lat: loc.lat, lng: loc.lng };
+    /* The スポット tab's location follows the same read, as in
+       frameCurrentMunicipality above. */
+    spotLocRef.current = loc;
+    setSpotLoc(loc);
+    const nearest = nearestRiddenLine(
+      { lat: loc.lat, lng: loc.lng },
+      riddenRowsRef.current,
+      RIDDEN_LINE_GEOMETRIES,
+      LINE_KEY_BY_NAME,
+    );
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    withLiveMapRef.current((map) => {
+      if (variantRef.current !== "lines") return;
+      try {
+        stopCamera(map);
+        ensureFocusListenersRef.current(map);
+        drawCurrentLocationMarker(map, loc.lat, loc.lng, false);
+        let [[minLng, minLat], [maxLng, maxLat]] = nearest?.bounds ?? [
+          [loc.lng - 0.04, loc.lat - 0.03],
+          [loc.lng + 0.04, loc.lat + 0.03],
+        ];
+        if (minLng === maxLng && minLat === maxLat) {
+          minLng -= 0.04;
+          maxLng += 0.04;
+          minLat -= 0.03;
+          maxLat += 0.03;
+        }
+        map.fitBounds(
+          [
+            [minLng, minLat],
+            [maxLng, maxLat],
+          ],
+          { padding: 36, maxZoom: 15, duration: reduceMotion ? 0 : 1200 },
+        );
+      } catch {
+        /* framing is best-effort; a failure leaves the current view */
+      }
+    });
+    return true;
+  };
+  /* The record tabs' one-shot default framing: the 路線 tab fits
+     the recorded line nearest the current location (subtask
+     1483), the 市区町村 tab fits the municipality the reader is
+     in. Returns whether a location was found at all. */
+  const frameRecordDefault = (): Promise<boolean> => {
+    if (variantRef.current === "lines") return frameNearestRiddenLine();
+    return frameCurrentMunicipality(false);
+  };
+  const frameRecordDefaultRef = useRef(frameRecordDefault);
+  frameRecordDefaultRef.current = frameRecordDefault;
   const didAutoFitRef = useRef(false);
   useEffect(() => {
     /* The スポット tab owns the camera while it is showing
@@ -3847,11 +3941,16 @@ function VisitedMapSection({
       return;
     }
     if (mapReady === 0 || visitedQuery.isPending) return;
+    /* The 路線 tab's default needs the ridden-lines ledger (its
+       nearest line is picked from the rows): on that tab the
+       one shot waits for it too, instead of framing the
+       location-only fallback before the rows arrive. */
+    if (variant === "lines" && riddenQuery.isPending) return;
     /* A municipality the reader picked before the default framing
        landed wins — never yank the camera away from it. */
     didAutoFitRef.current = true;
     if (focusedIdRef.current !== null) return;
-    void frameCurrentRef.current(false).then((located) => {
+    void frameRecordDefaultRef.current().then((located) => {
       /* No Pixel position: the record tabs' initial camera is the
          visited municipalities' bounds, not the スポット tab's
          view left behind (review round 1, finding 4). */
@@ -3863,7 +3962,7 @@ function VisitedMapSection({
         frameVisitedBoundsRef.current();
       }
     });
-  }, [mapReady, visitedQuery.isPending, mapFailed, variant]);
+  }, [mapReady, visitedQuery.isPending, riddenQuery.isPending, mapFailed, variant]);
   /* Follow the Pixel while the reader stays on this tab: the
      location job stores a fresh position about once a minute, so
      re-read it on the same cadence and move ONLY the blue marker
@@ -5196,8 +5295,10 @@ function VisitedMapSection({
      own variant, so this effect's first run (mount-time variant)
      is a repeat. The switch also swaps the tab's camera and tap
      ownership: entering a record tab from the スポット tab
-     re-frames to the municipality the reader is in (the fresh
-     mount used to do that), entering the スポット tab hands
+     re-frames to that tab's default (the municipality the
+     reader is in, or the nearest recorded line on the 路線 tab
+     — subtask 1483; the fresh mount used to do that), entering
+     the スポット tab hands
      the camera to the spots framing effect below and clears any
      record focus (its ledger is not rendered there), and the
      nearest-spot ring is cleared off the スポット tab. Between
@@ -5251,7 +5352,7 @@ function VisitedMapSection({
         if (focusedIdRef.current !== null) return;
         if (didAutoFitRef.current) return;
         didAutoFitRef.current = true;
-        void frameCurrentRef.current(false).then((located) => {
+        void frameRecordDefaultRef.current().then((located) => {
           /* No Pixel position: the record tabs' initial camera is
              the visited municipalities' bounds, not the スポット
              tab's view left behind (review round 1, finding 4). */
@@ -5958,7 +6059,9 @@ function VisitedMapSection({
   /* The section renders only while its tab is active, so on mount
      the live map is asked to re-measure its container (it may have
      been sized while the tab was hidden) — camera and highlight
-     state then render at the right size. */
+     state then render at the right size. Fullscreen toggles
+     (subtask 1484) re-size the container the same way, so the
+     toggle is a dependency too. */
   useEffect(() => {
     if (!active) return;
     const raf = requestAnimationFrame(() => {
@@ -5971,7 +6074,7 @@ function VisitedMapSection({
       });
     });
     return () => cancelAnimationFrame(raf);
-  }, [active]);
+  }, [active, fullscreen]);
 
   /* Scrolls a ledger row fully into view, then keeps verifying and
      correcting until the row is actually there. A single fire-and-
@@ -6583,15 +6686,27 @@ function VisitedMapSection({
               the map container inside keeps its own ref. On the
               スポット tab the grid is off (see above), so the pane
               stays full width exactly as the old spot map did. */}
-          <div className="sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1">
+          {/* Fullscreen (subtask 1484): the wrapper goes fixed
+              inset-0 at z-30 — below the bottom tab bar's z-40, so
+              the bar stays on top of the map and tabs can still be
+              switched while fullscreen. The toggle button is a
+              direct child of this wrapper, so it stays visible in
+              the fallback / failure states too. */}
+          <div
+            className={
+              fullscreen
+                ? "fixed inset-0 z-30 bg-[var(--bg)]"
+                : "sticky top-0 z-20 -mx-4 mt-2 bg-[var(--bg)] pb-2 pt-1 xl:col-start-1 xl:row-start-1"
+            }
+          >
           {/* showMapPane already includes the スポット tab
               (showLiveMap || variant === "spots"), so no extra
               variant term belongs here. */}
           {!mapFailed && showMapPane && (
-            <div className="relative">
+            <div className={fullscreen ? "relative h-full" : "relative"}>
               <div
                 ref={mapContainerRef}
-                className={`${MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
+                className={`${fullscreen ? "h-full" : MAP_PANE_HEIGHT} w-full overflow-hidden bg-[var(--surface-alt)]`}
                 role="img"
                 aria-label={
                   variant === "spots"
@@ -6747,6 +6862,7 @@ function VisitedMapSection({
               境界データの一部を読み込めませんでした。通信が戻れば自動で再取得します。
             </p>
           )}
+          <MapFullscreenButton fullscreen={fullscreen} onToggle={onToggleFullscreen} />
           </div>
 
           {/* The スポット tab's list and controls (passed in as
@@ -6835,24 +6951,36 @@ function VisitedMapSection({
 
           {variant !== "spots" && (
           <div className="mt-2 xl:col-start-1 xl:row-start-3">
-            {prefectures.length > 0 && (
+            {/* The stats under the map are split per tab (subtask
+                1482), like the 制覇グラフ below: the 市区町村 tab
+                shows only the municipality headline, the 路線 tab
+                only the line headline and its distance note. The
+                border legend underneath stays on both tabs — it
+                explains the map itself, not one family's stats. */}
+            {variant === "municipalities" && prefectures.length > 0 && (
               <p className="text-sm">
                 {prefectures.map((p) => `${p.name} ${p.total}`).join(" ・ ")}
               </p>
             )}
             <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
-              <span>
-                市区町村 {totalVisited.toLocaleString()} /{" "}
-                {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
-              </span>
-              <span>
-                路線 {networkRiddenKmText} /{" "}
-                {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
-              </span>
+              {variant === "municipalities" && (
+                <span>
+                  市区町村 {totalVisited.toLocaleString()} /{" "}
+                  {JAPAN_MUNICIPALITY_TOTAL.toLocaleString()}（{municipalityProgressPct}%）
+                </span>
+              )}
+              {variant === "lines" && (
+                <span>
+                  路線 {networkRiddenKmText} /{" "}
+                  {JAPAN_LINE_TOTAL_KM.toLocaleString()}km（{lineProgressPct}%）
+                </span>
+              )}
             </p>
-            <p className="mt-1 text-xs text-[var(--dim)]">
-              路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
-            </p>
+            {variant === "lines" && (
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                路線は乗った区間の距離です。分母は全国の全路線の総延長（国土数値情報の形状から計算・26,903.9km）で、区間が分からない記録は破線で描き、距離には数えません
+              </p>
+            )}
             {/* Border legend: the map's line hierarchy (prefecture
                 borders strongest, then municipality boundaries,
                 ward borders dashed and lightest) is not
@@ -6888,6 +7016,7 @@ function VisitedMapSection({
               </span>
             </div>
             <ConquestCharts
+              variant={variant}
               municipalities={municipalities}
               prefectures={prefectures}
               totalVisited={totalVisited}
@@ -8633,6 +8762,31 @@ export function App() {
      which family is the hero and which is the ghost underlay —
      see RecordMapVariant in map-variant.ts. */
   const [tab, setTab] = useState<"spots" | "map" | "lines" | "more">("spots");
+  /* Map fullscreen (subtask 1484): one shared flag for the shared
+     map section, so switching tabs while fullscreen keeps the
+     newly shown map fullscreen too — the bottom tab bar stays on
+     top of the map (z-40 over the map pane's z-30) precisely so
+     the reader can switch tabs without leaving fullscreen. */
+  const [mapFullscreen, setMapFullscreen] = useState(false);
+  const toggleMapFullscreen = useCallback(() => {
+    setMapFullscreen((v) => !v);
+  }, []);
+  /* Esc leaves fullscreen (the CSS fullscreen has no browser
+     chrome to do it), and the page behind the fixed map must not
+     scroll while the map owns the viewport. */
+  useEffect(() => {
+    if (!mapFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMapFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [mapFullscreen]);
   /* Save-failure messages rendered next to the control that failed.
      Each mutation below reports through onError into one of these, so
      the SDK's bottom failure notice never duplicates an in-page error. */
@@ -9541,6 +9695,8 @@ export function App() {
             search={search}
             centerGetterRef={spotMapCenterGetterRef}
             onSpotTap={openDetailFromMap}
+            fullscreen={mapFullscreen}
+            onToggleFullscreen={toggleMapFullscreen}
           >
             {/* ===== spot management (スポット tab) ===== */}
             {tab === "spots" && (

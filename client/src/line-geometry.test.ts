@@ -7,7 +7,9 @@
    regression shows up as a wrong distance, not a wrong map. */
 import { describe, expect, test } from "bun:test";
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
+import type { GeoJsonLineGeometry } from "./geojson";
 import { JAPAN_LINE_TOTAL_KM, LINE_TOTAL_KM } from "./line-totals";
+import { buildLineKeyByName } from "./line-resolution";
 import {
   buildLineGraph,
   buildServicePath,
@@ -23,6 +25,7 @@ import {
   parseFullPathSnapshot,
   sectionBounds,
   slicePolyline,
+  distanceToLineGeometryM,
   type LineGeometryMap,
   type RideInterval,
   type ServicePath,
@@ -840,6 +843,50 @@ describe("sectionBounds", () => {
     expect(minLat).toBeLessThan(35.66);
     expect(maxLat).toBeGreaterThan(35.68);
     expect(sectionBounds([])).toBeNull();
+  });
+});
+
+describe("distanceToLineGeometryM (the nearest-line pick, subtask 1483)", () => {
+  test("a point on a segment is 0, a point off it is its perpendicular distance", () => {
+    const geometry: GeoJsonLineGeometry = {
+      type: "MultiLineString",
+      coordinates: [[[139.0, 35.0], [139.1, 35.0]]],
+    };
+    expect(distanceToLineGeometryM([139.05, 35.0], geometry)).toBeCloseTo(0, 6);
+    /* 0.01° north at lat 35° is ~1105 m on the local projection. */
+    expect(distanceToLineGeometryM([139.05, 35.01], geometry)).toBeCloseTo(1105.4, 0);
+    /* Past the segment's end the nearest point is the endpoint —
+       the local projection approximates the haversine within
+       tens of metres, so compare loosely. */
+    expect(
+      distanceToLineGeometryM([139.2, 35.0], geometry),
+    ).toBeCloseTo(haversineKm([139.1, 35.0], [139.2, 35.0]) * 1000, -2);
+    /* A point beside the middle of a long straight counts as near,
+       not only a point beside a vertex. */
+    expect(distanceToLineGeometryM([139.05, 35.001], geometry)).toBeLessThan(200);
+    expect(
+      distanceToLineGeometryM([139.05, 35.0], {
+        type: "MultiLineString",
+        coordinates: [],
+      }),
+    ).toBeNull();
+    expect(
+      distanceToLineGeometryM([139.05, 35.0], {
+        type: "MultiLineString",
+        coordinates: [[[139.0, 35.0]]],
+      }),
+    ).toBeNull();
+  });
+
+  test("against the real asset: 府中駅 sits on 京王線, far from 北総線", () => {
+    const keyByName = buildLineKeyByName(GEOMETRIES);
+    const geometryOf = (name: string) =>
+      GEOMETRIES[keyByName.get(name)!]!.geometry;
+    /* The station sits on the line; the shape wanders a little,
+       so "on it" means well under a kilometre, not exactly 0. */
+    expect(distanceToLineGeometryM([S.府中.lng, S.府中.lat], geometryOf("京王線"))).toBeLessThan(1000);
+    expect(distanceToLineGeometryM([S.府中.lng, S.府中.lat], geometryOf("北総線"))).toBeGreaterThan(30000);
+    expect(distanceToLineGeometryM([S.千葉.lng, S.千葉.lat], geometryOf("総武線"))).toBeLessThan(1000);
   });
 });
 

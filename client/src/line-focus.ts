@@ -14,8 +14,10 @@
    section, since no single track stands for the whole service. */
 
 import type { GeoJsonLineGeometry } from "./geojson";
+import { distanceToLineGeometryM } from "./line-geometry";
 import { resolveRiddenLineKey } from "./line-resolution";
 import {
+  assetKeysForService,
   resolveRiddenService,
   type RiddenServiceLink,
 } from "../../shared/service-master";
@@ -97,6 +99,75 @@ export function groupLinesByOperator<
     operator,
     rows: groupRows,
   }));
+}
+
+/* The recorded line nearest a location (subtask 1483): the
+   路線 tab's default framing fits this line's whole extent.
+   A row counts when it resolves to a geometry — a service row
+   through its asset keys (a multi-line service's whole extent
+   is the union of the formal lines it runs on), a plain row
+   through its resolved formal-line key. Rows held for review,
+   and rows with no geometry at all, never count. The distance
+   is to the line's FULL geometry, so a line counts as near
+   wherever its track runs, not only where it was ridden. Ties
+   keep the earlier ledger row. Null when no row can be
+   placed. */
+export type NearestRiddenLine<Row> = {
+  row: Row;
+  /* The line's whole extent — the bounds the default framing
+     fits, so the full line is in view. */
+  bounds: [[number, number], [number, number]];
+  distanceM: number;
+};
+export function nearestRiddenLine<
+  Row extends RiddenServiceLink & { id: number },
+>(
+  location: { lat: number; lng: number },
+  rows: readonly Row[],
+  geometries: LineGeometryMap,
+  keyByName: ReadonlyMap<string, string>,
+): NearestRiddenLine<Row> | null {
+  const point: [number, number] = [location.lng, location.lat];
+  let best: NearestRiddenLine<Row> | null = null;
+  for (const row of rows) {
+    const { service, needsReview } = resolveRiddenService(row);
+    if (needsReview) continue;
+    const keys = service
+      ? assetKeysForService(service.id)
+      : [resolveRiddenLineKey(row, geometries, keyByName)];
+    let distanceM: number | null = null;
+    let minLng = Infinity;
+    let minLat = Infinity;
+    let maxLng = -Infinity;
+    let maxLat = -Infinity;
+    for (const key of keys) {
+      if (!key) continue;
+      const geometry = geometries[key]?.geometry;
+      if (!geometry) continue;
+      const d = distanceToLineGeometryM(point, geometry);
+      if (d !== null && (distanceM === null || d < distanceM)) {
+        distanceM = d;
+      }
+      const b = lineGeometryBounds(geometry);
+      if (!b) continue;
+      if (b[0][0] < minLng) minLng = b[0][0];
+      if (b[0][1] < minLat) minLat = b[0][1];
+      if (b[1][0] > maxLng) maxLng = b[1][0];
+      if (b[1][1] > maxLat) maxLat = b[1][1];
+    }
+    if (distanceM === null || !Number.isFinite(minLng)) continue;
+    if (!best || distanceM < best.distanceM) {
+      best = {
+        row,
+        bounds: [
+          [minLng, minLat],
+          [maxLng, maxLat],
+        ],
+        distanceM,
+      };
+    }
+  }
+  return best;
 }
 
 /* Bounding box of a line geometry as [[minLng, minLat],
