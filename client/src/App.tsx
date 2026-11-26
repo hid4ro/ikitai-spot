@@ -6844,7 +6844,9 @@ function VisitedMapSection({
         behavior: reduceMotion ? "auto" : "smooth",
         block: "start",
       });
-      const bounds = wholeLineBounds(painted.legs, RIDDEN_LINE_GEOMETRIES);
+      const bounds = service
+        ? wholeLineBounds(service, painted.legs, RIDDEN_LINE_GEOMETRIES)
+        : null;
       withLiveMap((map) => {
         /* A later tap supersedes this one: never paint a stale
            highlight (or fly the camera) for a row the reader has
@@ -7034,7 +7036,7 @@ function VisitedMapSection({
              tap's framing (focusRiddenLine): same padding,
              same maxZoom, same duration. */
           const plan = focusCameraPlan(
-            wholeLineBounds(painted.legs, RIDDEN_LINE_GEOMETRIES),
+            wholeLineBounds(service, painted.legs, RIDDEN_LINE_GEOMETRIES),
             null,
           );
           if (plan.kind === "fit-bounds") {
