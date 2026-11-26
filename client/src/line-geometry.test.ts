@@ -52,6 +52,9 @@ const S = {
   東京: station("003766", "東京", 139.76675, 35.68128),
   神田: station("003677", "神田", 139.77088, 35.69242),
   新宿: station("003700", "新宿", 139.69993, 35.6898),
+  初台: station("003764", "初台", 139.68827, 35.68142),
+  幡ヶ谷: station("003791", "幡ヶ谷", 139.67772, 35.67676),
+  笹塚: station("003806", "笹塚", 139.66717, 35.67366),
   立川: station("003634", "立川", 139.41396, 35.69793),
   高尾: station("004029", "高尾", 139.28217, 35.64202),
   国分寺: station("003606", "国分寺", 139.48013, 35.70045),
@@ -168,6 +171,7 @@ describe("real asset: service totals against railway kilometres", () => {
        shape is an approximation, so the band is ±5%. */
     const cases: [string, number][] = [
       ["keio", 37.9],
+      ["keio-new-line", 3.6],
       ["jr-sobu-rapid", 39.2],
       ["jr-sobu-local", 120.5],
       ["jr-musashino", 71.8],
@@ -180,6 +184,30 @@ describe("real asset: service totals against railway kilometres", () => {
       expect(path.missing).toEqual([]);
       expect(path.totalKm).toBeGreaterThan(railKm * 0.95);
       expect(path.totalKm).toBeLessThan(railKm * 1.05);
+    }
+  });
+
+  test("the 京王新線 clips measure close to the N02 arc lengths (subtask 1574)", () => {
+    /* N02 arc lengths along the 新線 branch: 新宿→初台 1.41,
+       初台→幡ヶ谷 1.08, 幡ヶ谷→笹塚 1.02, whole 3.51 — the
+       app's shape measures 1.42 / 1.08 / 1.01 / 3.52. The
+       2026-11-25 ride 新宿→幡ヶ谷付近 is not registered (its
+       alighting station is unconfirmed), so these are the
+       forward clips a future ride would take. */
+    const cases: [StationRef, StationRef, number][] = [
+      [S.新宿, S.初台, 1.41],
+      [S.初台, S.幡ヶ谷, 1.08],
+      [S.幡ヶ谷, S.笹塚, 1.02],
+      [S.新宿, S.笹塚, 3.51],
+    ];
+    const path = servicePath("keio-new-line");
+    expect(path.missing).toEqual([]);
+    expect(path.approximate).toBe(false);
+    for (const [from, to, n02Km] of cases) {
+      const clip = clipServicePath(path, from, to)!;
+      expect(clip).not.toBeNull();
+      expect(clip.lengthKm).toBeGreaterThan(n02Km * 0.9);
+      expect(clip.lengthKm).toBeLessThan(n02Km * 1.1);
     }
   });
 
@@ -1487,6 +1515,29 @@ describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, rev
     const coverage = coverageFor(new Map(), new Set(["keio"]));
     expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(2.93, 1);
     expect(ghostBounds(coverage, KEIO_KEY)!.maxLng).toBeGreaterThan(139.69);
+  });
+
+  test("a full Keio New Line ride leaves the rest of the 京王線 key as ghost", () => {
+    /* 新宿〜笹塚 paints 3.52 km of the 京王線 key's 40.58 km
+       shape; the rest — the main line west of 笹塚 — stays as
+       ghost, reaching the 京王八王子 side (lng 139.34). */
+    const coverage = coverageFor(new Map(), new Set(["keio-new-line"]));
+    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(3.52, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(37.07, 1);
+    expect(ghostBounds(coverage, KEIO_KEY)!.minLng).toBeLessThan(139.35);
+  });
+
+  test("a full Keio New Line ride adds nothing beyond a full Keio ride (subtask 1574)", () => {
+    /* Both services share the 京王線|京王電鉄 key and the 新宿〜
+       笹塚 stretch: the new service's legs are a subset of the
+       Keio ride's, so the key total stays 37.65 and the ghost
+       stays 2.93 — no double-counting, no ghost change. */
+    const coverage = coverageFor(
+      new Map(),
+      new Set(["keio", "keio-new-line"]),
+    );
+    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(37.65, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(2.93, 1);
   });
 
   test("a partial Keio ride keeps the rest of the line as ghost", () => {
