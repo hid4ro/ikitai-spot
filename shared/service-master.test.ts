@@ -41,7 +41,7 @@ import { RIDDEN_LINE_GEOMETRIES } from "../client/src/assets/visited-lines";
 
 describe("master shape", () => {
   test("every entry carries the four required metadata fields", () => {
-    expect(SERVICE_MASTER.length).toBe(11);
+    expect(SERVICE_MASTER.length).toBe(12);
     for (const entry of SERVICE_MASTER) {
       expect(entry.id).toMatch(/^[a-z0-9-]+$/);
       expect(entry.sources.length).toBeGreaterThan(0);
@@ -145,6 +145,7 @@ describe("service → formal line expansion", () => {
     expect(formalLineNames("jr-sobu-local")).toEqual(["総武線"]);
     expect(formalLineNames("keio")).toEqual(["京王線"]);
     expect(formalLineNames("rinkai")).toEqual(["臨海副都心線"]);
+    expect(formalLineNames("tobu-noda")).toEqual(["野田線"]);
   });
 
   test("山手線 is a loop of three formal lines in running order", () => {
@@ -256,6 +257,13 @@ describe("ledger-name lookup", () => {
 
   test("「JR中央線」 without the （快速） suffix is the rapid service", () => {
     expect(serviceByLedgerName("JR中央線")?.id).toBe("jr-chuo-rapid");
+  });
+
+  test("「東武アーバンパークライン」 is the nickname of 東武野田線 (subtask 1566)", () => {
+    expect(serviceByLedgerName("東武野田線")?.id).toBe("tobu-noda");
+    expect(serviceByLedgerName("東武アーバンパークライン")?.id).toBe(
+      "tobu-noda",
+    );
   });
 
   test("「臨海副都心線（りんかい線）」 with the parenthetical is the rinkai service (review round 2)", () => {
@@ -511,6 +519,9 @@ describe("save-time validation (review round 2)", () => {
     expect(
       serviceExistsAtMasterVersion("jr-shimousa", SERVICE_MASTER_VERSION),
     ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("tobu-noda", SERVICE_MASTER_VERSION),
+    ).toBe(true);
     // The frozen migration master held the nine migrated
     // services — and not the two added on 2026-11-26.
     expect(serviceExistsAtMasterVersion("keio", MIGRATED_MASTER_VERSION)).toBe(true);
@@ -522,6 +533,9 @@ describe("save-time validation (review round 2)", () => {
     ).toBe(false);
     expect(
       serviceExistsAtMasterVersion("jr-shimousa", MIGRATED_MASTER_VERSION),
+    ).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("tobu-noda", MIGRATED_MASTER_VERSION),
     ).toBe(false);
     // Unknown versions and unknown services hold nothing.
     expect(serviceExistsAtMasterVersion("keio", "bogus")).toBe(false);
@@ -917,6 +931,34 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       serviceOrderedStations("jr-shimousa").map((s) => s.id),
     ).toEqual(["002914", "003006", "003004", "003187", "003547"]);
+  });
+
+  test("validateSectionEndpoints: 東武野田線 endpoints (subtask 1566)", () => {
+    // The whole service passes in either direction, and the
+    // 2026-11-26 ride 大宮→七光台 resolves: 七光台 is listed
+    // on tobu-noda/b2 and 大宮 is the service's far boundary.
+    expect(
+      validateSectionEndpoints("tobu-noda", "002914", "003589"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("tobu-noda", "003589", "002914"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("tobu-noda", "002914", "002803"),
+    ).toBeNull();
+    expect(
+      validateSectionEndpoints("tobu-noda", "002803", "002914"),
+    ).toBeNull();
+    // A block boundary against the listed mid-block station
+    // of the same block works too.
+    expect(
+      validateSectionEndpoints("tobu-noda", "002785", "002803"),
+    ).toBeNull();
+    // Ordered stations: block boundaries with the listed
+    // mid-block station interleaved in running order.
+    expect(
+      serviceOrderedStations("tobu-noda").map((s) => s.id),
+    ).toEqual(["002914", "002785", "002803", "002984", "003589"]);
   });
 
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {

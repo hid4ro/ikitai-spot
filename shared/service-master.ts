@@ -154,7 +154,7 @@ export type ServiceMasterEntry = {
 /* Bump when any entry's segments change. Full rides keep the version
    they were recorded at, so a later extension never silently claims
    a stretch the rider never rode. */
-export const SERVICE_MASTER_VERSION = "2026-11-26";
+export const SERVICE_MASTER_VERSION = "2026-11-27";
 
 const N02_SOURCE = "国土数値情報「鉄道データ」N02（2025年度版）";
 const LEDGER_SOURCE = "location-trivia/seen_lines.md（台帳の乗車記録）";
@@ -706,6 +706,53 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     verifiedAt: null,
     verificationStatus: "draft",
     note: "環状線のため3区間で一周を表す（品川→田端→東京→品川、外回り）。移行した乗車（大崎→目黒）は外回りの観測順で、端点はそのまま使える。",
+  },
+  {
+    id: "tobu-noda",
+    pathId: "tobu-noda",
+    displayName: "東武野田線",
+    ledgerNames: ["東武野田線", "東武アーバンパークライン"],
+    operator: "東武鉄道",
+    segments: [
+      {
+        formalLineName: "野田線",
+        formalLineKey: "野田線|東武鉄道",
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "003589", name: "船橋", lng: 139.98437, lat: 35.7021 },
+      },
+    ],
+    blocks: [
+      {
+        id: "tobu-noda/b1",
+        from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002785", name: "春日部", lng: 139.75238, lat: 35.98 },
+      },
+      {
+        id: "tobu-noda/b2",
+        from: { id: "002785", name: "春日部", lng: 139.75238, lat: 35.98 },
+        to: { id: "002984", name: "柏", lng: 139.97046, lat: 35.86198 },
+        /* Stage 3 (subtask 1455): the 2026-11-26 ride
+           大宮〜七光台 （大宮8:30発・柏行→七光台9:05着、川重
+           ファシリテック東営業所への出勤途中). 七光台 sits
+           inside this block, so it is listed here rather than
+           splitting it (same pattern as 北府中 on
+           jr-musashino-omiya/b1). Coordinates are the N02
+           station-point centroids. */
+        stations: [
+          { id: "002803", name: "七光台", lng: 139.85295, lat: 35.97085 },
+        ],
+      },
+      {
+        id: "tobu-noda/b3",
+        from: { id: "002984", name: "柏", lng: 139.97046, lat: 35.86198 },
+        to: { id: "003589", name: "船橋", lng: 139.98437, lat: 35.7021 },
+      },
+    ],
+    sources: [N02_SOURCE, LEDGER_SOURCE],
+    verifiedAt: null,
+    verificationStatus: "draft",
+    note:
+      "東武アーバンパークラインの愛称でも呼ばれる（ledgerNames に両方持つ）。大宮の座標はマスタの既存値（jr-saikyo・jr-musashino-omiya と同一。野田線形状からの距離は約126mで、300mのしきい値の内側）。全長は営業キロ62.7km。2026-11-26の乗車は大宮→七光台（約25.1km）。人手の地図照合は未了（draftのまま）。",
   },
 ];
 
@@ -1630,7 +1677,8 @@ export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
    migration table above restores rides for — that table is the
    whole master of 2026-11-24; jr-musashino-omiya and
    jr-shimousa first appear at SERVICE_MASTER_VERSION
-   (2026-11-26). A full ride's range must be reproducible from
+   (2026-11-26), and tobu-noda first appears at
+   SERVICE_MASTER_VERSION (2026-11-27). A full ride's range must be reproducible from
    the version it names, so a version whose master never held
    the service cannot record one (review batch round 1,
    subtask 1593). An unknown version holds nothing. */
