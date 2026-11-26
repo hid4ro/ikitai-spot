@@ -107,6 +107,7 @@ import {
   createSelectionSequencer,
   fallbackPhaseAfterReady,
 } from "./spot-selection";
+import { conquestTimelineForVariant } from "./conquest-timeline";
 import visitedMapFallbackUrl from "./assets/visited-map-fallback.png";
 import unriddenGhostWorkerUrl from "./assets/unridden-ghost-worker.json" with { type: "file" };
 
@@ -1152,56 +1153,10 @@ function StackedProgressBars({
   );
 }
 
-/* Cumulative counts by month (YYYY-MM), expanded to a continuous
-   month axis from the first to the last recorded month so the time
-   spacing is real. A series' value at a month is its total up to
-   that month — defined for every month once counting starts, and 0
-   before its first record. */
-function buildCumulativeSeries(
-  municipalityDates: readonly string[],
-  lineDates: readonly string[],
-): { month: string; municipalities: number; lines: number }[] {
-  const monthOf = (d: string) => (/^\d{4}-\d{2}/.test(d) ? d.slice(0, 7) : null);
-  const muniMonths = municipalityDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const lineMonths = lineDates
-    .map(monthOf)
-    .filter((m): m is string => m !== null)
-    .sort();
-  const all = [...muniMonths, ...lineMonths].sort();
-  const first = all[0];
-  const last = all[all.length - 1];
-  if (!first || !last) return [];
-  const [startYear = 1970, startMonth = 1] = first.split("-").map(Number);
-  const [endYear = 1970, endMonth = 1] = last.split("-").map(Number);
-  const rows: { month: string; municipalities: number; lines: number }[] = [];
-  let mi = 0;
-  let li = 0;
-  let mc = 0;
-  let lc = 0;
-  let year = startYear;
-  let month = startMonth;
-  while (year < endYear || (year === endYear && month <= endMonth)) {
-    const key = `${year}-${String(month).padStart(2, "0")}`;
-    while (mi < muniMonths.length && (muniMonths[mi] ?? "") <= key) {
-      mc++;
-      mi++;
-    }
-    while (li < lineMonths.length && (lineMonths[li] ?? "") <= key) {
-      lc++;
-      li++;
-    }
-    rows.push({ month: key, municipalities: mc, lines: lc });
-    month++;
-    if (month > 12) {
-      month = 1;
-      year++;
-    }
-  }
-  return rows;
-}
+/* The growth chart's cumulative series and its per-tab model
+   live in ./conquest-timeline (subtask 1482): the month axis and
+   the chart's visibility are decided by the selected tab's
+   records alone. */
 
 /* The 制覇グラフ block under the fill map: overall donuts for
    municipalities and lines, per-prefecture municipality bars,
@@ -1281,7 +1236,10 @@ function ConquestCharts({
         b.done - a.done || b.total - a.total || a.name.localeCompare(b.name, "ja"),
     );
 
-  const timeline = buildCumulativeSeries(
+  /* The growth chart's month axis and visibility come from the
+     selected tab's records alone (./conquest-timeline). */
+  const timeline = conquestTimelineForVariant(
+    variant,
     municipalities.map((m) => m.visitedOn),
     riddenLines
       .filter((line) => !resolveRiddenService(line).needsReview)
@@ -1390,12 +1348,12 @@ function ConquestCharts({
       </div>
       )}
 
-      {timeline.length > 0 && (
+      {timeline.visible && (
         <div className="mt-4">
           <h4 className="text-sm font-medium">これまでの伸び（月ごとの累計）</h4>
           <div className="mt-1 text-[var(--dim)]" aria-hidden="true">
             <ResponsiveContainer width="100%" height={210}>
-              <AreaChart data={timeline} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+              <AreaChart data={timeline.rows} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
                 <CartesianGrid vertical={false} stroke="currentColor" strokeOpacity={0.12} />
                 <XAxis
                   dataKey="month"
@@ -1412,12 +1370,17 @@ function ConquestCharts({
                   formatter={(value, name) => [`${Number(value).toLocaleString()}件`, name]}
                 />
                 <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
-                {variant === "municipalities" && (
-                  <Area type="stepAfter" dataKey="municipalities" name="市区町村" stroke={CHART_MUNICIPALITY_COLOR} fill={CHART_MUNICIPALITY_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
-                )}
-                {variant === "lines" && (
-                  <Area type="stepAfter" dataKey="lines" name="路線" stroke={CHART_LINE_COLOR} fill={CHART_LINE_COLOR} fillOpacity={0.16} strokeWidth={2} dot={{ r: 2.5, strokeWidth: 0 }} isAnimationActive={false} />
-                )}
+                <Area
+                  type="stepAfter"
+                  dataKey="count"
+                  name={timeline.seriesName}
+                  stroke={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fill={variant === "municipalities" ? CHART_MUNICIPALITY_COLOR : CHART_LINE_COLOR}
+                  fillOpacity={0.16}
+                  strokeWidth={2}
+                  dot={{ r: 2.5, strokeWidth: 0 }}
+                  isAnimationActive={false}
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
