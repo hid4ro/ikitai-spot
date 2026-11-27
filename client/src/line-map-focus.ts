@@ -10,13 +10,22 @@
    hands features to the map. The functions moved here
    verbatim (behavior unchanged) so line-map-paint.test.ts
    can drive them against a mock map and assert the
-   properties.color the sources actually receive. */
+   properties.color the sources actually receive. The
+   normal overlay's assembly (visitedLinesOverlay, at the
+   bottom) joined them in fix5: the round-4 review showed
+   the normal path still assembled its source data inside
+   the component's useMemo, one step past the builder the
+   tests drove, so a call-site revert there passed every
+   test the same way. */
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import type { MapLibreLike } from "./map-helpers.mjs";
 import {
   focusSectionFeature,
+  paintedLineFeatures,
   remainderLegFeature,
   type LineCoverage,
+  type LineGeometryMap,
+  type PaintedLegFeature,
   type PathLeg,
 } from "./line-geometry";
 import {
@@ -303,4 +312,106 @@ export function clearFocusLineGeometry(
     variant,
   );
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
+}
+
+/* ---------------- the normal ridden-lines overlay ----------------
+   The overlay spec the component pushes for the visited-lines
+   source at mount: the painted features as the source data,
+   plus the three layers that paint them. This assembly lived
+   in the component until subtask 1680 fix5 — the features
+   came from paintedLineFeatures (line-geometry.ts), but the
+   component wrapped them into the source data itself, and
+   the round-4 review proved that reverting just that
+   wrapping step to per-formal-line colors passed all 344
+   tests: the tests drove the builder, never the assembly
+   whose result the source actually receives. Assembling
+   here puts the normal path under the same assertion as the
+   focus paths (line-map-paint.test.ts drives this function
+   and reads the colors off the returned data). Returns null
+   when nothing paints, matching the component's old gate. */
+
+export const VISITED_LINES_SOURCE_ID = "visited-lines";
+
+export type VisitedLinesOverlay = {
+  id: typeof VISITED_LINES_SOURCE_ID;
+  data: { type: "FeatureCollection"; features: PaintedLegFeature[] };
+  layers: {
+    id: string;
+    type: "line";
+    source: typeof VISITED_LINES_SOURCE_ID;
+    layout: Record<string, string>;
+    filter: unknown[];
+    paint: Record<string, unknown>;
+  }[];
+};
+
+export function visitedLinesOverlay(
+  perServiceLegs: LineCoverage["perServiceLegs"],
+  geometries: LineGeometryMap,
+): VisitedLinesOverlay | null {
+  /* paintedLineFeatures (line-geometry.ts) builds the
+     features — the same builder the focus paths' tests
+     assert through. A paint-unified service (山手線) paints
+     every leg in its representative color: the loop is one
+     named line to the reader even where its trains run on
+     the 東北線・東海道線 formal lines. The leg's key still
+     names its formal line for coverage and the ghost; a leg
+     with no color at all is skipped, as before. */
+  const features = paintedLineFeatures(perServiceLegs, geometries);
+  if (features.length === 0) return null;
+  return {
+    id: VISITED_LINES_SOURCE_ID,
+    data: {
+      type: "FeatureCollection",
+      features,
+    },
+    layers: [
+      {
+        id: "visited-lines-casing",
+        type: "line",
+        source: VISITED_LINES_SOURCE_ID,
+        layout: { "line-cap": "round", "line-join": "round" },
+        filter: ["!=", ["get", "unknown"], true],
+        paint: {
+          "line-color": "#ffffff",
+          "line-width": 5.5,
+          "line-opacity": 0.55,
+        },
+      },
+      {
+        id: "visited-lines-color",
+        type: "line",
+        source: VISITED_LINES_SOURCE_ID,
+        layout: { "line-cap": "round", "line-join": "round" },
+        filter: ["!=", ["get", "unknown"], true],
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": 3.5,
+          "line-opacity": 0.95,
+        },
+      },
+      /* Unknown rides (a row with no section on record):
+         the whole path as a thin solid line in the
+         service's color — the same look as the unridden
+         ghost, never a ridden section's strength. The
+         reader's rule: ridden = solid, unridden and
+         unknown = thin, no dashes. The layer stays
+         separate from the ghost so a tap on the track
+         still resolves to the ride's ledger row and a
+         line focus can filter it out (see
+         setNormalLineExclusion). */
+      {
+        id: "visited-lines-unknown",
+        type: "line",
+        source: VISITED_LINES_SOURCE_ID,
+        layout: { "line-cap": "round", "line-join": "round" },
+        filter: ["==", ["get", "unknown"], true],
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": 1.6,
+          "line-opacity": 0.25,
+        },
+      },
+    ],
+  };
 }

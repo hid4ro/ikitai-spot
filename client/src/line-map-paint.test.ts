@@ -10,9 +10,13 @@
    by reverting the unridden focus paint). These tests drive
    the production source-feeding code itself:
 
-   - normal overlay: paintedLineFeatures, the builder whose
-     return value the component assigns verbatim as the
-     visited-lines source data;
+   - normal overlay: visitedLinesOverlay
+     (line-map-focus.ts), the assembly whose return value
+     the component pushes verbatim as the visited-lines
+     overlay — source data and layers (fix4 drove
+     paintedLineFeatures, the builder one step below this
+     assembly; the round-4 review reverted the assembly
+     step itself and every test still passed);
    - ridden focus: setFocusSection (line-map-focus.ts) run
      against a mock map, asserting the data the
      visited-line-focus source received;
@@ -33,7 +37,6 @@ import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import type { MapLibreLike } from "./map-helpers.mjs";
 import {
   computeRiddenLineCoverage,
-  paintedLineFeatures,
   type LineGeometryMap,
   type PathLeg,
 } from "./line-geometry";
@@ -42,6 +45,8 @@ import {
   LINE_FOCUS_SOURCE_ID,
   setFocusSection,
   setUnriddenRemainderFocus,
+  VISITED_LINES_SOURCE_ID,
+  visitedLinesOverlay,
 } from "./line-map-focus";
 import { UNRIDDEN_FOCUS_SOURCE_ID } from "./map-variant";
 import type { StationRef } from "../../shared/service-master";
@@ -150,8 +155,8 @@ class MockMap {
 
 const asMap = (mock: MockMap) => mock as unknown as MapLibreLike;
 
-describe("the colors the line sources receive (subtask 1680 fix4)", () => {
-  test("normal overlay: the visited-lines source data paints every 山手線 leg unified green", () => {
+describe("the colors the line sources receive (subtask 1680 fix5)", () => {
+  test("normal overlay: the assembled visited-lines source data paints every 山手線 leg unified green", () => {
     const coverage = yamanoteCoverage();
     const painted = coverage.perServiceLegs.get("yamanote")!;
     /* The input really does put legs on all three keys, or
@@ -162,7 +167,17 @@ describe("the colors the line sources receive (subtask 1680 fix4)", () => {
     expect(keys.has("東北線|東日本旅客鉄道")).toBe(true);
     expect(keys.has("東海道線|東日本旅客鉄道")).toBe(true);
 
-    const features = paintedLineFeatures(coverage.perServiceLegs, GEOMETRIES);
+    /* Drive the assembly itself — the object the component
+       pushes as the overlay — not the builder below it. */
+    const overlay = visitedLinesOverlay(coverage.perServiceLegs, GEOMETRIES);
+    expect(overlay).not.toBeNull();
+    expect(overlay!.id).toBe(VISITED_LINES_SOURCE_ID);
+    expect(overlay!.layers.map((layer) => layer.id)).toEqual([
+      "visited-lines-casing",
+      "visited-lines-color",
+      "visited-lines-unknown",
+    ]);
+    const features = overlay!.data.features;
     expect(features.length).toBe(painted.legs.length);
     expect(features.length).toBeGreaterThan(0);
     for (const feature of features) {
@@ -170,6 +185,10 @@ describe("the colors the line sources receive (subtask 1680 fix4)", () => {
       expect(feature.properties.color).not.toBe(TOHOKU_BLUE);
       expect(feature.properties.color).not.toBe(TOKAIDO_ORANGE);
     }
+  });
+
+  test("normal overlay: nothing painted assembles to no overlay", () => {
+    expect(visitedLinesOverlay(new Map(), GEOMETRIES)).toBeNull();
   });
 
   test("ridden focus: setFocusSection hands the focus source unified-green features", () => {
@@ -238,10 +257,12 @@ describe("the colors the line sources receive (subtask 1680 fix4)", () => {
       lengthKm: 1,
     };
 
-    const normal = paintedLineFeatures(
+    const normalOverlay = visitedLinesOverlay(
       new Map([["jr-chuo-rapid", { legs: [chuoLeg], unknown: false }]]),
       GEOMETRIES,
     );
+    expect(normalOverlay).not.toBeNull();
+    const normal = normalOverlay!.data.features;
     expect(normal).toHaveLength(1);
     expect(normal[0]!.properties.color).toBe(chuoColor);
 
