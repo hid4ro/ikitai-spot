@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   formatProgressValue,
+  normalizeProgressRow,
   progressTickFraction,
   progressTickLabel,
 } from "./progress-format";
@@ -60,6 +61,70 @@ describe("progressTickLabel", () => {
     expect(progressTickLabel("未収録の事業者", undefined)).toBe(
       "未収録の事業者",
     );
+  });
+});
+
+/* Per-operator bars are normalized to each operator's own
+   denominator (subtask 1615): on the shared km axis JR's
+   ~7,000 km total set the scale, so every other operator's bar
+   collapsed to a sliver. These pin the percent each row draws
+   at, and that the small operator with the higher ratio draws
+   the longer bar. */
+describe("normalizeProgressRow", () => {
+  test("JR: 155.5 of 6,960.6 km draws at about 2.2%", () => {
+    const row = normalizeProgressRow({
+      name: "東日本旅客鉄道",
+      done: 155.5461723571229,
+      total: 6960.6,
+      rest: 6960.6 - 155.5461723571229,
+    });
+    expect(row.name).toBe("東日本旅客鉄道");
+    expect(row.done).toBeCloseTo(2.23, 2);
+    expect(row.rest).toBeCloseTo(97.77, 2);
+    expect(row.total).toBe(100);
+    expect(row.done + row.rest).toBeCloseTo(100, 9);
+  });
+
+  test("a small operator with the higher ratio draws longer than JR", () => {
+    const jr = normalizeProgressRow({
+      name: "東日本旅客鉄道",
+      done: 155.5461723571229,
+      total: 6960.6,
+      rest: 6960.6 - 155.5461723571229,
+    });
+    const keio = normalizeProgressRow({
+      name: "京王電鉄",
+      done: 26.07164613837768,
+      total: 85.1,
+      rest: 85.1 - 26.07164613837768,
+    });
+    // Absolute km say JR (155.5) dwarfs 京王 (26.1); the ratio
+    // says the opposite, and the bar must follow the ratio.
+    expect(keio.done).toBeCloseTo(30.64, 2);
+    expect(keio.done).toBeGreaterThan(jr.done);
+  });
+
+  test("a fully ridden operator fills the bar", () => {
+    const row = normalizeProgressRow({
+      name: "完乗した事業者",
+      done: 12.4,
+      total: 12.4,
+      rest: 0,
+    });
+    expect(row.done).toBeCloseTo(100, 9);
+    expect(row.rest).toBeCloseTo(0, 9);
+  });
+
+  test("no total draws empty instead of NaN", () => {
+    const row = normalizeProgressRow({
+      name: "分母なし",
+      done: 0,
+      total: 0,
+      rest: 0,
+    });
+    expect(row.done).toBe(0);
+    expect(row.rest).toBe(100);
+    expect(Number.isNaN(row.done)).toBe(false);
   });
 });
 

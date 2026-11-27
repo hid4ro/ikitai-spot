@@ -121,7 +121,7 @@ import {
   fallbackPhaseAfterReady,
 } from "./spot-selection";
 import { conquestTimelineForVariant } from "./conquest-timeline";
-import { formatProgressValue, progressTickFraction } from "./progress-format";
+import { formatProgressValue, normalizeProgressRow, progressTickFraction } from "./progress-format";
 import {
   isTapAfterPress,
   pointFromMapEvent,
@@ -1228,6 +1228,7 @@ function StackedProgressBars({
   doneName,
   color,
   onSelect,
+  normalize,
 }: {
   rows: ProgressRow[];
   doneName: string;
@@ -1238,8 +1239,20 @@ function StackedProgressBars({
      in the axis ticks and the caller's accessible button list), so
      this is the pointer path only. */
   onSelect?: (name: string) => void;
+  /* When true (the 事業者別 chart, subtask 1615), each row's bar
+     is scaled to its own denominator: the bar length is
+     done/total as a percent of that row's whole total, on a
+     shared 0–100% axis, so a small operator's progress stays
+     visible next to JR's ~7,000 km network. The axis ticks keep
+     the exact km fraction (155.5/6,960.6) from the original
+     rows, so no number is lost — only the bar lengths change. */
+  normalize?: boolean;
 }) {
   const byName = new Map(rows.map((r) => [r.name, r]));
+  /* The plotted rows: normalized rows carry done/rest as
+     percents of their own total (done + rest = 100); the
+     unnormalized path plots the raw values as before. */
+  const chartRows = normalize ? rows.map(normalizeProgressRow) : rows;
   /* The tick is two lines — the group name over its exact
      fraction — because the one-line label （東日本旅客鉄道
      155.5/6,960.6) outgrew the label column and recharts
@@ -1274,9 +1287,9 @@ function StackedProgressBars({
   return (
     <div className="text-[var(--dim)]" aria-hidden="true">
       <ResponsiveContainer width="100%" height={rows.length * 38 + 46}>
-        <BarChart data={rows} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
+        <BarChart data={chartRows} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 0 }}>
           <CartesianGrid horizontal={false} stroke="currentColor" strokeOpacity={0.12} />
-          <XAxis type="number" domain={[0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} tickFormatter={(value: number) => formatProgressValue(value)} />
+          <XAxis type="number" domain={normalize ? [0, 100] : [0, "dataMax"]} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: "currentColor", strokeOpacity: 0.25 }} tickFormatter={(value: number) => (normalize ? `${formatProgressValue(value)}%` : formatProgressValue(value))} />
           <YAxis
             type="category"
             dataKey="name"
@@ -1287,7 +1300,12 @@ function StackedProgressBars({
           />
           <Tooltip
             contentStyle={CHART_TOOLTIP_STYLE}
-            formatter={(value, name) => [formatProgressValue(Number(value)), name]}
+            formatter={(value, name) => [
+              normalize
+                ? `${formatProgressValue(Number(value))}%`
+                : formatProgressValue(Number(value)),
+              name,
+            ]}
           />
           <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
           <Bar dataKey="done" name={doneName} stackId="total" fill={color} barSize={16} isAnimationActive={false}>
@@ -1473,6 +1491,7 @@ function ConquestCharts({
                 doneName="乗車済み"
                 color={CHART_LINE_COLOR}
                 onSelect={onOperatorSelect}
+                normalize
               />
             </div>
             {/* The chart above is aria-hidden and pointer-only, so
@@ -1500,7 +1519,7 @@ function ConquestCharts({
             )}
             <p className="mt-1 text-xs text-[var(--dim)]">
               乗った路線がある事業者だけを表示しています（全{LINE_OPERATOR_TOTALS.size}事業者のうち{operatorRows.length}事業者）。
-              距離は地図で塗られた区間の重複を除いた合計で、分母は各事業者の全路線の総延長です
+              バーの長さは各事業者の総延長に対する割合です（軸は0〜100%）。距離は地図で塗られた区間の重複を除いた合計で、分母は各事業者の全路線の総延長です
             </p>
           </>
         ) : (

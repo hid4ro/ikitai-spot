@@ -29,6 +29,24 @@ export function progressTickFraction(
   return `${formatProgressValue(row.done)}/${formatProgressValue(row.total)}`;
 }
 
+/* Normalize one stacked progress row to its own denominator
+   (subtask 1615): the bar length becomes done/total as a
+   percent of that row's whole total, so every row fills the
+   same 0–100 scale. The 事業者別 chart needs this because the
+   shared axis was scaled to JR's ~7,000 km network, which
+   shrank every other operator's bar to invisibility — a small
+   operator at 30% of its own network drew shorter than JR at
+   2% of its. The exact km stay on the axis tick (the fraction
+   half) and the chips, so normalization only changes bar
+   lengths, never the numbers. A row with no total (0) draws
+   empty instead of NaN; a fully ridden row fills the bar. */
+export function normalizeProgressRow<T extends { done: number; total: number; rest: number }>(
+  row: T,
+): T {
+  const pct = row.total > 0 ? (row.done / row.total) * 100 : 0;
+  return { ...row, done: pct, total: 100, rest: 100 - pct };
+}
+
 /* The stacked bars' axis tick label: the group name plus its
    exact fraction (東日本旅客鉄道 155.5/6,960.6), so the numbers
    survive without hovering. A name with no matching row keeps
