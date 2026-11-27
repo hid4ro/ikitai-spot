@@ -25,9 +25,12 @@ import {
   type RideInterval,
 } from "./line-geometry";
 import { serviceById, type StationRef } from "../../shared/service-master";
+import type { GeoJsonLineGeometry } from "./geojson";
 import {
   computeUnriddenGhostFeatures,
+  cutGeometryByCorridor,
   ghostCoverageKey,
+  ghostFeaturesMatchCoverage,
   serializeGhostCoverage,
   trimUnriddenGhostFeatures,
   type GhostCoverageWire,
@@ -333,15 +336,8 @@ describe("trimUnriddenGhostFeatures on the real asset", () => {
     }
   });
 
-  test("the trimmed ghost leaves the corridor: no interior vertex near the Tohoku remainder", () => {
+  test("the trimmed ghost leaves the corridor: no vertex or segment runs near the remainder", () => {
     const { remainder, canonical, trimmed } = westSideYamanote();
-    const cuts = remainder.filter((leg) => leg.key === TOHOKU_KEY);
-    const ends = [
-      cuts[0]!.coords[0]!,
-      cuts[cuts.length - 1]!.coords[
-        cuts[cuts.length - 1]!.coords.length - 1
-      ]!,
-    ];
     const canonicalTohoku = canonical.find(
       (f) => f.properties.key === TOHOKU_KEY,
     )!;
@@ -355,19 +351,6 @@ describe("trimUnriddenGhostFeatures on the real asset", () => {
       countGeometryPoints(canonicalTohoku.geometry),
     );
     expect(countGeometryPoints(trimmedTohoku.geometry)).toBeGreaterThan(100);
-    /* Every surviving vertex is either clear of the remainder
-       (> 60 m) or in a station throat at one of its ends
-       (<= 400 m of an end), where the strands share nodes. */
-    for (const run of trimmedTohoku.geometry.coordinates) {
-      for (const p of run) {
-        if (pointLegsM(p, cuts) > 60) continue;
-        const endDist = Math.min(
-          pointPointM(p, ends[0]!),
-          pointPointM(p, ends[1]!),
-        );
-        expect(endDist).toBeLessThanOrEqual(400);
-      }
-    }
     /* The Tokaido side thins out the same way. */
     const canonicalTokaido = canonical.find(
       (f) => f.properties.key === TOKAIDO_KEY,
@@ -379,6 +362,36 @@ describe("trimUnriddenGhostFeatures on the real asset", () => {
     expect(countGeometryPoints(trimmedTokaido.geometry)).toBeLessThan(
       countGeometryPoints(canonicalTokaido.geometry),
     );
+    /* Segments, not just vertices (review round 2, finding
+       1): sample along every surviving segment of both keys —
+       nothing may run inside the corridor mid-segment either.
+       The fix2 cut classified vertices only, so a segment
+       whose endpoints both cleared the corridor survived
+       whole even where its middle ran alongside the remainder
+       (on the Tokaido side, segments within 60 m of the
+       emphasis remained). The cut is exact at 100 m; the 95
+       leaves the frames' rounding. */
+    for (const [feature, key] of [
+      [trimmedTohoku, TOHOKU_KEY],
+      [trimmedTokaido, TOKAIDO_KEY],
+    ] as const) {
+      const cuts = remainder.filter((leg) => leg.key === key);
+      for (const run of feature.geometry.coordinates) {
+        for (let i = 0; i + 1 < run.length; i++) {
+          const a = run[i]!;
+          const b = run[i + 1]!;
+          const steps = Math.max(1, Math.ceil(pointPointM(a, b) / 25));
+          for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            const p = [
+              a[0]! + (b[0]! - a[0]!) * t,
+              a[1]! + (b[1]! - a[1]!) * t,
+            ];
+            expect(pointLegsM(p, cuts)).toBeGreaterThan(95);
+          }
+        }
+      }
+    }
   });
 
   test("unrelated keys pass through by reference; an empty remainder changes nothing", () => {
@@ -396,5 +409,144 @@ describe("trimUnriddenGhostFeatures on the real asset", () => {
     );
     expect(untouched.length).toBe(canonical.length);
     untouched.forEach((f, i) => expect(f).toBe(canonical[i]!));
+  });
+});
+
+/* The corridor cut's segment accuracy (subtask 1680, review
+   round 2, finding 1), pinned directly against
+   cutGeometryByCorridor with synthetic geometry: one straight
+   cut segment, ghost runs parallel to it ~22 m off — inside
+   the 100 m corridor wherever they overlap it. */
+describe("cutGeometryByCorridor on synthetic geometry", () => {
+  const cutLeg: PathLeg = {
+    key: "cut|test",
+    edge: "edge:cut",
+    fromT: 0,
+    toT: 1,
+    coords: [
+      [139.0, 35.0],
+      [139.02, 35.0],
+    ],
+    lengthKm: 1.83,
+  };
+  function distToCutM(p: readonly number[]): number {
+    const a = cutLeg.coords[0]!;
+    const b = cutLeg.coords[1]!;
+    const kx = 111320 * Math.cos((p[1]! * Math.PI) / 180);
+    const ky = 110540;
+    const abx = (b[0] - a[0]) * kx;
+    const aby = (b[1] - a[1]) * ky;
+    const apx = (p[0]! - a[0]) * kx;
+    const apy = (p[1]! - a[1]) * ky;
+    const len2 = abx * abx + aby * aby;
+    const t =
+      len2 === 0
+        ? 0
+        : Math.max(0, Math.min(1, (apx * abx + apy * aby) / len2));
+    return Math.hypot(apx - t * abx, apy - t * aby);
+  }
+  function totalLengthM(geometry: GeoJsonLineGeometry): number {
+    let total = 0;
+    for (const run of geometry.coordinates) {
+      for (let i = 0; i + 1 < run.length; i++) {
+        const a = run[i]!;
+        const b = run[i + 1]!;
+        total += Math.hypot(
+          (b[0]! - a[0]!) * 111320 * Math.cos((a[1]! * Math.PI) / 180),
+          (b[1]! - a[1]!) * 110540,
+        );
+      }
+    }
+    return total;
+  }
+  function expectRunsClear(geometry: GeoJsonLineGeometry) {
+    for (const run of geometry.coordinates) {
+      for (let i = 0; i + 1 < run.length; i++) {
+        const a = run[i]!;
+        const b = run[i + 1]!;
+        for (let s = 0; s <= 20; s++) {
+          const t = s / 20;
+          const p = [
+            a[0]! + (b[0]! - a[0]!) * t,
+            a[1]! + (b[1]! - a[1]!) * t,
+          ];
+          expect(distToCutM(p)).toBeGreaterThan(95);
+        }
+      }
+    }
+  }
+
+  test("a segment dipping through the corridor mid-way is split at entry and exit", () => {
+    /* One long segment parallel to the cut, ~22 m off it: its
+       endpoints sit ~900 m clear of the cut segment, but its
+       middle runs inside the corridor for ~2 km. The fix2
+       vertex-only cut kept this segment whole. */
+    const geometry: GeoJsonLineGeometry = {
+      type: "MultiLineString",
+      coordinates: [[[138.99, 35.0002], [139.03, 35.0002]]],
+    };
+    const out = cutGeometryByCorridor(geometry, [cutLeg]);
+    /* Two stubs survive, one at each end of the run. */
+    expect(out.coordinates.length).toBe(2);
+    expectRunsClear(out);
+    const surviving = totalLengthM(out);
+    expect(surviving).toBeGreaterThan(1200);
+    expect(surviving).toBeLessThan(2000);
+    /* The gap between the stubs is the removed parallel
+       stretch, crossings included (~2 km). */
+    const westEnd = out.coordinates[0]![out.coordinates[0]!.length - 1]!;
+    const eastStart = out.coordinates[1]![0]!;
+    expect((eastStart[0]! - westEnd[0]!) * 91200).toBeGreaterThan(1800);
+  });
+
+  test("a segment starting inside the corridor is cut at its exit only", () => {
+    const geometry: GeoJsonLineGeometry = {
+      type: "MultiLineString",
+      coordinates: [[[139.005, 35.0002], [139.03, 35.0002]]],
+    };
+    const out = cutGeometryByCorridor(geometry, [cutLeg]);
+    expect(out.coordinates.length).toBe(1);
+    expectRunsClear(out);
+    /* The survivor starts at the corridor's exit crossing,
+       east of the cut's end. */
+    expect(out.coordinates[0]![0]![0]!).toBeGreaterThan(139.02);
+  });
+
+  test("a run wholly inside the corridor disappears; a run wholly outside is untouched", () => {
+    const inside: GeoJsonLineGeometry = {
+      type: "MultiLineString",
+      coordinates: [[[139.002, 35.0002], [139.018, 35.0002]]],
+    };
+    expect(cutGeometryByCorridor(inside, [cutLeg]).coordinates).toEqual([]);
+    const outside: GeoJsonLineGeometry = {
+      type: "MultiLineString",
+      coordinates: [[[138.99, 35.01], [139.03, 35.01]]],
+    };
+    expect(cutGeometryByCorridor(outside, [cutLeg]).coordinates).toEqual(
+      outside.coordinates,
+    );
+  });
+});
+
+/* The focus paths' staleness gate (subtask 1680, review
+   round 2, finding 2): features may be written against a
+   coverage only when they are that coverage's own result. */
+describe("ghostFeaturesMatchCoverage", () => {
+  test("only the producing coverage's key matches", () => {
+    const coverage = saikyoCoverage();
+    const key = ghostCoverageKey(serializeGhostCoverage(coverage));
+    expect(ghostFeaturesMatchCoverage(key, coverage)).toBe(true);
+    expect(ghostFeaturesMatchCoverage(null, coverage)).toBe(false);
+    expect(ghostFeaturesMatchCoverage("stale-key", coverage)).toBe(false);
+    const empty = {
+      perServiceLegs: new Map(),
+    } as unknown as LineCoverage;
+    expect(ghostFeaturesMatchCoverage(key, empty)).toBe(false);
+    expect(
+      ghostFeaturesMatchCoverage(
+        ghostCoverageKey(serializeGhostCoverage(empty)),
+        empty,
+      ),
+    ).toBe(true);
   });
 });
