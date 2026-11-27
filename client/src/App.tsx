@@ -69,24 +69,25 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
-  focusSectionFeature,
-  paintedLegFeature,
-  remainderLegFeature,
+  paintedLineFeatures,
   riddenLineIntervals,
   servicePaintColor,
   wholeLineBounds,
   type LineCoverage,
   type LineGeometryMap,
-  type PaintedLegFeature,
-  type PathLeg,
 } from "./line-geometry";
 import {
   ghostCoverageKey,
-  ghostFeaturesMatchCoverage,
   serializeGhostCoverage,
-  trimUnriddenGhostFeatures,
 } from "./unridden-ghost";
 import { createUnriddenGhostClient } from "./unridden-ghost-client";
+import {
+  clearFocusLineGeometry,
+  EMPTY_FOCUS_DATA,
+  setFocusSection,
+  setUnriddenRemainderFocus,
+  type RemainderGhostContext,
+} from "./line-map-focus";
 import {
   JAPAN_LINE_TOTAL_KM,
   OPERATOR_TOTAL_KM,
@@ -109,16 +110,12 @@ import {
   shouldMountLiveMap,
   spotsInitialCamera,
   stickyPaneVisibleTop,
-  UNRIDDEN_FOCUS_SOURCE_ID,
-  UNRIDDEN_LINES_SOURCE_ID,
-  ensureUnriddenRemainderFocus,
   unriddenRemainderKeysForRow,
   unriddenRemainderKeysForSelection,
   unriddenRemainderLegsForRow,
   unriddenRemainderLegsForSelection,
   type MapMountKeys,
   type RecordMapVariant,
-  type RemainderLeg,
   type UnriddenGhostResult,
   type UnriddenLineFeature,
 } from "./map-variant";
@@ -1895,7 +1892,6 @@ const FOCUS_POINT_SOURCE_ID = "visited-focus-point";
 const FOCUS_WARDS_SOURCE_ID = "designated-city-focus-wards";
 const FOCUS_OUTLINE_SOURCE_ID = "visited-focus-outline-lines";
 const FOCUS_FILL_SOURCE_ID = "visited-focus-fill-only";
-const EMPTY_FOCUS_DATA = { type: "FeatureCollection", features: [] };
 
 /* Boundary segments of a designated city, classified by part
    sharing; internalWardLineFeatures (the ward lines) and
@@ -3045,274 +3041,6 @@ function clearFocusGeometry(map: MapLibreLike) {
   map.getSource(FOCUS_OUTLINE_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
 }
 
-/* ---------------- ridden-line focus highlight ----------------
-   The 路線 counterpart of the municipality focus above: while a
-   line is focused, its NORMAL layers (visited-lines casing +
-   color) filter it out and the focus layers below replace it.
-   Unlike the municipality focus, the paint keeps the line's OWN
-   color (2026-11-25, the reader's request: repainting the line
-   signal orange hides which line it is). The emphasis is carried
-   by width and layering instead — a halo in the line's own color
-   at low opacity, a white casing, and a core in the line's own
-   color, drawn wider than any normal line so the focused line
-   reads at a glance without losing its identity. The color rides
-   on each focus feature as a property (see setFocusSection), the
-   same contract as the normal line layers. On the 市区町村 tab
-   the line layers stay out of the tap hit-test set, so the
-   highlight cannot intercept a municipality tap; on the 路線 tab
-   the focus layers ARE hit-tested, so the highlighted track
-   itself stays tappable (see the line tap handler). */
-
-const LINE_FOCUS_SOURCE_ID = "visited-line-focus";
-
-function ensureLineFocusLayers(map: MapLibreLike) {
-  if (!map.getSource(LINE_FOCUS_SOURCE_ID)) {
-    map.addSource(LINE_FOCUS_SOURCE_ID, {
-      type: "geojson",
-      data: EMPTY_FOCUS_DATA,
-    });
-  }
-  if (!map.getLayer("visited-line-focus-halo")) {
-    map.addLayer({
-      id: "visited-line-focus-halo",
-      type: "line",
-      source: LINE_FOCUS_SOURCE_ID,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": ["get", "color"],
-        "line-opacity": 0.3,
-        "line-width": 13,
-      },
-    });
-  }
-  if (!map.getLayer("visited-line-focus-casing")) {
-    map.addLayer({
-      id: "visited-line-focus-casing",
-      type: "line",
-      source: LINE_FOCUS_SOURCE_ID,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": "#ffffff",
-        "line-opacity": 0.95,
-        "line-width": 8,
-      },
-    });
-  }
-  if (!map.getLayer("visited-line-focus-color")) {
-    map.addLayer({
-      id: "visited-line-focus-color",
-      type: "line",
-      source: LINE_FOCUS_SOURCE_ID,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: {
-        "line-color": ["get", "color"],
-        "line-opacity": 1,
-        "line-width": 5,
-      },
-    });
-  }
-}
-
-/* Line-focus switching, mirroring setNormalFillExclusion: while a
-   line is focused its normal paint is filtered out of the
-   visited-lines layers and the focus layers replace it, so the
-   line is never double-painted. The exclusion is by SERVICE id
-   (the property every overlay feature carries), not by formal
-   line key: two services can share one key — 総武本線 and
-   総武快速線 both paint JR・総武線 — and focusing one must not
-   hide the other (integrated review round 1, medium). Null
-   restores every line. The unknown layer is excluded the
-   same way: a focused unknown ride must not show both as a
-   thin whole path and as the focus highlight. */
-function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
-  const filter = serviceId
-    ? ["all", ["!=", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["!=", ["get", "unknown"], true];
-  const unknownFilter = serviceId
-    ? ["all", ["==", ["get", "unknown"], true], ["!=", ["get", "serviceId"], serviceId]]
-    : ["==", ["get", "unknown"], true];
-  if (map.getLayer("visited-lines-casing")) {
-    map.setFilter("visited-lines-casing", filter);
-  }
-  if (map.getLayer("visited-lines-color")) {
-    map.setFilter("visited-lines-color", filter);
-  }
-  if (map.getLayer("visited-lines-unknown")) {
-    map.setFilter("visited-lines-unknown", unknownFilter);
-  }
-}
-
-/* The ghost context a remainder-focus call rewrites the
-   ghost's source from: the canonical features (the worker's
-   latest result, held by the caller), the coverage key of
-   the result they came from, and the CURRENT coverage.
-   `spans` are the focused service's remainder legs in their
-   full edge frame — the stretches the ghost must not also
-   paint while the focus layer shows them at midway strength.
-   No spans restores the canonical features untouched. The
-   source is rewritten only while the features still belong
-   to the current coverage (ghostFeaturesMatchCoverage):
-   after a ledger change the held result is the old ledger's
-   until the worker's fresh answer lands. */
-type RemainderGhostContext = {
-  features: readonly UnriddenLineFeature[];
-  coverageKey: string | null;
-  coverage: LineCoverage;
-  spans: readonly PathLeg[];
-};
-
-/* The focused line's unridden remainder (subtask 1589,
-   rescoped to the service itself by subtask 1635): while a
-   line is focused, the stretches of ITS OWN path it has not
-   ridden yet repaint at the midway strength of the
-   unridden-lines-focus layer (see map-variant.ts for the
-   paint), so where the selected line is still unridden reads
-   at a glance. The layer reads its OWN source, filled here
-   with the service's remainder legs from the coverage — the
-   old cut shared the ghost source and selected by formal-line
-   key, so a branch service painted its whole formal line's
-   remainder (むさしの号's 東北線 slice drew Tokyo→Aomori).
-   The switching mirrors setNormalLineExclusion: every stretch
-   is painted exactly once, at exactly one strength — the
-   ghost's source is rewritten with the remainder's stretches
-   trimmed out of it (trimUnriddenGhostFeatures in
-   unridden-ghost.ts), span-precise by formal-line key and
-   graph edge, so the rest of a shared formal line keeps its
-   ghost while its service is focused （東北線 north of 田端
-   survives a 山手線 focus). The first cut excluded whole
-   formal-line keys by layer filter, keyed off the PAINTED
-   legs' keys: a ride painting only one of a service's keys
-   left the other keys' ghosts stacked under the remainder,
-   shifting its hue (subtask 1680, review round 1). An
-   unknown ride passes no keys and no legs — nothing is
-   recorded as ridden for it, so there is no remainder to
-   single out, and its whole path is the focus highlight
-   already. Null (or no keys) restores the ghost's canonical
-   features and empties the focus source. A map whose focus
-   layer never joined yet gains it here, as in
-   ensureLineFocusLayers. A caller that cannot supply the
-   ghost context (ghost = null) leaves the ghost's source as
-   it stands; the paths that can — every focus change and
-   clear — pass it, and the ghost's own late join re-applies
-   the current focus right after landing. */
-function setUnriddenRemainderFocus(
-  map: MapLibreLike,
-  keys: readonly string[] | null,
-  legs: readonly RemainderLeg[],
-  serviceId?: string | null,
-  ghost?: RemainderGhostContext | null,
-  variant?: RecordMapVariant,
-) {
-  const active = keys && keys.length > 0 ? [...keys] : null;
-  /* The current tab rides along so a remainder layer CREATED
-     by this call starts at that tab's visibility (subtask
-     1648): no variant paint runs after a focus call, so the
-     spec's default "none" would strand a filled layer
-     invisible whenever the ghost had not landed yet — and
-     for good if the ghost computation then failed. */
-  ensureUnriddenRemainderFocus(map, variant);
-  map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
-    type: "FeatureCollection",
-    /* remainderLegFeature (line-geometry.ts) builds these —
-       the same builder the tests assert the colors through
-       (subtask 1680, review round 2, finding 3). A
-       paint-unified service (山手線) keeps its representative
-       color on the remainder too, so the focused loop reads
-       as one line at both strengths. */
-    features: legs.map((leg) =>
-      remainderLegFeature(serviceId ?? null, leg, RIDDEN_LINE_GEOMETRIES),
-    ),
-  });
-  if (
-    ghost &&
-    ghost.features.length > 0 &&
-    ghostFeaturesMatchCoverage(ghost.coverageKey, ghost.coverage)
-  ) {
-    /* The coverage-key gate (subtask 1680, review round 2,
-       finding 2 — the same discipline as the worker apply
-       path's, in applyUnriddenLineGhostLatest): while the
-       worker recomputes after a ledger change, the held
-       features belong to the old coverage, and writing them
-       back here — trimmed against the new coverage's spans,
-       or restored whole on a focus clear — would resurrect a
-       stale ghost. Leaving the source as it stands is safe:
-       the fresh result joins through the apply path, which
-       re-applies the current focus right after landing. */
-    map.getSource(UNRIDDEN_LINES_SOURCE_ID)?.setData({
-      type: "FeatureCollection",
-      features:
-        active && ghost.spans.length > 0
-          ? trimUnriddenGhostFeatures(
-              ghost.features,
-              ghost.coverage,
-              RIDDEN_LINE_GEOMETRIES,
-              ghost.spans,
-            )
-          : ghost.features,
-    });
-  }
-  /* The ghost layer carries no filter: the exclusion lives in
-     its source data now, not in a key filter. Clearing any
-     filter a previous build set keeps that invariant on a map
-     that outlives the switch. */
-  if (map.getLayer("unridden-lines-ghost")) {
-    map.setFilter("unridden-lines-ghost", null);
-  }
-}
-
-/* Paints one ridden service's painted legs as the focus
-   highlight, swapping them out of the normal line layers (see
-   setNormalLineExclusion). `legs` are the service's painted legs
-   from the line coverage — a partial ride highlights only its
-   ridden section, a full ride its whole path, an unknown ride
-   its whole path. Each feature carries its leg's own color (the
-   asset entry for the leg's key, the same lookup the normal
-   overlay features use) so the focus layers paint the line in
-   its own color; a leg whose asset entry has no color falls
-   back to the signal orange, the pre-2026-11-25 paint. The
-   features carry the serviceId too, so a tap on the highlight
-   itself resolves to the same service (the focus layers are in
-   the tap hit-test set — see the line tap handler). */
-function setFocusSection(
-  map: MapLibreLike,
-  serviceId: string,
-  legs: readonly { key: string; coords: readonly [number, number][] }[],
-) {
-  ensureLineFocusLayers(map);
-  setNormalLineExclusion(map, serviceId);
-  map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
-    type: "FeatureCollection",
-    /* focusSectionFeature (line-geometry.ts) builds these —
-       the same builder the tests assert the colors through
-       (subtask 1680, review round 2, finding 3). A
-       paint-unified service (山手線) highlights in its
-       representative color throughout, not per formal line —
-       the highlight is the service's identity cue. */
-    features: legs.map((leg) =>
-      focusSectionFeature(serviceId, leg, RIDDEN_LINE_GEOMETRIES),
-    ),
-  });
-}
-
-function clearFocusLineGeometry(
-  map: MapLibreLike,
-  ghost?: Omit<RemainderGhostContext, "spans"> | null,
-  variant?: RecordMapVariant,
-) {
-  setNormalLineExclusion(map, null);
-  /* No spans: the ghost's source goes back to the canonical
-     features, undoing the cleared focus's trim. */
-  setUnriddenRemainderFocus(
-    map,
-    null,
-    [],
-    null,
-    ghost ? { ...ghost, spans: [] } : ghost,
-    variant,
-  );
-  map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
-}
-
 function VisitedMapSection({
   active,
   variant,
@@ -3742,30 +3470,20 @@ function VisitedMapSection({
      総武快速線 both draw JR・総武線) are told apart by
      serviceId, never by key alone (integrated review round 1,
      medium). */
-  const riddenLineFeatures = useMemo(() => {
-    const features: PaintedLegFeature[] = [];
-    for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
-      for (const leg of painted.legs) {
-        /* paintedLegFeature (line-geometry.ts) builds these —
-           the same builder the tests assert the colors through
-           (subtask 1680, review round 2, finding 3). A
-           paint-unified service (山手線) paints every leg in
-           its representative color: the loop is one named line
-           to the reader even where its trains run on the
-           東北線・東海道線 formal lines. The leg's key still
-           names its formal line for coverage and the ghost;
-           a leg with no color at all is skipped, as before. */
-        const feature = paintedLegFeature(
-          serviceId,
-          leg,
-          painted.unknown,
-          RIDDEN_LINE_GEOMETRIES,
-        );
-        if (feature) features.push(feature);
-      }
-    }
-    return features;
-  }, [lineCoverage]);
+  const riddenLineFeatures = useMemo(
+    () =>
+      /* paintedLineFeatures (line-geometry.ts) builds these —
+         the same builder the tests assert the colors through
+         (subtask 1680, review round 3, finding 2). A
+         paint-unified service (山手線) paints every leg in
+         its representative color: the loop is one named line
+         to the reader even where its trains run on the
+         東北線・東海道線 formal lines. The leg's key still
+         names its formal line for coverage and the ghost;
+         a leg with no color at all is skipped, as before. */
+      paintedLineFeatures(lineCoverage.perServiceLegs, RIDDEN_LINE_GEOMETRIES),
+    [lineCoverage],
+  );
 
   const riddenLinesKey = useMemo(
     () => JSON.stringify(
