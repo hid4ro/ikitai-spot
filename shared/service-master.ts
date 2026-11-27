@@ -1376,6 +1376,132 @@ export function recordedSectionFitsService(
     !sectionRouteAmbiguous(serviceId, fromStationId, toStationId, direction);
 }
 
+/* The positions of two stations on a loop service, in the
+   ordered stations' running order (the closing entry counts as
+   position 0) — the shared basis for the direction-less
+   fallback: forward/backward steps round the loop. Null when
+   the service is not a loop, or an endpoint is not an ordered
+   station of it, or the pair is degenerate. */
+function loopSectionSteps(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): {
+  fromIdx: number;
+  toIdx: number;
+  forward: number;
+  backward: number;
+} | null {
+  if (!serviceIsLoop(serviceId)) return null;
+  const ordered = serviceOrderedStations(serviceId);
+  const n = ordered.length - 1;
+  if (n <= 0) return null;
+  const indexOf = (stationId: string): number => {
+    const idx = ordered.findIndex((s) => s.id === stationId);
+    if (idx < 0) return -1;
+    return idx === ordered.length - 1 ? 0 : idx;
+  };
+  const fromIdx = indexOf(fromStationId);
+  const toIdx = indexOf(toStationId);
+  if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return null;
+  return {
+    fromIdx,
+    toIdx,
+    forward: (((toIdx - fromIdx) % n) + n) % n,
+    backward: (((fromIdx - toIdx) % n) + n) % n,
+  };
+}
+
+/* The way round a loop a direction-less section takes: the
+   shorter way by station steps (forward <= backward is outer).
+   Null when the service is not a loop, or an endpoint is not
+   an ordered station of it. This is the fallback clipServicePath
+   and coveredBlockIds use, so the drawing and the block
+   picker's check column agree — and the yardstick for whether
+   an added section duplicates a direction-less primary (the
+   primary carries no direction, so its side is this one). */
+export function resolveLoopSectionDirection(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+): "inner" | "outer" | null {
+  const steps = loopSectionSteps(serviceId, fromStationId, toStationId);
+  if (!steps) return null;
+  return steps.forward <= steps.backward ? "outer" : "inner";
+}
+
+/* The canonical identity of one loop section: the undirected
+   edge range it covers, as "start:steps" in the ordered
+   stations' running order. An outer section starts at its
+   from station and runs forward; an inner one starts at its
+   to station and runs forward the other way round — so 大崎→目黒
+   outer and 目黒→大崎 inner share the key, while the
+   complementary arcs do not. A direction-less section takes
+   the shorter way (resolveLoopSectionDirection). Null when an
+   endpoint is not an ordered station, or the pair is degenerate. */
+function loopArcKey(
+  serviceId: string,
+  fromStationId: string,
+  toStationId: string,
+  direction: "inner" | "outer" | null,
+): string | null {
+  const steps = loopSectionSteps(serviceId, fromStationId, toStationId);
+  if (!steps) return null;
+  const dir =
+    direction ?? (steps.forward <= steps.backward ? "outer" : "inner");
+  const arcSteps = dir === "outer" ? steps.forward : steps.backward;
+  const start = dir === "outer" ? steps.fromIdx : steps.toIdx;
+  return `${start}:${arcSteps}`;
+}
+
+export type RecordedSectionInput = {
+  fromStationId: string;
+  toStationId: string;
+  direction?: "inner" | "outer" | null;
+};
+
+/* Whether two recorded sections of one service are the same
+   ride: the same stretch of the line, travelled either way.
+   On a plain service the pair is the stretch (a section is
+   undirected there — the clip swaps it into running order).
+   On a loop the pair plus the side round the loop is the
+   stretch: a direction-less section takes the shorter way by
+   station steps, so 大崎→目黒 with no direction is the same
+   ride as 大崎→目黒 outer, but not as inner; and 大崎→目黒
+   outer is the same ride as 目黒→大崎 inner (the same arc,
+   travelled the other way). Endpoints the master does not
+   list as ordered stations cannot be resolved on a loop, so
+   those compare as written (a direction-less primary and an
+   explicit-direction addition stay distinct there). */
+export function sectionsAreSameRide(
+  serviceId: string,
+  a: RecordedSectionInput,
+  b: RecordedSectionInput,
+): boolean {
+  const aDir = a.direction ?? null;
+  const bDir = b.direction ?? null;
+  const samePair =
+    (a.fromStationId === b.fromStationId &&
+      a.toStationId === b.toStationId) ||
+    (a.fromStationId === b.toStationId &&
+      a.toStationId === b.fromStationId);
+  if (!serviceIsLoop(serviceId)) return samePair;
+  /* Both direction-less: the same fallback resolves both, so
+     the unordered pair is the ride — even when the endpoints
+     are not ordered stations (the clip's old behaviour for
+     those is undirected too). */
+  if (aDir === null && bDir === null) return samePair;
+  const keyA = loopArcKey(serviceId, a.fromStationId, a.toStationId, aDir);
+  const keyB = loopArcKey(serviceId, b.fromStationId, b.toStationId, bDir);
+  if (keyA !== null && keyB !== null) return keyA === keyB;
+  /* Unresolvable on a loop: compare as written. */
+  return (
+    a.fromStationId === b.fromStationId &&
+    a.toStationId === b.toStationId &&
+    aDir === bDir
+  );
+}
+
 /* Whether a ledger row's service link can be confirmed by hand
    (subtask 1435): rows whose saved link disagrees with the current
    name rule (needsReview), plus rows a human already unlinked

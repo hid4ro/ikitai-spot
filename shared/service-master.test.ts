@@ -22,8 +22,10 @@ import {
   isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
   recordedSectionFitsService,
+  resolveLoopSectionDirection,
   resolveRiddenService,
   sectionEndpointsKnownToService,
+  sectionsAreSameRide,
   sectionRouteAmbiguous,
   serviceBoundaryStations,
   serviceById,
@@ -1034,6 +1036,103 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       serviceOrderedStations("keio").map((s) => s.id),
     ).toEqual(["003700", "003966", "003821", "003971", "003934"]);
+  });
+
+  test("sectionsAreSameRide: the five restored sections duplicate their primary (subtask 1612)", () => {
+    // The four plain services: the same pair either way round is
+    // the same stretch, and the primary carries no direction to
+    // disagree with.
+    for (const [serviceId, from, to, other] of [
+      ["jr-chuo-rapid", "003606", "003766", "003634"],
+      ["jr-saikyo", "003700", "004135", "003390"],
+      ["rinkai", "004135", "004182", "003997"],
+      ["keio", "003821", "003971", "003934"],
+    ] as const) {
+      const primary = { fromStationId: from, toStationId: to, direction: null };
+      expect(sectionsAreSameRide(serviceId, primary, primary)).toBe(true);
+      expect(
+        sectionsAreSameRide(serviceId, primary, {
+          fromStationId: to,
+          toStationId: from,
+          direction: null,
+        }),
+      ).toBe(true);
+      // A different stretch on the same service is not the ride.
+      expect(
+        sectionsAreSameRide(serviceId, primary, {
+          fromStationId: from,
+          toStationId: other,
+          direction: null,
+        }),
+      ).toBe(false);
+    }
+    // The loop: a direction-less 大崎→目黒 takes the shorter way
+    // (outer, 1 step against 7), so it duplicates the outer
+    // addition but not the inner one.
+    expect(
+      resolveLoopSectionDirection("yamanote", "004135", "004072"),
+    ).toBe("outer");
+    const noDirection = {
+      fromStationId: "004135",
+      toStationId: "004072",
+      direction: null,
+    };
+    expect(
+      sectionsAreSameRide("yamanote", noDirection, {
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "outer",
+      }),
+    ).toBe(true);
+    expect(
+      sectionsAreSameRide("yamanote", noDirection, {
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "inner",
+      }),
+    ).toBe(false);
+    // The same arc travelled the other way round is the same
+    // ride; the complementary arc is not.
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "004072", direction: "outer" },
+        { fromStationId: "004072", toStationId: "004135", direction: "inner" },
+      ),
+    ).toBe(true);
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "004072", direction: "outer" },
+        { fromStationId: "004072", toStationId: "004135", direction: "outer" },
+      ),
+    ).toBe(false);
+    // 新宿→大崎 inner is the same arc as 大崎→新宿 outer.
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "003700", toStationId: "004135", direction: "inner" },
+        { fromStationId: "004135", toStationId: "003700", direction: "outer" },
+      ),
+    ).toBe(true);
+    // The tie breaks to outer: 品川→新宿 is 4 steps either way.
+    expect(
+      resolveLoopSectionDirection("yamanote", "004095", "003700"),
+    ).toBe("outer");
+    // Off a loop there is no direction to resolve; an endpoint
+    // the master does not list as an ordered station cannot be
+    // resolved on a loop either, so those compare as written.
+    expect(resolveLoopSectionDirection("keio", "003821", "003971")).toBeNull();
+    expect(
+      resolveLoopSectionDirection("yamanote", "004135", "999999"),
+    ).toBeNull();
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "999999", direction: null },
+        { fromStationId: "004135", toStationId: "999999", direction: "outer" },
+      ),
+    ).toBe(false);
   });
 
   test("validateSectionEndpoints: the 京王新線 sections register (subtask 1574)", () => {

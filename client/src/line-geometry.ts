@@ -42,6 +42,8 @@ import {
   SERVICE_MASTER,
   blocksForService,
   recordedSectionFitsService,
+  resolveLoopSectionDirection,
+  sectionsAreSameRide,
   serviceById,
   serviceIsLoop,
   serviceOrderedStations,
@@ -811,25 +813,18 @@ export function clipServicePath(
      path) flips to the long way round: 大崎→田端 drew via
      渋谷・新宿 while the picker marked the 東京 side, and
      品川→新宿 drew via 東京 while the picker marked b1・b2.
-     Endpoints the master does not list keep the old behaviour
-     (a migrated section like 大崎→目黒, whose far end is no
-     ordered station). */
+     Endpoints the master does not list as ordered stations
+     keep the old behaviour (the resolver returns null for
+     them). The rule lives in the shared master
+     (resolveLoopSectionDirection) so the same-ride check
+     (subtask 1612) resolves the same side. */
   let resolvedDirection = direction ?? null;
   if (isLoop && !resolvedDirection) {
-    const ordered = serviceOrderedStations(path.serviceId);
-    const n = ordered.length - 1;
-    const indexOf = (station: StationRef): number => {
-      const idx = ordered.findIndex((s) => s.id === station.id);
-      if (idx < 0) return -1;
-      return idx === ordered.length - 1 ? 0 : idx;
-    };
-    const fromIdx = indexOf(from);
-    const toIdx = indexOf(to);
-    if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx && n > 0) {
-      const forward = (((toIdx - fromIdx) % n) + n) % n;
-      const backward = (((fromIdx - toIdx) % n) + n) % n;
-      resolvedDirection = forward <= backward ? "outer" : "inner";
-    }
+    resolvedDirection = resolveLoopSectionDirection(
+      path.serviceId,
+      from.id,
+      to.id,
+    );
   }
   /* Arc positions of both stations on the oriented path. */
   const oriented =
@@ -1325,18 +1320,36 @@ type RecordedRiddenLine = RiddenServiceLink & {
 
 /* The intervals attributable to this link, using the same route
    evidence as link confirmation. Both the map and the block picker
-   use these intervals. */
+   use these intervals. One entry per ride (subtask 1612): an
+   added section that duplicates the row's primary section — the
+   five restored sections of subtask 1572 are all such duplicates —
+   used to reach the drawing a second time, painting every leg
+   twice (the distance stayed right only because the coverage
+   merges ranges). The primary is the ride record itself, so it
+   stays canonical and the duplicate copy is skipped; the same
+   holds for two added sections covering one stretch. */
 export function riddenLineIntervals(
   row: RecordedRiddenLine,
   serviceId: string,
 ): RideInterval[] {
   const intervals: RideInterval[] = [];
+  const kept: RecordedSection[] = [];
   const addInterval = (section: RecordedSection) => {
     if (!recordedSectionFitsService(serviceId, section)) return;
+    if (
+      kept.some((existing) =>
+        sectionsAreSameRide(serviceId, existing, section),
+      )
+    ) {
+      return;
+    }
     const from = stationRefById(section.fromStationId);
     const to = stationRefById(section.toStationId);
     const { direction } = section;
-    if (from && to) intervals.push({ serviceId, from, to, direction });
+    if (from && to) {
+      kept.push(section);
+      intervals.push({ serviceId, from, to, direction });
+    }
   };
   if (row.rideState === "partial" && row.fromStationId && row.toStationId) {
     addInterval({

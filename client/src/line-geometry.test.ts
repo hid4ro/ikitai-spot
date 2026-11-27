@@ -28,6 +28,7 @@ import {
   paintedLegFeature,
   parseFullPathSnapshot,
   remainderLegFeature,
+  riddenLineIntervals,
   sectionBounds,
   servicePaintColor,
   serviceUnriddenLegs,
@@ -685,6 +686,194 @@ describe("real asset: the subtask-1455 estimated sections", () => {
     );
     expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
     expect(coverage.completeServiceIds).toEqual([]);
+  });
+
+  test("a section duplicating the primary is one ride, not two (subtask 1612)", () => {
+    /* The five restored sections of subtask 1572 each duplicate
+       the row's migrated primary section, so every ride reached
+       the drawing twice — twice the legs (the repro measured
+       exactly 2x per service); the distance stayed right only
+       because the coverage merges ranges. The duplicate copy is
+       skipped: one interval, one set of legs, and the same
+       kilometres as the primary alone. The primary stays
+       canonical, so the Yamanote outer is kept (its
+       direction-less clip resolves to the same short arc). */
+    const cases = [
+      {
+        name: "JR中央線（快速）",
+        serviceId: "jr-chuo-rapid",
+        from: S.国分寺,
+        to: S.東京,
+        direction: null,
+      },
+      {
+        name: "JR埼京線",
+        serviceId: "jr-saikyo",
+        from: S.新宿,
+        to: S.大崎,
+        direction: null,
+      },
+      {
+        name: "りんかい線",
+        serviceId: "rinkai",
+        from: S.大崎,
+        to: S.品川シーサイド,
+        direction: null,
+      },
+      {
+        name: "京王線",
+        serviceId: "keio",
+        from: S.府中,
+        to: S.聖蹟桜ヶ丘,
+        direction: null,
+      },
+      {
+        name: "山手線",
+        serviceId: "yamanote",
+        from: S.大崎,
+        to: S.目黒,
+        direction: "outer" as const,
+      },
+    ];
+    const rowOf = (
+      entry: (typeof cases)[number],
+      withAdded: boolean,
+    ) => ({
+      name: entry.name,
+      serviceId: entry.serviceId,
+      serviceLinkSource: null,
+      recordedServiceId: entry.serviceId,
+      fromStationId: entry.from.id,
+      toStationId: entry.to.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections: withAdded
+        ? [
+            {
+              fromStationId: entry.from.id,
+              toStationId: entry.to.id,
+              direction: entry.direction,
+              blockId: null,
+              recordedServiceId: entry.serviceId,
+            },
+          ]
+        : [],
+    });
+    for (const entry of cases) {
+      const intervals = riddenLineIntervals(
+        rowOf(entry, true),
+        entry.serviceId,
+      );
+      expect(intervals).toHaveLength(1);
+      expect(intervals[0]).toMatchObject({
+        from: { id: entry.from.id },
+        to: { id: entry.to.id },
+      });
+    }
+    const duplicated = computeRiddenLineCoverage(
+      cases.map((entry) => rowOf(entry, true)),
+      GEOMETRIES,
+      597,
+    );
+    const primaryOnly = computeRiddenLineCoverage(
+      cases.map((entry) => rowOf(entry, false)),
+      GEOMETRIES,
+      597,
+    );
+    for (const entry of cases) {
+      expect(duplicated.perServiceLegs.get(entry.serviceId)!.legs).toEqual(
+        primaryOnly.perServiceLegs.get(entry.serviceId)!.legs,
+      );
+      expect(
+        duplicated.perService.get(entry.serviceId)!.riddenKm,
+      ).toBeCloseTo(
+        primaryOnly.perService.get(entry.serviceId)!.riddenKm,
+        9,
+      );
+    }
+    expect(duplicated.networkRiddenKm).toBeCloseTo(
+      primaryOnly.networkRiddenKm,
+      9,
+    );
+    expect(
+      [...duplicated.perKeyKm.entries()].sort(),
+    ).toEqual([...primaryOnly.perKeyKm.entries()].sort());
+  });
+
+  test("only the same stretch dedupes: other added sections still count (subtask 1612)", () => {
+    const yamanoteRow = (
+      sections: {
+        fromStationId: string;
+        toStationId: string;
+        direction: "inner" | "outer" | null;
+        blockId: string | null;
+        recordedServiceId: string;
+      }[],
+    ) => ({
+      name: "山手線",
+      serviceId: "yamanote",
+      serviceLinkSource: null,
+      recordedServiceId: "yamanote",
+      fromStationId: S.大崎.id,
+      toStationId: S.目黒.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections,
+    });
+    /* The long way round is a different ride from the primary's
+       short arc, and a bigger section containing the primary is
+       a different ride too — both still count as a second
+       interval. */
+    expect(
+      riddenLineIntervals(
+        yamanoteRow([
+          {
+            fromStationId: S.大崎.id,
+            toStationId: S.目黒.id,
+            direction: "inner",
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ]),
+        "yamanote",
+      ),
+    ).toHaveLength(2);
+    expect(
+      riddenLineIntervals(
+        yamanoteRow([
+          {
+            fromStationId: S.新宿.id,
+            toStationId: S.大崎.id,
+            direction: "inner",
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ]),
+        "yamanote",
+      ),
+    ).toHaveLength(2);
+    /* The same stretch travelled the other way round is the
+       same ride on a plain service. */
+    const chuoRow = {
+      name: "JR中央線（快速）",
+      serviceId: "jr-chuo-rapid",
+      serviceLinkSource: null,
+      recordedServiceId: "jr-chuo-rapid",
+      fromStationId: S.国分寺.id,
+      toStationId: S.東京.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections: [
+        {
+          fromStationId: S.東京.id,
+          toStationId: S.国分寺.id,
+          direction: null,
+          blockId: null,
+          recordedServiceId: "jr-chuo-rapid",
+        },
+      ],
+    };
+    expect(riddenLineIntervals(chuoRow, "jr-chuo-rapid")).toHaveLength(1);
   });
 });
 
