@@ -81,10 +81,11 @@ import {
 } from "./unridden-ghost";
 import { createUnriddenGhostClient } from "./unridden-ghost-client";
 import {
+  applySelectedLineRemainderFocus,
   clearFocusLineGeometry,
   EMPTY_FOCUS_DATA,
+  reapplyUnriddenRemainderFocus,
   setFocusSection,
-  setUnriddenRemainderFocus,
   visitedLinesOverlay,
   type RemainderGhostContext,
 } from "./line-map-focus";
@@ -110,10 +111,6 @@ import {
   shouldMountLiveMap,
   spotsInitialCamera,
   stickyPaneVisibleTop,
-  unriddenRemainderKeysForRow,
-  unriddenRemainderKeysForSelection,
-  unriddenRemainderLegsForRow,
-  unriddenRemainderLegsForSelection,
   type MapMountKeys,
   type RecordMapVariant,
   type UnriddenGhostResult,
@@ -3394,43 +3391,14 @@ function VisitedMapSection({
      No applicable selection — the layers keep their state
      (a fresh layer's empty source is exactly that state). */
   const applyUnriddenRemainderFocus = (map: MapLibreLike) => {
-    const keys = unriddenRemainderKeysForSelection(
+    reapplyUnriddenRemainderFocus(
+      map,
       riddenRowsRef.current,
-      lineCoverageRef.current.perServiceLegs,
+      lineCoverageRef.current,
       focusedLineIdRef.current,
+      remainderGhostContext(),
+      variantRef.current,
     );
-    const legs = unriddenRemainderLegsForSelection(
-      riddenRowsRef.current,
-      lineCoverageRef.current.perServiceLegs,
-      lineCoverageRef.current.perServiceUnriddenLegs,
-      focusedLineIdRef.current,
-    );
-    if (keys !== null && legs !== null) {
-      /* The selection's service, resolved the same way the
-         keys/legs helpers resolve it, so a paint-unified
-         service's remainder keeps its representative color
-         on this re-apply path too (subtask 1680). */
-      const focusedRow = riddenRowsRef.current.find(
-        (row) => row.id === focusedLineIdRef.current,
-      );
-      const focusService = focusedRow
-        ? usableRiddenService(focusedRow)
-        : undefined;
-      /* The ghost trim's spans: the service's remainder legs
-         in their full edge frame — the same legs the focus
-         source paints, before the RemainderLeg projection
-         drops the frame. An empty remainder trims nothing. */
-      const spans =
-        legs.length > 0 && focusService
-          ? (lineCoverageRef.current.perServiceUnriddenLegs.get(
-              focusService.id,
-            ) ?? [])
-          : [];
-      setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null, {
-        ...remainderGhostContext(),
-        spans,
-      }, variantRef.current);
-    }
   };
   const lineCoverageSettled =
     riddenQuery.data !== undefined || riddenQuery.isError;
@@ -6663,25 +6631,13 @@ function VisitedMapSection({
           ensureFocusListeners(map);
           if (service) setFocusSection(map, service.id, painted.legs);
           if (service) {
-            const unriddenLegs =
-              lineCoverage.perServiceUnriddenLegs.get(service.id);
-            const remainderLegs = unriddenRemainderLegsForRow(
+            applySelectedLineRemainderFocus(
+              map,
               line,
               painted,
-              unriddenLegs,
-            );
-            setUnriddenRemainderFocus(
-              map,
-              unriddenRemainderKeysForRow(line, painted),
-              remainderLegs,
+              lineCoverage,
               service.id,
-              {
-                ...remainderGhostContext(),
-                /* The trim cuts exactly the legs the focus
-                   source paints, in their full edge frame. */
-                spans:
-                  remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
-              },
+              remainderGhostContext(),
               variantRef.current,
             );
           }
@@ -6759,25 +6715,13 @@ function VisitedMapSection({
         try {
           if (service) setFocusSection(map, service.id, painted.legs);
           if (service) {
-            const unriddenLegs =
-              lineCoverage.perServiceUnriddenLegs.get(service.id);
-            const remainderLegs = unriddenRemainderLegsForRow(
+            applySelectedLineRemainderFocus(
+              map,
               row,
               painted,
-              unriddenLegs,
-            );
-            setUnriddenRemainderFocus(
-              map,
-              unriddenRemainderKeysForRow(row, painted),
-              remainderLegs,
+              lineCoverage,
               service.id,
-              {
-                ...remainderGhostContext(),
-                /* The trim cuts exactly the legs the focus
-                   source paints, in their full edge frame. */
-                spans:
-                  remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
-              },
+              remainderGhostContext(),
               variantRef.current,
             );
           }
@@ -6868,25 +6812,13 @@ function VisitedMapSection({
       try {
         if (painted && painted.legs.length > 0 && service) {
           setFocusSection(map, service.id, painted.legs);
-          const unriddenLegs =
-            lineCoverage.perServiceUnriddenLegs.get(service.id);
-          const remainderLegs = unriddenRemainderLegsForRow(
+          applySelectedLineRemainderFocus(
+            map,
             line,
             painted,
-            unriddenLegs,
-          );
-          setUnriddenRemainderFocus(
-            map,
-            unriddenRemainderKeysForRow(line, painted),
-            remainderLegs,
+            lineCoverage,
             service.id,
-            {
-              ...remainderGhostContext(),
-              /* The trim cuts exactly the legs the focus
-                 source paints, in their full edge frame. */
-              spans:
-                remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
-            },
+            remainderGhostContext(),
             variantRef.current,
           );
           /* Fit the whole line into the frame, with the row

@@ -20,6 +20,11 @@
 import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import type { MapLibreLike } from "./map-helpers.mjs";
 import {
+  usableRiddenService,
+  type RideState,
+  type RiddenServiceLink,
+} from "../../shared/service-master";
+import {
   focusSectionFeature,
   paintedLineFeatures,
   remainderLegFeature,
@@ -36,8 +41,13 @@ import {
   ensureUnriddenRemainderFocus,
   UNRIDDEN_FOCUS_SOURCE_ID,
   UNRIDDEN_LINES_SOURCE_ID,
+  unriddenRemainderKeysForRow,
+  unriddenRemainderKeysForSelection,
+  unriddenRemainderLegsForRow,
+  unriddenRemainderLegsForSelection,
   type RecordMapVariant,
   type RemainderLeg,
+  type RemainderPaintedLegs,
   type UnriddenLineFeature,
 } from "./map-variant";
 
@@ -258,6 +268,114 @@ export function setUnriddenRemainderFocus(
      that outlives the switch. */
   if (map.getLayer("unridden-lines-ghost")) {
     map.setFilter("unridden-lines-ghost", null);
+  }
+}
+
+/* The selection-time remainder emphasis (subtask 1648 fix3):
+   the three tap paths — ledger row, operator bar, map line tap —
+   shared this assembly verbatim in App.tsx: resolve the
+   selected row's remainder legs and keys from the coverage,
+   then hand them to setUnriddenRemainderFocus with the current
+   tab's variant, so a remainder layer CREATED by the tap starts
+   at that tab's visibility (subtask 1648). It moved here
+   verbatim (behavior unchanged) for the same reason the focus
+   paint moved in fix4: App.tsx cannot be imported by the
+   tests (it pulls the generated ghost-worker asset), so a
+   call site dropping the variant — the 1648 review's case —
+   passed every test that only drove the helper below this
+   assembly. line-map-paint.test.ts drives this function from
+   an actual line selection on a map the ghost has not reached
+   and asserts the layer's initial visibility and the source's
+   contents. The variant is REQUIRED here (not optional as in
+   setUnriddenRemainderFocus): dropping it at a call site is a
+   type error, so the pass-through cannot silently strand a
+   filled layer at the spec's default "none" again. */
+export function applySelectedLineRemainderFocus(
+  map: MapLibreLike,
+  row: { rideState: RideState },
+  painted: RemainderPaintedLegs | undefined,
+  coverage: LineCoverage,
+  serviceId: string,
+  ghost: Omit<RemainderGhostContext, "spans">,
+  variant: RecordMapVariant,
+): void {
+  const unriddenLegs = coverage.perServiceUnriddenLegs.get(serviceId);
+  const remainderLegs = unriddenRemainderLegsForRow(
+    row,
+    painted,
+    unriddenLegs,
+  );
+  setUnriddenRemainderFocus(
+    map,
+    unriddenRemainderKeysForRow(row, painted),
+    remainderLegs,
+    serviceId,
+    {
+      ...ghost,
+      /* The trim cuts exactly the legs the focus
+         source paints, in their full edge frame. */
+      spans: remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
+    },
+    variant,
+  );
+}
+
+/* The CURRENT selection's re-apply (subtask 1648 fix3): the
+   mount completion and the ghost's late join share this routine
+   in App.tsx (Codex review batch round 1, finding 3) — both
+   paths (re)build the layer with its empty source, and when the
+   ghost result itself did not change, the ghost effect never
+   re-runs, so without this the row would stay selected while
+   its emphasis is gone. Moved here verbatim (behavior
+   unchanged) with the tap assembly above, for the same
+   testability reason: it is the fourth setUnriddenRemainderFocus
+   call site, and the one the mount and ghost-join paths run.
+   No applicable selection — the layers keep their state (a
+   fresh layer's empty source is exactly that state). The
+   variant is REQUIRED here too, for the same reason. */
+export function reapplyUnriddenRemainderFocus(
+  map: MapLibreLike,
+  rows: readonly (RiddenServiceLink & {
+    id: number;
+    rideState: RideState;
+  })[],
+  coverage: LineCoverage,
+  focusedLineId: number | null,
+  ghost: Omit<RemainderGhostContext, "spans">,
+  variant: RecordMapVariant,
+): void {
+  const keys = unriddenRemainderKeysForSelection(
+    rows,
+    coverage.perServiceLegs,
+    focusedLineId,
+  );
+  const legs = unriddenRemainderLegsForSelection(
+    rows,
+    coverage.perServiceLegs,
+    coverage.perServiceUnriddenLegs,
+    focusedLineId,
+  );
+  if (keys !== null && legs !== null) {
+    /* The selection's service, resolved the same way the
+       keys/legs helpers resolve it, so a paint-unified
+       service's remainder keeps its representative color
+       on this re-apply path too (subtask 1680). */
+    const focusedRow = rows.find((row) => row.id === focusedLineId);
+    const focusService = focusedRow
+      ? usableRiddenService(focusedRow)
+      : undefined;
+    /* The ghost trim's spans: the service's remainder legs
+       in their full edge frame — the same legs the focus
+       source paints, before the RemainderLeg projection
+       drops the frame. An empty remainder trims nothing. */
+    const spans =
+      legs.length > 0 && focusService
+        ? (coverage.perServiceUnriddenLegs.get(focusService.id) ?? [])
+        : [];
+    setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null, {
+      ...ghost,
+      spans,
+    }, variant);
   }
 }
 
