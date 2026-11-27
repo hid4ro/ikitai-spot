@@ -69,7 +69,6 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
-  paintedLineFeatures,
   riddenLineIntervals,
   servicePaintColor,
   wholeLineBounds,
@@ -86,6 +85,7 @@ import {
   EMPTY_FOCUS_DATA,
   setFocusSection,
   setUnriddenRemainderFocus,
+  visitedLinesOverlay,
   type RemainderGhostContext,
 } from "./line-map-focus";
 import {
@@ -3470,18 +3470,19 @@ function VisitedMapSection({
      総武快速線 both draw JR・総武線) are told apart by
      serviceId, never by key alone (integrated review round 1,
      medium). */
-  const riddenLineFeatures = useMemo(
+  const riddenLinesOverlay = useMemo(
     () =>
-      /* paintedLineFeatures (line-geometry.ts) builds these —
-         the same builder the tests assert the colors through
-         (subtask 1680, review round 3, finding 2). A
-         paint-unified service (山手線) paints every leg in
-         its representative color: the loop is one named line
-         to the reader even where its trains run on the
-         東北線・東海道線 formal lines. The leg's key still
-         names its formal line for coverage and the ghost;
-         a leg with no color at all is skipped, as before. */
-      paintedLineFeatures(lineCoverage.perServiceLegs, RIDDEN_LINE_GEOMETRIES),
+      /* visitedLinesOverlay (line-map-focus.ts) assembles
+         this — the same assembly the tests assert the
+         colors through (subtask 1680, review round 4,
+         finding 1). A paint-unified service (山手線) paints
+         every leg in its representative color: the loop is
+         one named line to the reader even where its trains
+         run on the 東北線・東海道線 formal lines. The leg's
+         key still names its formal line for coverage and
+         the ghost; a leg with no color at all is skipped,
+         as before. */
+      visitedLinesOverlay(lineCoverage.perServiceLegs, RIDDEN_LINE_GEOMETRIES),
     [lineCoverage],
   );
 
@@ -5144,62 +5145,8 @@ function VisitedMapSection({
          above the lines; the tap hit test only ever queries the
          dedicated hit layers (visited-areas-hit / visited-fill-hit),
          so the lines never intercept a municipality tap. */
-      if (riddenLineFeatures.length > 0) {
-        overlays.push({
-          id: "visited-lines",
-          data: {
-            type: "FeatureCollection",
-            features: riddenLineFeatures,
-          },
-          layers: [
-            {
-              id: "visited-lines-casing",
-              type: "line",
-              source: "visited-lines",
-              layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "unknown"], true],
-              paint: {
-                "line-color": "#ffffff",
-                "line-width": 5.5,
-                "line-opacity": 0.55,
-              },
-            },
-            {
-              id: "visited-lines-color",
-              type: "line",
-              source: "visited-lines",
-              layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["!=", ["get", "unknown"], true],
-              paint: {
-                "line-color": ["get", "color"],
-                "line-width": 3.5,
-                "line-opacity": 0.95,
-              },
-            },
-            /* Unknown rides (a row with no section on record):
-               the whole path as a thin solid line in the
-               service's color — the same look as the unridden
-               ghost, never a ridden section's strength. The
-               reader's rule: ridden = solid, unridden and
-               unknown = thin, no dashes. The layer stays
-               separate from the ghost so a tap on the track
-               still resolves to the ride's ledger row and a
-               line focus can filter it out (see
-               setNormalLineExclusion). */
-            {
-              id: "visited-lines-unknown",
-              type: "line",
-              source: "visited-lines",
-              layout: { "line-cap": "round", "line-join": "round" },
-              filter: ["==", ["get", "unknown"], true],
-              paint: {
-                "line-color": ["get", "color"],
-                "line-width": 1.6,
-                "line-opacity": 0.25,
-              },
-            },
-          ],
-        });
+      if (riddenLinesOverlay) {
+        overlays.push(riddenLinesOverlay);
       }
       /* Unridden lines, the 路線 tab's ghost (tab split, subtask
          1439): each formal line's unridden remainder, edge by
