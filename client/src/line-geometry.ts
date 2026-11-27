@@ -1526,11 +1526,28 @@ export function computeLineCoverage(
      Unknown rides' legs stay out of the cuts, the ghost's own
      discipline (paintedSpansByKeyEdge): an unknown ride paints
      thin, the unridden look, so a remainder running under it
-     is no double paint. */
+     is no double paint. And a leg the normal overlay skips
+     for having no color at all stays out too (the gate on
+     allPaintedLegs below): nothing solid covers its stretch,
+     so the remainder must survive for the focus layer's
+     signal fallback to show there. */
   const allPaintedLegs: PathLeg[] = [];
-  for (const painted of perServiceLegs.values()) {
+  for (const [serviceId, painted] of perServiceLegs) {
     if (painted.unknown) continue;
-    allPaintedLegs.push(...painted.legs);
+    /* Only the legs the normal overlay actually draws may
+       cut another service's remainder (subtask 1648 fix2,
+       Codex review of 1648, medium): a leg with no color at
+       all is skipped by paintedLegFeature, so nothing solid
+       covers the stretch — cutting it out of the remainder
+       would erase the only paint the focus layer could show
+       there (its signal fallback). The distance accounting
+       is untouched by this gate: it reads perKeyCoverage,
+       not the remainders. */
+    for (const leg of painted.legs) {
+      if (legPaintColor(serviceId, leg.key, geometries) !== null) {
+        allPaintedLegs.push(leg);
+      }
+    }
   }
   if (allPaintedLegs.length > 0) {
     for (const [serviceId, remainder] of perServiceUnriddenLegs) {
