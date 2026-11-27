@@ -147,6 +147,15 @@ export type LineGraph = {
    apart) and far too short to invent a connection anywhere else. */
 export const GRAPH_BRIDGE_MAX_M = 500;
 
+/* A station-throat gap is a dead end a short hop from another
+   node while the graph's own way round is far longer (subtask
+   1613): 150 m is enough for the real gap (the 京王線 新宿
+   throat is ~90 m) and the join must save over a kilometre, so
+   a terminus joined to the next node along its own chain — where
+   the hop and the detour are the same stretch — never qualifies. */
+export const GRAPH_THROAT_MAX_M = 150;
+export const GRAPH_THROAT_SAVE_KM = 1;
+
 /* The projection of a station point onto the graph: the nearest
    point on any edge, as a fraction along that edge by arc length.
    distanceM is how far the recorded station point sits from the
@@ -160,6 +169,46 @@ export type ProjectedPoint = {
 };
 
 const nodeKey = (p: LngLat): string => `${p[0]},${p[1]}`;
+
+/* Dijkstra over an edge list (no adjacency map yet — the throat
+   healing in buildLineGraph runs before adj is built). Returns
+   the shortest node-to-node distance, or null when unjoined. */
+function detourKm(
+  edges: readonly GraphEdge[],
+  from: number,
+  to: number,
+): number | null {
+  const adj = new Map<number, { to: number; wKm: number }[]>();
+  for (const edge of edges) {
+    const ab = adj.get(edge.a) ?? [];
+    ab.push({ to: edge.b, wKm: edge.lengthKm });
+    adj.set(edge.a, ab);
+    const ba = adj.get(edge.b) ?? [];
+    ba.push({ to: edge.a, wKm: edge.lengthKm });
+    adj.set(edge.b, ba);
+  }
+  const dist = new Map<number, number>();
+  const done = new Set<number>();
+  dist.set(from, 0);
+  for (;;) {
+    let u = -1;
+    let best = Infinity;
+    for (const [node, d] of dist) {
+      if (!done.has(node) && d < best) {
+        best = d;
+        u = node;
+      }
+    }
+    if (u === -1 || u === to) break;
+    done.add(u);
+    for (const hop of adj.get(u) ?? []) {
+      const nd = dist.get(u)! + hop.wKm;
+      if (nd < (dist.get(hop.to) ?? Infinity)) dist.set(hop.to, nd);
+    }
+  }
+  const d = dist.get(to);
+  return d === undefined ? null : d;
+}
 
 export function buildLineGraph(
   key: string,
@@ -234,6 +283,61 @@ export function buildLineGraph(
       b: pair.j,
       pts: [nodes[pair.i]!, nodes[pair.j]!],
       lengthKm: pair.dM / 1000,
+      bridge: true,
+    });
+  }
+  /* Second healing pass — station-throat gaps (subtask 1613).
+     N02 can draw one station throat as two chains that meet at
+     the far end but leave a gap at the station end, inside ONE
+     component — the 京王線 新宿 throat: the 新線 chain ends ~90 m
+     from the 本線 chain's 新宿 node, so the component healing
+     above never joins them, and a 新宿→初台 route detours ~5 km
+     round the far end instead of taking the throat. A dead-end
+     node whose nearest other node is a short straight hop away,
+     while the graph's own way round is over a kilometre longer,
+     is such a gap: bridge it. The detour test is what keeps this
+     from joining a line's terminus to the next node along its own
+     chain (there the hop and the detour are the same stretch, so
+     nothing is saved) — only a genuine missing connection saves
+     real distance. Bridges are marked bridge: true, like the
+     component joins above. Shortest hop first, one at a time, so
+     each new bridge is judged on the graph it actually joins. */
+  for (;;) {
+    const degree = new Map<number, number>();
+    for (const edge of edges) {
+      degree.set(edge.a, (degree.get(edge.a) ?? 0) + 1);
+      degree.set(edge.b, (degree.get(edge.b) ?? 0) + 1);
+    }
+    let best: { u: number; v: number; dM: number } | null = null;
+    for (let u = 0; u < nodes.length; u++) {
+      if (degree.get(u) !== 1) continue;
+      let nearest: { v: number; dM: number } | null = null;
+      for (let v = 0; v < nodes.length; v++) {
+        if (v === u) continue;
+        const dM = haversineKm(nodes[u]!, nodes[v]!) * 1000;
+        if (
+          dM > 0 &&
+          dM <= GRAPH_THROAT_MAX_M &&
+          (!nearest || dM < nearest.dM)
+        ) {
+          nearest = { v, dM };
+        }
+      }
+      if (!nearest) continue;
+      const detour = detourKm(edges, u, nearest.v);
+      if (detour == null) continue;
+      if (detour - nearest.dM / 1000 <= GRAPH_THROAT_SAVE_KM) continue;
+      if (!best || nearest.dM < best.dM) {
+        best = { u, v: nearest.v, dM: nearest.dM };
+      }
+    }
+    if (!best) break;
+    edges.push({
+      id: edges.length,
+      a: best.u,
+      b: best.v,
+      pts: [nodes[best.u]!, nodes[best.v]!],
+      lengthKm: best.dM / 1000,
       bridge: true,
     });
   }
@@ -572,6 +676,25 @@ export type ServicePath = {
    running order. `snapshot` (a full ride's stored path) overrides
    the current master, so a past full ride reproduces the range it
    was recorded at. */
+/* A via list cut from a stored snapshot is only trusted when
+   every entry is a well-formed station ref; a malformed one is
+   dropped (the plain shortest route stands in) rather than
+   crashing the path. */
+function isStationRefList(value: unknown): value is StationRef[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as { id?: unknown }).id === "string" &&
+        typeof (entry as { name?: unknown }).name === "string" &&
+        Number.isFinite((entry as { lng?: unknown }).lng) &&
+        Number.isFinite((entry as { lat?: unknown }).lat),
+    )
+  );
+}
+
 export function buildServicePath(
   service: ServiceMasterEntry,
   geometries: LineGeometryMap,
@@ -587,6 +710,7 @@ export function buildServicePath(
         from: s.from,
         to: s.to,
         approximate: s.approximate,
+        ...(isStationRefList(s.via) ? { via: s.via } : {}),
       }))
     : service.segments;
   for (const segment of segments) {
@@ -599,21 +723,37 @@ export function buildServicePath(
       approximate = true;
       continue;
     }
-    const section = graphSectionLegs(
-      graph,
-      [segment.from.lng, segment.from.lat],
-      [segment.to.lng, segment.to.lat],
-    );
-    if (!section) {
+    /* A segment with via runs leg by leg through the named
+       stations (subtask 1613): one formal-line key can carry two
+       branches between the same endpoints, and the graph's
+       shortest path alone would always pick the same branch. */
+    const stops = [segment.from, ...(segment.via ?? []), segment.to];
+    const sectionLegs: PathLeg[] = [];
+    let sectionMaxProjM = 0;
+    let joined = true;
+    for (let i = 0; i < stops.length - 1; i++) {
+      const section = graphSectionLegs(
+        graph,
+        [stops[i]!.lng, stops[i]!.lat],
+        [stops[i + 1]!.lng, stops[i + 1]!.lat],
+      );
+      if (!section) {
+        joined = false;
+        break;
+      }
+      sectionLegs.push(...section.legs);
+      sectionMaxProjM = Math.max(sectionMaxProjM, section.maxProjM);
+    }
+    if (!joined) {
       missing.push(
         `${segment.formalLineKey}: ${segment.from.name}〜${segment.to.name} does not join`,
       );
       approximate = true;
       continue;
     }
-    if (section.maxProjM > APPROXIMATE_PROJECTION_M) approximate = true;
-    maxProjM = Math.max(maxProjM, section.maxProjM);
-    legs.push(...section.legs);
+    if (sectionMaxProjM > APPROXIMATE_PROJECTION_M) approximate = true;
+    maxProjM = Math.max(maxProjM, sectionMaxProjM);
+    legs.push(...sectionLegs);
   }
   return {
     serviceId: service.id,

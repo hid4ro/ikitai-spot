@@ -153,6 +153,51 @@ describe("synthetic graph", () => {
     );
   });
 
+  test("a station-throat gap inside one component is bridged (subtask 1613)", () => {
+    /* Two chains share their far end but leave a gap at the
+       station end: the short chain hangs off a dead end ~90 m
+       from the main chain's station node, in the same component,
+       so the component healing never joins them. The throat
+       healing bridges exactly that gap — while a plain terminus
+       (the same stretch there and back) gets no bridge. */
+    const geometry = {
+      type: "MultiLineString",
+      coordinates: [
+        /* Main chain: station A — junction — far end. */
+        [
+          [0, 0],
+          [0, 0.09],
+        ],
+        [
+          [0, 0.09],
+          [0, 0.18],
+        ],
+        /* Branch chain: dead end near A — junction. */
+        [
+          [0.0008, 0],
+          [0, 0.09],
+        ],
+        /* A short piece past the far end, so the terminus has a
+           near neighbour on its own chain (the guard's case). */
+        [
+          [0, 0.18],
+          [0, 0.181],
+        ],
+      ],
+    };
+    const graph = buildLineGraph("synthetic|throat", geometry as never);
+    const bridges = graph.edges.filter((e) => e.bridge);
+    expect(bridges.length).toBe(1);
+    expect(bridges[0]!.lengthKm).toBeCloseTo(0.089, 2);
+    /* A to the branch's dead end is the 89 m hop, not the
+       20 km detour round the far end. */
+    const section = graphSectionLegs(graph, [0, 0], [0.0008, 0])!;
+    expect(section.lengthKm).toBeCloseTo(0.089, 2);
+    expect(section.legs.some((leg) => leg.edge.startsWith("bridge:"))).toBe(
+      true,
+    );
+  });
+
   test("slicePolyline interpolates its ends", () => {
     const pts: [number, number][] = [
       [0, 0],
@@ -211,6 +256,32 @@ describe("real asset: service totals against railway kilometres", () => {
       expect(clip.lengthKm).toBeGreaterThan(n02Km * 0.9);
       expect(clip.lengthKm).toBeLessThan(n02Km * 1.1);
     }
+  });
+
+  test("京王線本線 and 京王新線 run different branches between 新宿 and 笹塚 (subtask 1613)", () => {
+    /* The review's point: sharing one formal-line key made the
+       新線 path take the 本線 edge. The totals alone cannot tell
+       them apart (3.519 vs 3.522 km) — the branch is the stations
+       the path runs through. */
+    const keio = servicePath("keio");
+    const newLine = servicePath("keio-new-line");
+    expect(keio.missing).toEqual([]);
+    expect(newLine.missing).toEqual([]);
+    const keioCoords = keio.legs.flatMap((leg) => leg.coords);
+    const newLineCoords = newLine.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.初台, S.幡ヶ谷]) {
+      expect(
+        newLineCoords.some(
+          (p) => haversineKm(p, [via.lng, via.lat]) < 0.05,
+        ),
+      ).toBe(true);
+      expect(
+        keioCoords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.1),
+      ).toBe(false);
+    }
+    /* The 本線 total is untouched by the branch fix. */
+    expect(keio.totalKm).toBeCloseTo(37.651, 2);
+    expect(newLine.totalKm).toBeCloseTo(3.522, 2);
   });
 
   test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
@@ -660,6 +731,33 @@ describe("coverage: dedup and per-service isolation", () => {
     expect(coverage.perService.get("jr-sobu-rapid")!.riddenKm).toBeGreaterThan(38);
     expect(coverage.perService.get("jr-sobu-local")!.riddenKm).toBeGreaterThan(38);
     expect(coverage.perOperatorKm.get("東日本旅客鉄道")).toBeCloseTo(keyKm, 0);
+  });
+
+  test("京王線本線 and 京王新線 full rides union on the shared tail only (subtask 1613)", () => {
+    /* Both services full: the key counts each edge once, so the
+       shared 幡ヶ谷→笹塚 tail is not double-counted while the two
+       branches between 新宿 and 幡ヶ谷 both count. */
+    clearLineGraphCache();
+    const paths = new Map<string, ServicePath>();
+    for (const service of ["keio", "keio-new-line"]) {
+      paths.set(service, servicePath(service));
+    }
+    const coverage = computeLineCoverage(
+      new Map(),
+      new Set(["keio", "keio-new-line"]),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    const keyKm = coverage.perKeyKm.get("京王線|京王電鉄")!;
+    /* 37.651 + 3.522 − shared tail ≈ 0.65. */
+    expect(keyKm).toBeGreaterThan(40.4);
+    expect(keyKm).toBeLessThan(40.7);
+    expect(coverage.perService.get("keio")!.riddenKm).toBeCloseTo(37.651, 2);
+    expect(coverage.perService.get("keio-new-line")!.riddenKm).toBeCloseTo(
+      3.522,
+      2,
+    );
   });
 
   test("two blocks of one service accumulate without double-counting", () => {
@@ -1266,6 +1364,41 @@ describe("full-path snapshots", () => {
     expect(parseFullPathSnapshot("not json")).toBeNull();
     expect(parseFullPathSnapshot('{"pathId": 1}')).toBeNull();
   });
+
+  test("a 京王新線 snapshot carries its branch and reproduces it (subtask 1613)", () => {
+    const snapshot = serviceFullPathSnapshot("keio-new-line")!;
+    expect(snapshot.segments.length).toBe(1);
+    expect(snapshot.segments[0]!.via?.map((s) => s.id)).toEqual([
+      "003764",
+      "003791",
+    ]);
+    const parsed = parseFullPathSnapshot(JSON.stringify(snapshot))!;
+    const path = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      parsed,
+    );
+    expect(path.missing).toEqual([]);
+    expect(path.totalKm).toBeCloseTo(servicePath("keio-new-line").totalKm, 2);
+    const coords = path.legs.flatMap((leg) => leg.coords);
+    expect(
+      coords.some((p) => haversineKm(p, [S.初台.lng, S.初台.lat]) < 0.05),
+    ).toBe(true);
+    /* A malformed via in a stored snapshot falls back to the
+       plain shortest route instead of crashing: the 本線 edge,
+       3.519 km. */
+    const broken = {
+      ...snapshot,
+      segments: [{ ...snapshot.segments[0]!, via: [{ id: "x" }] }],
+    };
+    const fallback = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      parseFullPathSnapshot(JSON.stringify(broken)),
+    );
+    expect(fallback.missing).toEqual([]);
+    expect(fallback.totalKm).toBeCloseTo(3.519, 2);
+  });
 });
 
 describe("EdgeCoverage", () => {
@@ -1693,25 +1826,29 @@ describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, rev
 
   test("a full Keio New Line ride leaves the rest of the 京王線 key as ghost", () => {
     /* 新宿〜笹塚 paints 3.52 km of the 京王線 key's 40.58 km
-       shape; the rest — the main line west of 笹塚 — stays as
-       ghost, reaching the 京王八王子 side (lng 139.34). */
+       shape; the rest stays as ghost — the main line west of
+       笹塚, and now also the 本線 branch between 新宿 and 笹塚
+       (the new-line ride no longer paints it, subtask 1613) —
+       reaching the 京王八王子 side (lng 139.34). */
     const coverage = coverageFor(new Map(), new Set(["keio-new-line"]));
     expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(3.52, 1);
-    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(37.07, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(37.15, 1);
     expect(ghostBounds(coverage, KEIO_KEY)!.minLng).toBeLessThan(139.35);
   });
 
-  test("a full Keio New Line ride adds nothing beyond a full Keio ride (subtask 1574)", () => {
-    /* Both services share the 京王線|京王電鉄 key and the 新宿〜
-       笹塚 stretch: the new service's legs are a subset of the
-       Keio ride's, so the key total stays 37.65 and the ghost
-       stays 2.93 — no double-counting, no ghost change. */
+  test("a full Keio New Line ride adds its own branch beyond a full Keio ride (subtask 1613)", () => {
+    /* Both services share the 京王線|京王電鉄 key and the
+       幡ヶ谷→笹塚 tail, but their 新宿〜幡ヶ谷 branches differ:
+       the key total is 37.65 + 3.52 − shared tail ≈ 40.53, and
+       the ghost shrinks to the shape's off-spine slivers
+       (0.15 km) — no double-counting, and the branch the
+       review asked for is no longer swallowed. */
     const coverage = coverageFor(
       new Map(),
       new Set(["keio", "keio-new-line"]),
     );
-    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(37.65, 1);
-    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(2.93, 1);
+    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(40.53, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(0.15, 1);
   });
 
   test("a partial Keio ride keeps the rest of the line as ghost", () => {

@@ -113,6 +113,15 @@ export type ServiceSegment = {
      内回り, "outer" = 外回り). Only loop services carry it; stage 2
      uses it to tell which side of the loop a ride took. */
   direction?: "inner" | "outer";
+  /* Stations the segment's route must run through, in running
+     order — the branch a formal line cannot tell apart on its
+     own. One formal-line key can carry two branches between the
+     same endpoints （京王線本線 and 京王新線 both run 新宿→笹塚
+     on 京王線|京王電鉄, on different edges); the graph's shortest
+     path alone would always pick the same branch, so the segment
+     names the stations its branch passes through and the path is
+     routed leg by leg through them (subtask 1613). */
+  via?: StationRef[];
   note?: string;
 };
 
@@ -804,6 +813,13 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         formalLineKey: "京王線|京王電鉄",
         from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
         to: { id: "003806", name: "笹塚", lng: 139.66717, lat: 35.67366 },
+        /* The 新線 branch, not the 本線: 新宿→笹塚 runs via 初台・
+           幡ヶ谷. The graph's shortest path alone picks the 本線
+           edge, so the branch must be named (subtask 1613). */
+        via: [
+          { id: "003764", name: "初台", lng: 139.68827, lat: 35.68142 },
+          { id: "003791", name: "幡ヶ谷", lng: 139.67772, lat: 35.67676 },
+        ],
       },
     ],
     blocks: [
@@ -828,7 +844,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     verifiedAt: null,
     verificationStatus: "draft",
     note:
-      "N02（2025年度版）に「京王新線」の独立した路線単位は無く、4駅はすべて京王線|京王電鉄に含まれる（新線新宿は新宿と同一コード 003700）。そのため formalLineKey は既存の keio と同じ「京王線|京王電鉄」を使う（監督の判断、むさしの号と同じ形）。新宿→笹塚の形状は新線側の分岐（N02グラフで 3.57km、営業キロ 3.6km）で、本線側より短い。新宿の座標はマスタ既存値（keio・jr-saikyo と同一。N02の路線別重心とは約110mの開きがあるが、300mのしきい値の内側）を再利用し、同一駅に2つの座標を作らない。2026-11-25の乗車（新宿→幡ヶ谷付近）は降車駅が未確定のため区間登録はしない。人手の地図照合は未了（draftのまま）。",
+      "N02（2025年度版）に「京王新線」の独立した路線単位は無く、4駅はすべて京王線|京王電鉄に含まれる（新線新宿は新宿と同一コード 003700）。そのため formalLineKey は既存の keio と同じ「京王線|京王電鉄」を使う（監督の判断、むさしの号と同じ形）。新宿→笹塚の形状は新線側の分岐（アプリの計測で 3.52km、営業キロ 3.6km）で、本線側の同じ区間（3.52km）とほぼ同じ長さだが通る枝が違う（本線は初台・幡ヶ谷を通らない）。分岐は via で初台・幡ヶ谷を指定する（subtask 1613）。新宿の座標はマスタ既存値（keio・jr-saikyo と同一。N02の路線別重心とは約110mの開きがあるが、300mのしきい値の内側）を再利用し、同一駅に2つの座標を作らない。2026-11-25の乗車（新宿→幡ヶ谷付近）は降車駅が未確定のため区間登録はしない。人手の地図照合は未了（draftのまま）。",
   },
 ];
 
@@ -1568,6 +1584,7 @@ export type FullPathSnapshot = {
     to: StationRef;
     direction?: "inner" | "outer";
     approximate?: boolean;
+    via?: StationRef[];
   }[];
 };
 
@@ -1585,6 +1602,7 @@ export function serviceFullPathSnapshot(
       to: segment.to,
       ...(segment.direction ? { direction: segment.direction } : {}),
       ...(segment.approximate ? { approximate: true } : {}),
+      ...(segment.via ? { via: segment.via } : {}),
     })),
   };
 }
