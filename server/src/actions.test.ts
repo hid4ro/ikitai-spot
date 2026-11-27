@@ -86,26 +86,55 @@ describe("resolveRideFields: full rides (review round 2, high)", () => {
     expect(shimousaSnapshot.segments[1].approximate).toBe(true);
   });
 
-  test("a full ride at the frozen version stores a snapshot only while the versions coincide (stage 2)", () => {
-    // The snapshot is cut from the current master. While the
-    // frozen migration version IS the current version, a ride at
-    // it carries a snapshot like any current-version ride; once
-    // the master moves on, the same ride must store none (the
-    // client falls back to the current master instead of
-    // painting a range cut from the wrong version).
+  test("a full ride at an old version stores a snapshot cut at that version (subtask 1611)", () => {
+    // Review of 1566: the snapshot is cut from the master at
+    // the ride's own version (serviceFullPathSnapshot reads the
+    // segments that version held), so a past full ride keeps
+    // reproducing the range it was recorded at. The old rule —
+    // a snapshot only while the frozen version coincided with
+    // the current one, null otherwise — left old-version rides
+    // to the current master's range, which a later extension
+    // could silently rewrite.
     const fields = resolveRideFields("京王線", {
       rideState: "full",
       masterVersion: MIGRATED_MASTER_VERSION,
     });
-    // Both versions are string-literal consts, so once they
-    // diverge (2026-11-26, subtask 1590) TS2367 rejects the
-    // direct comparison — widen one side to string.
-    if ((MIGRATED_MASTER_VERSION as string) === SERVICE_MASTER_VERSION) {
-      expect(
-        JSON.parse(fields.pathSnapshot!).masterVersion,
-      ).toBe(SERVICE_MASTER_VERSION);
-    } else {
-      expect(fields.pathSnapshot).toBeNull();
+    const snapshot = JSON.parse(fields.pathSnapshot!);
+    expect(snapshot.pathId).toBe("keio");
+    expect(snapshot.masterVersion).toBe(MIGRATED_MASTER_VERSION);
+    expect(snapshot.segments).toHaveLength(1);
+    expect(snapshot.segments[0].formalLineKey).toBe("京王線|京王電鉄");
+  });
+
+  test("a full ride at the 2026-11-26 master version still saves (subtask 1611)", () => {
+    // The reviewer's reproduction: しもうさ号 recorded at
+    // 2026-11-26 — the then-current version — was rejected as
+    // an unknown version the day the master bumped to
+    // 2026-11-27. Past versions stay known with the services
+    // they held (MASTER_VERSION_HISTORY).
+    const fields = resolveRideFields("しもうさ号", {
+      rideState: "full",
+      masterVersion: "2026-11-26",
+    });
+    expect(fields.rideState).toBe("full");
+    expect(fields.serviceId).toBe("jr-shimousa");
+    expect(fields.masterVersion).toBe("2026-11-26");
+    const snapshot = JSON.parse(fields.pathSnapshot!);
+    expect(snapshot.pathId).toBe("jr-shimousa");
+    expect(snapshot.masterVersion).toBe("2026-11-26");
+  });
+
+  test("a full ride for a service its version never held is rejected (subtask 1611)", () => {
+    // 東武野田線 and 京王新線 first appear at 2026-11-27, so
+    // naming 2026-11-26 for either must fail — the same
+    // rejection subtask 1593 added for the frozen version.
+    for (const name of ["東武野田線", "京王新線"]) {
+      expect(() =>
+        resolveRideFields(name, {
+          rideState: "full",
+          masterVersion: "2026-11-26",
+        }),
+      ).toThrow(/did not contain/);
     }
   });
 

@@ -247,13 +247,25 @@ describe("real asset: service totals against railway kilometres", () => {
   test("東武野田線 totals its timetable kilometres and clips 大宮→七光台 (subtask 1566)", () => {
     /* 営業キロ: 全線 大宮〜船橋 62.7 km、乗車区間
        大宮〜七光台 25.1 km（大宮起点：春日部 15.2 km、
-       七光台 25.1 km）。N02 形状ベースでも全長 61.76 km、
-       大宮→七光台 25.05 km と営業キロに近い。 */
+       七光台 25.1 km）。N02 形状ベースでも大宮→七光台
+       25.03 km と営業キロに近い。全線は柏で2分割した
+       (subtask 1611): the direct shortest path bypassed 柏
+       at a branch 390 m short of the station, so the path
+       now runs into 柏 and back out — the concatenated legs
+       are 62.42 km, and the distinct length (the spur counted
+       once) is 62.03 km. */
     const path = servicePath("tobu-noda");
     expect(path.missing).toEqual([]);
     expect(path.approximate).toBe(false);
     expect(path.totalKm).toBeGreaterThan(62.7 * 0.95);
     expect(path.totalKm).toBeLessThan(62.7 * 1.05);
+    expect(path.totalKm).toBeCloseTo(62.03, 1);
+    expect(path.arcKm).toBeCloseTo(62.42, 1);
+    /* The whole path runs through 柏 itself now, not past it. */
+    const pathCoords = path.legs.flatMap((leg) => leg.coords);
+    expect(
+      pathCoords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
+    ).toBe(true);
     const clip = clipServicePath(path, S.大宮, S.七光台)!;
     expect(clip).not.toBeNull();
     expect(clip.approximate).toBe(false);
@@ -268,6 +280,19 @@ describe("real asset: service totals against railway kilometres", () => {
     expect(
       coords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
     ).toBe(false);
+    /* The clips either side of 柏 both run through the station:
+       春日部→柏 ends there, 柏→船橋 starts there. */
+    for (const [from, to] of [
+      [S.春日部, S.柏],
+      [S.柏, S.船橋],
+    ] as const) {
+      const side = clipServicePath(path, from, to)!;
+      expect(side).not.toBeNull();
+      const sideCoords = side.legs.flatMap((leg) => leg.coords);
+      expect(
+        sideCoords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
+      ).toBe(true);
+    }
   });
 
   test("しもうさ号 runs the branch down to 武蔵浦和 (subtask 1591)", () => {
@@ -690,6 +715,24 @@ describe("coverage: dedup and per-service isolation", () => {
     expect(service.complete).toBe(true);
     expect(service.riddenKm).toBeCloseTo(service.totalKm, 1);
     expect(coverage.completeServiceIds).toContain("keio");
+  });
+
+  test("a full 東武野田線 ride counts the 柏 spur once, not twice (subtask 1611)", () => {
+    /* The path runs into 柏 and back out along the same spur,
+       so the concatenated legs are 62.42 km — but the spur is
+       one stretch of line, and the totals must count it once:
+       the distinct 62.03 km. The same goes for the per-key
+       total: the 野田線 key must not carry 62.42 km. */
+    const coverage = coverageFor(new Map(), ["tobu-noda"]);
+    const service = coverage.perService.get("tobu-noda")!;
+    expect(service.complete).toBe(true);
+    expect(service.totalKm).toBeCloseTo(62.03, 1);
+    expect(service.riddenKm).toBeCloseTo(62.03, 1);
+    expect(service.riddenKm).toBeLessThan(62.42 - 0.1);
+    expect(
+      coverage.perKeyKm.get("野田線|東武鉄道"),
+    ).toBeCloseTo(62.03, 1);
+    expect(coverage.completeServiceIds).toContain("tobu-noda");
   });
 
   test("sections covering a whole service complete it without a full ride", () => {

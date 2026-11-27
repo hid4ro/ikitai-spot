@@ -560,7 +560,19 @@ export const APPROXIMATE_PROJECTION_M = 300;
 export type ServicePath = {
   serviceId: string;
   legs: PathLeg[];
+  /* The distinct length of the path: the union of its legs'
+     edge spans, so an edge the path traverses twice counts
+     once — 東武野田線 runs into 柏 and back out along the same
+     spur (subtask 1611), and that spur is one stretch of line,
+     not two. This is the length the map paints, the length a
+     ride is measured against, and the length the railway
+     kilometres are compared with. */
   totalKm: number;
+  /* The concatenated length of the legs in running order — the
+     frame the arc positions (projectOnServicePath,
+     sliceServicePath) run in. Longer than totalKm exactly when
+     the path re-traverses an edge. */
+  arcKm: number;
   approximate: boolean;
   /* Segments whose shape is missing or unjoinable (formal-line
      key + why), so the total is a lower bound. */
@@ -571,7 +583,14 @@ export type ServicePath = {
 /* A service's whole path: its segments' shortest paths, in
    running order. `snapshot` (a full ride's stored path) overrides
    the current master, so a past full ride reproduces the range it
-   was recorded at. */
+   was recorded at. totalKm is the DISTINCT length of the legs'
+   edge spans (EdgeCoverage union), not their sum: a service
+   whose segments re-traverse an edge — 東武野田線's spur into
+   柏, entered and left again (subtask 1611) — would otherwise
+   count that edge twice, and sections tiling the service could
+   never complete it (their union is the distinct length). The
+   concatenated sum is kept as arcKm, the frame the arc
+   positions run in. */
 export function buildServicePath(
   service: ServiceMasterEntry,
   geometries: LineGeometryMap,
@@ -615,10 +634,17 @@ export function buildServicePath(
     maxProjM = Math.max(maxProjM, section.maxProjM);
     legs.push(...section.legs);
   }
+  const arcKm = legs.reduce((sum, leg) => sum + leg.lengthKm, 0);
+  /* Distinct length: the union of the legs' edge spans, so a
+     re-traversed edge counts once (EdgeCoverage is defined
+     below; it is only used here at call time). */
+  const distinct = new EdgeCoverage();
+  distinct.addLegs(legs);
   return {
     serviceId: service.id,
     legs,
-    totalKm: legs.reduce((sum, leg) => sum + leg.lengthKm, 0),
+    totalKm: distinct.totalKilometres(geometries),
+    arcKm,
     approximate,
     missing,
     maxProjM,
@@ -712,14 +738,14 @@ export function clipServicePath(
   let fromKm = fromArc.arcKm;
   let toKm = toArc.arcKm;
   if (fromKm < END_SNAP_KM) fromKm = 0;
-  if (fromKm > oriented.totalKm - END_SNAP_KM) fromKm = oriented.totalKm;
+  if (fromKm > oriented.arcKm - END_SNAP_KM) fromKm = oriented.arcKm;
   if (toKm < END_SNAP_KM) toKm = 0;
-  if (toKm > oriented.totalKm - END_SNAP_KM) toKm = oriented.totalKm;
+  if (toKm > oriented.arcKm - END_SNAP_KM) toKm = oriented.arcKm;
   let startKm = fromKm;
   let endKm = toKm;
   if (isLoop && resolvedDirection) {
     /* Running order on the oriented path; wrap past the seam. */
-    if (endKm <= startKm) endKm += oriented.totalKm;
+    if (endKm <= startKm) endKm += oriented.arcKm;
   } else if (endKm < startKm) {
     /* A section is undirected off a loop: take it in running
        order. The same branch covers a loop section whose
@@ -798,7 +824,10 @@ function sliceServicePath(
   startKm: number,
   endKm: number,
 ): PathLeg[] {
-  const total = path.totalKm;
+  /* Arc positions run in the concatenated-leg frame (arcKm),
+     not the distinct total: on a path that re-traverses an
+     edge, the same edge span sits at two arc positions. */
+  const total = path.arcKm;
   if (total <= 0) return [];
   /* Unwrap the range into [0, total) pieces. */
   const ranges: [number, number][] = [];

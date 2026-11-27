@@ -31,6 +31,7 @@ import {
   serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
   serviceOrderedStations,
+  serviceSegmentsAtVersion,
   serviceStationIds,
   stationRefById,
   validateSectionEndpoints,
@@ -509,6 +510,9 @@ describe("save-time validation (review round 2)", () => {
   test("isKnownMasterVersion accepts only versions the master knows", () => {
     expect(isKnownMasterVersion(SERVICE_MASTER_VERSION)).toBe(true);
     expect(isKnownMasterVersion(MIGRATED_MASTER_VERSION)).toBe(true);
+    // A superseded version stays known once its master is
+    // recorded (subtask 1611): 2026-11-26 held しもうさ号.
+    expect(isKnownMasterVersion("2026-11-26")).toBe(true);
     // The reviewer's reproduction values.
     expect(isKnownMasterVersion("bogus")).toBe(false);
     expect(isKnownMasterVersion("")).toBe(false);
@@ -550,11 +554,64 @@ describe("save-time validation (review round 2)", () => {
     expect(
       serviceExistsAtMasterVersion("keio-new-line", MIGRATED_MASTER_VERSION),
     ).toBe(false);
+    // The 2026-11-26 master held the nine migrated services
+    // plus むさしの号 and しもうさ号 — and not the two added
+    // on 2026-11-27 (subtask 1611).
+    expect(serviceExistsAtMasterVersion("keio", "2026-11-26")).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-musashino-omiya", "2026-11-26"),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-shimousa", "2026-11-26"),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("tobu-noda", "2026-11-26"),
+    ).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("keio-new-line", "2026-11-26"),
+    ).toBe(false);
     // Unknown versions and unknown services hold nothing.
     expect(serviceExistsAtMasterVersion("keio", "bogus")).toBe(false);
     expect(
       serviceExistsAtMasterVersion("no-such-service", SERVICE_MASTER_VERSION),
     ).toBe(false);
+  });
+
+  test("serviceSegmentsAtVersion keeps each version's route (subtask 1611)", () => {
+    // A version's route is the segments its master held: for
+    // しもうさ号 at 2026-11-26, the same three segments the
+    // current master carries (no route has changed between
+    // versions yet — the history records the override when one
+    // does).
+    const shimousaAt1126 = serviceSegmentsAtVersion(
+      "jr-shimousa",
+      "2026-11-26",
+    );
+    expect(shimousaAt1126).not.toBeNull();
+    expect(shimousaAt1126!.map((s) => s.formalLineKey)).toEqual(
+      serviceById("jr-shimousa")!.segments.map((s) => s.formalLineKey),
+    );
+    expect(
+      shimousaAt1126!.map((s) => [s.from.id, s.to.id]),
+    ).toEqual(
+      serviceById("jr-shimousa")!.segments.map((s) => [s.from.id, s.to.id]),
+    );
+    // A service the version never held has no route at it.
+    expect(serviceSegmentsAtVersion("tobu-noda", "2026-11-26")).toBeNull();
+    expect(
+      serviceSegmentsAtVersion("keio-new-line", "2026-11-26"),
+    ).toBeNull();
+    expect(serviceSegmentsAtVersion("keio", "bogus")).toBeNull();
+    expect(
+      serviceSegmentsAtVersion("no-such-service", SERVICE_MASTER_VERSION),
+    ).toBeNull();
+    // A snapshot cut at the old version names that version and
+    // carries its route; a service the version never held cuts
+    // no snapshot.
+    const snapshot = serviceFullPathSnapshot("jr-shimousa", "2026-11-26")!;
+    expect(snapshot.masterVersion).toBe("2026-11-26");
+    expect(snapshot.segments).toHaveLength(3);
+    expect(serviceFullPathSnapshot("tobu-noda", "2026-11-26")).toBeNull();
   });
 });
 

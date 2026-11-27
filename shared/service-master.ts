@@ -752,10 +752,28 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     ledgerNames: ["東武野田線", "東武アーバンパークライン"],
     operator: "東武鉄道",
     segments: [
+      /* Split at 柏 (subtask 1611, review of 1566): the N02
+         shape for 野田線 branches about 390 m before 柏 station,
+         and the direct shortest path 大宮→船橋 takes the
+         船橋-bound branch — the service's own station is
+         bypassed, and a section ending at 柏 came out
+         approximate. Splitting the route here forces the path
+         into 柏 and back out again （柏への進入・折り返し), so
+         the drawn path and the clips run through the station.
+         The spur edge is traversed twice in the legs; it is
+         counted once in the path total (see buildServicePath),
+         so a full ride measures the distinct 62.03 km, not the
+         62.42 km of the concatenated legs. */
       {
         formalLineName: "野田線",
         formalLineKey: "野田線|東武鉄道",
         from: { id: "002914", name: "大宮", lng: 139.62356, lat: 35.90653 },
+        to: { id: "002984", name: "柏", lng: 139.97046, lat: 35.86198 },
+      },
+      {
+        formalLineName: "野田線",
+        formalLineKey: "野田線|東武鉄道",
+        from: { id: "002984", name: "柏", lng: 139.97046, lat: 35.86198 },
         to: { id: "003589", name: "船橋", lng: 139.98437, lat: 35.7021 },
       },
     ],
@@ -790,7 +808,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     verifiedAt: null,
     verificationStatus: "draft",
     note:
-      "東武アーバンパークラインの愛称でも呼ばれる（ledgerNames に両方持つ）。大宮の座標はマスタの既存値（jr-saikyo・jr-musashino-omiya と同一。野田線形状からの距離は約126mで、300mのしきい値の内側）。全長は営業キロ62.7km。2026-11-26の乗車は大宮→七光台（約25.1km）。人手の地図照合は未了（draftのまま）。",
+      "東武アーバンパークラインの愛称でも呼ばれる（ledgerNames に両方持つ）。大宮の座標はマスタの既存値（jr-saikyo・jr-musashino-omiya と同一。野田線形状からの距離は約126mで、300mのしきい値の内側）。全長は営業キロ62.7km。2026-11-26の乗車は大宮→七光台（約25.1km）。経路は柏で2分割（分岐で柏を迂回する形状のため、subtask 1611）。人手の地図照合は未了（draftのまま）。",
   },
   {
     id: "keio-new-line",
@@ -1571,15 +1589,24 @@ export type FullPathSnapshot = {
   }[];
 };
 
+/* The snapshot a full ride stores, cut at `version` (default:
+   the current master) from the segments that version's master
+   held (serviceSegmentsAtVersion): a past full ride keeps
+   reproducing the range it was recorded at even if the master
+   later changes. Null when the service did not exist at that
+   version. */
 export function serviceFullPathSnapshot(
   serviceId: string,
+  version: string = SERVICE_MASTER_VERSION,
 ): FullPathSnapshot | null {
   const service = serviceById(serviceId);
   if (!service) return null;
+  const segments = serviceSegmentsAtVersion(serviceId, version);
+  if (!segments) return null;
   return {
     pathId: service.pathId,
-    masterVersion: SERVICE_MASTER_VERSION,
-    segments: service.segments.map((segment) => ({
+    masterVersion: version.trim(),
+    segments: segments.map((segment) => ({
       formalLineKey: segment.formalLineKey,
       from: segment.from,
       to: segment.to,
@@ -1671,14 +1698,16 @@ export type RestoredRide = {
    stretch the rider never rode). */
 export const MIGRATED_MASTER_VERSION = "2026-11-24";
 
-/* The master versions a full ride may be recorded at: the current
-   version, or the frozen version the nine migrated rides were cut
-   at. A full ride's range must be reproducible from its version, so
-   an unknown version ("bogus", a blank, whitespace) must be
-   rejected at save time (review round 2, high). */
+/* The master versions a full ride may be recorded at: the
+   current version, or any version in MASTER_VERSION_HISTORY.
+   A full ride's range must be reproducible from its version, so
+   an unknown version ("bogus", a blank, whitespace, or a date
+   the master never carried, like 2026-11-25) must be rejected
+   at save time (review round 2, high). */
 export function isKnownMasterVersion(version: string): boolean {
   const v = version.trim();
-  return v === SERVICE_MASTER_VERSION || v === MIGRATED_MASTER_VERSION;
+  if (v === SERVICE_MASTER_VERSION) return true;
+  return MASTER_VERSION_HISTORY.some((entry) => entry.version === v);
 }
 
 export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
@@ -1747,29 +1776,91 @@ export const MIGRATED_RIDES: Readonly<Record<string, RestoredRide>> = {
   },
 };
 
+/* Past master versions, oldest first — the per-version record
+   of what each master held (subtask 1611, review of 1566):
+   bumping SERVICE_MASTER_VERSION used to orphan the version
+   before it, so a full ride recorded at 2026-11-26 for
+   しもうさ号 was rejected as unknown the day after the master
+   moved to 2026-11-27. Each entry records the services that
+   version's master held, and — only for a service whose route
+   has since changed — the segments as they stood then. No
+   service's route has changed between versions yet, so no
+   entry carries segment overrides: a version's route is its
+   service's current segments. The next segment change records
+   its old route here at the same time as it bumps
+   SERVICE_MASTER_VERSION, so a past full ride keeps
+   reproducing the range it was recorded at.
+   - 2026-11-24 is the frozen migration version: its master
+     held exactly the nine services MIGRATED_RIDES restores
+     (that table is the whole master of 2026-11-24).
+   - 2026-11-26 (c5b125e) added むさしの号 and しもうさ号 to
+     those nine. tobu-noda and keio-new-line first appear at
+     SERVICE_MASTER_VERSION (2026-11-27). */
+export type MasterVersionRecord = {
+  version: string;
+  serviceIds: readonly string[];
+  segments?: Readonly<Record<string, readonly ServiceSegment[]>>;
+};
+
+export const MASTER_VERSION_HISTORY: readonly MasterVersionRecord[] = [
+  {
+    version: MIGRATED_MASTER_VERSION,
+    serviceIds: Object.values(MIGRATED_RIDES).map(
+      (ride) => ride.serviceId,
+    ),
+  },
+  {
+    version: "2026-11-26",
+    serviceIds: [
+      "jr-musashino",
+      "jr-musashino-omiya",
+      "jr-shimousa",
+      "hokuso",
+      "jr-chuo-rapid",
+      "jr-sobu-rapid",
+      "jr-sobu-local",
+      "keio",
+      "jr-saikyo",
+      "rinkai",
+      "yamanote",
+    ],
+  },
+];
+
+/* The segments of a service as a master version held them:
+   that version's recorded route when one is on file, else the
+   service's current segments (no route has changed between
+   versions yet — see MASTER_VERSION_HISTORY). Null when the
+   version never held the service, or the version is unknown. */
+export function serviceSegmentsAtVersion(
+  serviceId: string,
+  version: string,
+): readonly ServiceSegment[] | null {
+  const v = version.trim();
+  if (v === SERVICE_MASTER_VERSION) {
+    return serviceById(serviceId)?.segments ?? null;
+  }
+  const entry = MASTER_VERSION_HISTORY.find((e) => e.version === v);
+  if (!entry || !entry.serviceIds.includes(serviceId)) return null;
+  return (
+    entry.segments?.[serviceId] ?? serviceById(serviceId)?.segments ?? null
+  );
+}
+
 /* Did the master at `version` hold this service at all? The
-   current version holds every service in SERVICE_MASTER. The
-   frozen migration version held exactly the nine services the
-   migration table above restores rides for — that table is the
-   whole master of 2026-11-24; jr-musashino-omiya and
-   jr-shimousa first appear at SERVICE_MASTER_VERSION
-   (2026-11-26), and tobu-noda first appears at
-   SERVICE_MASTER_VERSION (2026-11-27). keio-new-line also first
-   appears at SERVICE_MASTER_VERSION (2026-11-27, subtask 1574).
-   A full ride's range must be reproducible from the version it
-   names, so a version whose master never held the service cannot
-   record one (review batch round 1, subtask 1593). An unknown
-   version holds nothing. */
+   current version holds every service in SERVICE_MASTER. A
+   past version holds exactly the services its history entry
+   lists. A full ride's range must be reproducible from the
+   version it names, so a version whose master never held the
+   service cannot record one (review batch round 1, subtask
+   1593). An unknown version holds nothing. */
 export function serviceExistsAtMasterVersion(
   serviceId: string,
   version: string,
 ): boolean {
   const v = version.trim();
   if (v === SERVICE_MASTER_VERSION) return serviceById(serviceId) != null;
-  if (v === MIGRATED_MASTER_VERSION) {
-    return Object.values(MIGRATED_RIDES).some(
-      (ride) => ride.serviceId === serviceId,
-    );
-  }
-  return false;
+  const entry = MASTER_VERSION_HISTORY.find((e) => e.version === v);
+  if (!entry) return false;
+  return entry.serviceIds.includes(serviceId);
 }

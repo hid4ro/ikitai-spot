@@ -102,9 +102,9 @@ type RideFields = {
      high).
    - full: the service and a master version that reproduces its
      range are required — and the version must be one the master
-     actually knows (the current version or the frozen migration
-     version); a blank or made-up version ("bogus") is rejected,
-     not stored. The supplied version is trimmed before both the
+     actually knows (the current version or a past version in
+     MASTER_VERSION_HISTORY); a blank or made-up version
+     ("bogus") is rejected, not stored. The supplied version is trimmed before both the
      check and the save, so a padded version (" 2026-11-24 ") is
      stored as the version it validated as, never with its spaces
      (review round 3, low) — and a whitespace-only version still
@@ -243,17 +243,16 @@ export function resolveRideFields(
       `resolveRideFields: full ride for "${name}" names master version ${masterVersion}, which did not contain "${service.id}"`,
     );
   }
-  /* The snapshot is cut from the current master, so it is stored
-     only when the ride was recorded at the current version. A
-     full ride recorded at the frozen migration version keeps
-     null: its range is the current master's range for that
-     service in practice, and the client falls back to the
-     current master when no snapshot is stored — a snapshot cut
-     from the wrong version would be worse than none. */
-  const snapshot =
-    masterVersion === SERVICE_MASTER_VERSION
-      ? serviceFullPathSnapshot(service.id)
-      : null;
+  /* The snapshot is cut from the master at the ride's own
+     version (serviceFullPathSnapshot, which reads the segments
+     that version held): a full ride recorded at an older master
+     version keeps the range that version contained, and the
+     client paints it from the snapshot instead of falling back
+     to the current master — which may have extended the service
+     since (subtask 1611, review of 1566: a snapshot cut from
+     the wrong version would be worse than none, so the version
+     the snapshot is cut at is the version the ride names). */
+  const snapshot = serviceFullPathSnapshot(service.id, masterVersion);
   return {
     ...link,
     recordedServiceId: service.id,
