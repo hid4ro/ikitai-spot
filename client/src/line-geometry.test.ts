@@ -19,11 +19,14 @@ import {
   computeRiddenLineCoverage,
   coveredBlockIds,
   EdgeCoverage,
+  focusSectionFeature,
   ghostLineLegs,
   graphSectionLegs,
   haversineKm,
   legPaintColor,
+  paintedLegFeature,
   parseFullPathSnapshot,
+  remainderLegFeature,
   sectionBounds,
   servicePaintColor,
   serviceUnriddenLegs,
@@ -31,6 +34,7 @@ import {
   wholeLineBounds,
   distanceToLineGeometryM,
   type LineGeometryMap,
+  type PathLeg,
   type RideInterval,
   type ServicePath,
 } from "./line-geometry";
@@ -760,13 +764,18 @@ describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
     );
   });
 
-  test("the features the map builds carry the unified color in properties.color (fix2)", () => {
+  test("the features the map builds carry the unified color in properties.color (fix3)", () => {
     /* Review round 1, finding 3: the resolver alone is not
-       the bar — build the features the way App.tsx does
-       (each coverage leg mapped through legPaintColor into
-       properties.color) for a ride that includes 大崎→東京,
-       whose legs run on the 東北線 key explicitly, and check
-       every generated feature's color. */
+       the bar — the features themselves must carry the
+       unified color. Review round 2, finding 3: the features
+       are built through the SAME builders App.tsx calls
+       (paintedLegFeature / focusSectionFeature /
+       remainderLegFeature in line-geometry.ts), so a call
+       site dropping the color decision can no longer pass
+       unnoticed the way the fix2 cut — which rebuilt the
+       features inside the test — allowed. The ride includes
+       大崎→東京, whose legs run on the 東北線 key
+       explicitly. */
     const GREEN = "#80C241";
     const section = (
       fromStationId: string,
@@ -811,28 +820,30 @@ describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
     expect(paintedKeys.has("山手線|東日本旅客鉄道")).toBe(true);
     expect(paintedKeys.has("東北線|東日本旅客鉄道")).toBe(true);
     expect(paintedKeys.has("東海道線|東日本旅客鉄道")).toBe(true);
-    const normalFeatures = painted.legs.map((leg) => ({
-      type: "Feature" as const,
-      properties: {
-        key: leg.key,
-        serviceId: "yamanote",
-        color: legPaintColor("yamanote", leg.key, GEOMETRIES),
-      },
-      geometry: { type: "LineString" as const, coordinates: leg.coords },
-    }));
+    const normalFeatures = painted.legs.flatMap((leg) => {
+      const feature = paintedLegFeature(
+        "yamanote",
+        leg,
+        painted.unknown,
+        GEOMETRIES,
+      );
+      return feature ? [feature] : [];
+    });
     expect(normalFeatures.length).toBeGreaterThan(0);
+    expect(normalFeatures.length).toBe(painted.legs.length);
     for (const f of normalFeatures) {
       expect(f.properties.color).toBe(GREEN);
     }
 
     /* Focus features: the highlight paints the same painted
-       legs (setFocusSection's mapping, with its signal-color
-       fallback), and the remainder focus paints the unridden
-       legs of the west-side-only ride — the loop's east side,
-       again on all three keys. */
-    for (const f of normalFeatures) {
+       legs through focusSectionFeature (setFocusSection's
+       builder), and the remainder focus paints the unridden
+       legs of the west-side-only ride through
+       remainderLegFeature — the loop's east side, again on
+       all three keys. */
+    for (const leg of painted.legs) {
       expect(
-        legPaintColor("yamanote", f.properties.key, GEOMETRIES) ?? "#ea580c",
+        focusSectionFeature("yamanote", leg, GEOMETRIES).properties.color,
       ).toBe(GREEN);
     }
     const westOnly = computeRiddenLineCoverage(
@@ -847,17 +858,36 @@ describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
     expect(remainder.length).toBeGreaterThan(0);
     for (const leg of remainder) {
       expect(
-        legPaintColor("yamanote", leg.key, GEOMETRIES) ?? "#ea580c",
+        remainderLegFeature("yamanote", leg, GEOMETRIES).properties.color,
       ).toBe(GREEN);
     }
 
     /* Control: a service without unification keeps its own
-       formal-line color through the same helper. */
+       formal-line color through the same builders. */
     const chuoKey = "中央線|東日本旅客鉄道";
     expect(legPaintColor("jr-chuo-rapid", chuoKey, GEOMETRIES)).toBe(
       GEOMETRIES[chuoKey]!.color,
     );
     expect(GEOMETRIES[chuoKey]!.color).not.toBe(GREEN);
+    const chuoLeg: PathLeg = {
+      key: chuoKey,
+      edge: "edge:control",
+      fromT: 0,
+      toT: 1,
+      coords: [
+        [139.7, 35.6],
+        [139.71, 35.61],
+      ],
+      lengthKm: 1,
+    };
+    expect(
+      paintedLegFeature("jr-chuo-rapid", chuoLeg, false, GEOMETRIES)
+        ?.properties.color,
+    ).toBe(GEOMETRIES[chuoKey]!.color);
+    expect(
+      remainderLegFeature("jr-chuo-rapid", chuoLeg, GEOMETRIES).properties
+        .color,
+    ).toBe(GEOMETRIES[chuoKey]!.color);
   });
 });
 

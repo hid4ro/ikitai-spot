@@ -1022,6 +1022,108 @@ export function legPaintColor(
   return unified ?? geometries[legKey]?.color ?? null;
 }
 
+/* The features the map builds from legs — the normal overlay,
+   the focus highlight and the remainder focus each have one
+   builder here, shared verbatim between App.tsx and the
+   tests (subtask 1680, review round 2, finding 3: the fix2
+   tests rebuilt the features inside the test, so a call site
+   dropping legPaintColor would still have passed; building
+   through these, the colors the map's setData receives are
+   the colors the tests assert). The signal orange is the
+   focus layers' fallback for a leg with no color at all —
+   the pre-2026-11-25 paint. */
+export const FOCUS_FALLBACK_COLOR = "#ea580c";
+
+export type PaintedLegFeature = {
+  type: "Feature";
+  properties: {
+    key: string;
+    serviceId: string;
+    color: string;
+    unknown: boolean;
+  };
+  geometry: {
+    type: "LineString";
+    coordinates: readonly [number, number][];
+  };
+};
+
+/* One painted leg's normal-overlay feature, or null when the
+   leg has no color at all — the overlay skips such a leg. */
+export function paintedLegFeature(
+  serviceId: string,
+  leg: PathLeg,
+  unknown: boolean,
+  geometries: LineGeometryMap,
+): PaintedLegFeature | null {
+  const color = legPaintColor(serviceId, leg.key, geometries);
+  if (color === null) return null;
+  return {
+    type: "Feature",
+    properties: { key: leg.key, serviceId, color, unknown },
+    geometry: { type: "LineString", coordinates: leg.coords },
+  };
+}
+
+export type FocusLegFeature = {
+  type: "Feature";
+  properties: { key: string; color: string };
+  geometry: {
+    type: "LineString";
+    coordinates: readonly [number, number][];
+  };
+};
+
+/* One remainder leg's focus feature: the leg's key and the
+   color legPaintColor decides, with the signal fallback. */
+export function remainderLegFeature(
+  serviceId: string | null,
+  leg: { key: string; coords: readonly [number, number][] },
+  geometries: LineGeometryMap,
+): FocusLegFeature {
+  return {
+    type: "Feature",
+    properties: {
+      key: leg.key,
+      color:
+        legPaintColor(serviceId, leg.key, geometries) ??
+        FOCUS_FALLBACK_COLOR,
+    },
+    geometry: { type: "LineString", coordinates: leg.coords },
+  };
+}
+
+export type FocusSectionFeature = {
+  type: "Feature";
+  properties: { key: string; serviceId: string; color: string };
+  geometry: {
+    type: "LineString";
+    coordinates: readonly [number, number][];
+  };
+};
+
+/* One painted leg's focus-highlight feature: the leg's own
+   color decision (the serviceId rides along so a tap on the
+   highlight resolves to the same service), with the signal
+   fallback. */
+export function focusSectionFeature(
+  serviceId: string,
+  leg: { key: string; coords: readonly [number, number][] },
+  geometries: LineGeometryMap,
+): FocusSectionFeature {
+  return {
+    type: "Feature",
+    properties: {
+      key: leg.key,
+      serviceId,
+      color:
+        legPaintColor(serviceId, leg.key, geometries) ??
+        FOCUS_FALLBACK_COLOR,
+    },
+    geometry: { type: "LineString", coordinates: leg.coords },
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* Coverage: what the map paints, what the graphs count               */
 /* ------------------------------------------------------------------ */

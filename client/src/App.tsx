@@ -69,16 +69,20 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
-  legPaintColor,
+  focusSectionFeature,
+  paintedLegFeature,
+  remainderLegFeature,
   riddenLineIntervals,
   servicePaintColor,
   wholeLineBounds,
   type LineCoverage,
   type LineGeometryMap,
+  type PaintedLegFeature,
   type PathLeg,
 } from "./line-geometry";
 import {
   ghostCoverageKey,
+  ghostFeaturesMatchCoverage,
   serializeGhostCoverage,
   trimUnriddenGhostFeatures,
 } from "./unridden-ghost";
@@ -3140,14 +3144,19 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
 
 /* The ghost context a remainder-focus call rewrites the
    ghost's source from: the canonical features (the worker's
-   latest result, held by the caller) and the coverage they
-   were computed from. `spans` are the focused service's
-   remainder legs in their full edge frame — the stretches
-   the ghost must not also paint while the focus layer shows
-   them at midway strength. No spans restores the canonical
-   features untouched. */
+   latest result, held by the caller), the coverage key of
+   the result they came from, and the CURRENT coverage.
+   `spans` are the focused service's remainder legs in their
+   full edge frame — the stretches the ghost must not also
+   paint while the focus layer shows them at midway strength.
+   No spans restores the canonical features untouched. The
+   source is rewritten only while the features still belong
+   to the current coverage (ghostFeaturesMatchCoverage):
+   after a ledger change the held result is the old ledger's
+   until the worker's fresh answer lands. */
 type RemainderGhostContext = {
   features: readonly UnriddenLineFeature[];
+  coverageKey: string | null;
   coverage: LineCoverage;
   spans: readonly PathLeg[];
 };
@@ -3197,22 +3206,31 @@ function setUnriddenRemainderFocus(
   ensureUnriddenRemainderFocus(map);
   map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
-    features: legs.map((leg) => ({
-      type: "Feature",
-      properties: {
-        key: leg.key,
-        /* A paint-unified service (山手線, subtask 1680) keeps
-           its representative color on the remainder too, so
-           the focused loop reads as one line at both
-           strengths — legPaintColor carries that decision. */
-        color:
-          legPaintColor(serviceId ?? null, leg.key, RIDDEN_LINE_GEOMETRIES) ??
-          "#ea580c",
-      },
-      geometry: { type: "LineString", coordinates: leg.coords },
-    })),
+    /* remainderLegFeature (line-geometry.ts) builds these —
+       the same builder the tests assert the colors through
+       (subtask 1680, review round 2, finding 3). A
+       paint-unified service (山手線) keeps its representative
+       color on the remainder too, so the focused loop reads
+       as one line at both strengths. */
+    features: legs.map((leg) =>
+      remainderLegFeature(serviceId ?? null, leg, RIDDEN_LINE_GEOMETRIES),
+    ),
   });
-  if (ghost && ghost.features.length > 0) {
+  if (
+    ghost &&
+    ghost.features.length > 0 &&
+    ghostFeaturesMatchCoverage(ghost.coverageKey, ghost.coverage)
+  ) {
+    /* The coverage-key gate (subtask 1680, review round 2,
+       finding 2 — the same discipline as the worker apply
+       path's, in applyUnriddenLineGhostLatest): while the
+       worker recomputes after a ledger change, the held
+       features belong to the old coverage, and writing them
+       back here — trimmed against the new coverage's spans,
+       or restored whole on a focus clear — would resurrect a
+       stale ghost. Leaving the source as it stands is safe:
+       the fresh result joins through the apply path, which
+       re-applies the current focus right after landing. */
     map.getSource(UNRIDDEN_LINES_SOURCE_ID)?.setData({
       type: "FeatureCollection",
       features:
@@ -3257,21 +3275,15 @@ function setFocusSection(
   setNormalLineExclusion(map, serviceId);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
-    features: legs.map((leg) => ({
-      type: "Feature",
-      properties: {
-        key: leg.key,
-        serviceId,
-        /* A paint-unified service (山手線, subtask 1680)
-           highlights in its representative color throughout,
-           not per formal line — the highlight is the service's
-           identity cue, and legPaintColor carries it. */
-        color:
-          legPaintColor(serviceId, leg.key, RIDDEN_LINE_GEOMETRIES) ??
-          "#ea580c",
-      },
-      geometry: { type: "LineString", coordinates: leg.coords },
-    })),
+    /* focusSectionFeature (line-geometry.ts) builds these —
+       the same builder the tests assert the colors through
+       (subtask 1680, review round 2, finding 3). A
+       paint-unified service (山手線) highlights in its
+       representative color throughout, not per formal line —
+       the highlight is the service's identity cue. */
+    features: legs.map((leg) =>
+      focusSectionFeature(serviceId, leg, RIDDEN_LINE_GEOMETRIES),
+    ),
   });
 }
 
@@ -3630,6 +3642,7 @@ function VisitedMapSection({
     "spans"
   > => ({
     features: unriddenGhostRef.current?.features ?? [],
+    coverageKey: unriddenGhostRef.current?.coverageKey ?? null,
     coverage: lineCoverageRef.current,
   });
   /* Re-applies the CURRENT selection's unridden-remainder
@@ -3721,40 +3734,25 @@ function VisitedMapSection({
      serviceId, never by key alone (integrated review round 1,
      medium). */
   const riddenLineFeatures = useMemo(() => {
-    const features: {
-      type: "Feature";
-      properties: {
-        key: string;
-        serviceId: string;
-        color: string;
-        unknown: boolean;
-      };
-      geometry: {
-        type: "LineString";
-        coordinates: readonly [number, number][];
-      };
-    }[] = [];
+    const features: PaintedLegFeature[] = [];
     for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
       for (const leg of painted.legs) {
-        /* A paint-unified service (山手線, subtask 1680) paints
-           every leg in its representative color: the loop is
-           one named line to the reader even where its trains
-           run on the 東北線・東海道線 formal lines. The leg's
-           key still names its formal line for coverage and the
-           ghost. legPaintColor carries the decision; a leg
-           with no color at all is skipped, as before. */
-        const color = legPaintColor(serviceId, leg.key, RIDDEN_LINE_GEOMETRIES);
-        if (color === null) continue;
-        features.push({
-          type: "Feature",
-          properties: {
-            key: leg.key,
-            serviceId,
-            color,
-            unknown: painted.unknown,
-          },
-          geometry: { type: "LineString", coordinates: leg.coords },
-        });
+        /* paintedLegFeature (line-geometry.ts) builds these —
+           the same builder the tests assert the colors through
+           (subtask 1680, review round 2, finding 3). A
+           paint-unified service (山手線) paints every leg in
+           its representative color: the loop is one named line
+           to the reader even where its trains run on the
+           東北線・東海道線 formal lines. The leg's key still
+           names its formal line for coverage and the ghost;
+           a leg with no color at all is skipped, as before. */
+        const feature = paintedLegFeature(
+          serviceId,
+          leg,
+          painted.unknown,
+          RIDDEN_LINE_GEOMETRIES,
+        );
+        if (feature) features.push(feature);
       }
     }
     return features;
