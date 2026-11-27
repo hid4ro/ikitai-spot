@@ -20,9 +20,14 @@
    - ridden focus: setFocusSection (line-map-focus.ts) run
      against a mock map, asserting the data the
      visited-line-focus source received;
-   - unridden focus: setUnriddenRemainderFocus
-     (line-map-focus.ts) against a mock map, asserting the
-     data the unridden-lines-focus source received.
+   - unridden focus: applySelectedLineRemainderFocus /
+     reapplyUnriddenRemainderFocus (line-map-focus.ts) against a
+     mock map, asserting the layer's initial visibility and the
+     data the unridden-lines-focus source received — the
+     selection assemblies themselves, not the helper below
+     them (fix3 drove setUnriddenRemainderFocus directly, and
+     the 1648 review reverted the variant pass-through at the
+     App.tsx call sites while every test still passed).
 
    The scenario is the reader's real ledger shape: a 山手線
    ride whose legs run on all three formal lines the loop
@@ -41,14 +46,21 @@ import {
   type PathLeg,
 } from "./line-geometry";
 import {
+  applySelectedLineRemainderFocus,
   clearFocusLineGeometry,
   LINE_FOCUS_SOURCE_ID,
+  reapplyUnriddenRemainderFocus,
   setFocusSection,
   setUnriddenRemainderFocus,
   VISITED_LINES_SOURCE_ID,
   visitedLinesOverlay,
+  type RemainderGhostContext,
 } from "./line-map-focus";
-import { UNRIDDEN_FOCUS_SOURCE_ID, UNRIDDEN_LINES_FOCUS_LAYER_ID } from "./map-variant";
+import {
+  UNRIDDEN_FOCUS_SOURCE_ID,
+  UNRIDDEN_LINES_FOCUS_LAYER_ID,
+  type RecordMapVariant,
+} from "./map-variant";
 import type { StationRef } from "../../shared/service-master";
 
 const GEOMETRIES = RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
@@ -240,81 +252,146 @@ describe("the colors the line sources receive (subtask 1680 fix5)", () => {
     }
   });
 
-  test("unridden focus: a selection before the ghost lands starts visible on the 路線 tab (1648 review, minor)", () => {
-    /* Codex's case (review of 1648, minor): the 1648 tests
-       drove ensureUnriddenRemainderFocus directly, so dropping
-       the variant on the selection path — App.tsx's
-       setUnriddenRemainderFocus call — passed all of them
-       while a filled layer stayed invisible until the next tab
-       switch. This test drives the selection entry point
-       itself, on a map the ghost has not reached: the layer
-       must be created at the current tab's visibility, and
-       the source must already hold the remainder's features. */
+  test("unridden focus: a line selection before the ghost lands starts visible on the 路線 tab (1648 review, minor, fix3)", () => {
+    /* Codex's case (review of 1648, minor): the 1648 tests drove
+       setUnriddenRemainderFocus directly, so dropping the variant
+       on the selection path — App.tsx's four
+       setUnriddenRemainderFocus calls — passed all of them while
+       a filled layer stayed invisible until the next tab switch.
+       The selection assemblies moved to line-map-focus.ts in
+       fix3 (App.tsx cannot be imported by the tests — it pulls
+       the generated ghost-worker asset), and this test drives
+       them from an actual line selection, on a map the ghost has
+       not reached: the layer must be created at the current tab's
+       visibility, and the source must already hold the
+       remainder's features. The variant is REQUIRED on the
+       assemblies, so dropping it at an App.tsx call site is a
+       type error; the dropped calls below (an explicit undefined
+       cast) pin the runtime half — the stranded layer the fault
+       would leave behind. */
+    const sections = [section(S.新宿.id, S.大崎.id, "inner")];
     const westOnly = computeRiddenLineCoverage(
-      [yamanoteRow([section(S.新宿.id, S.大崎.id, "inner")])],
+      [yamanoteRow(sections)],
       GEOMETRIES,
       597,
     );
+    const row = yamanoteRow(sections);
+    const painted = westOnly.perServiceLegs.get("yamanote")!;
     const remainder = westOnly.perServiceUnriddenLegs.get("yamanote")!;
     expect(remainder.length).toBeGreaterThan(0);
-    const remainderKeys = [...new Set(remainder.map((leg) => leg.key))];
+    /* The ghost has not landed: no features, no coverage key —
+       exactly what App.tsx's remainderGhostContext hands over
+       before the worker answers. */
+    const ghostNotLanded: Omit<RemainderGhostContext, "spans"> = {
+      features: [],
+      coverageKey: null,
+      coverage: westOnly,
+    };
+    const layerVisibility = (map: MockMap) =>
+      (
+        map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID)!
+          .layout as Record<string, unknown>
+      ).visibility;
 
+    /* A row tap on the 路線 tab: visible at once, source
+       filled with the whole remainder, no ghost joined. */
     const map = new MockMap();
-    setUnriddenRemainderFocus(
+    applySelectedLineRemainderFocus(
       asMap(map),
-      remainderKeys,
-      remainder,
+      row,
+      painted,
+      westOnly,
       "yamanote",
-      null,
+      ghostNotLanded,
       "lines",
     );
-    const layer = map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
-    expect(layer).toBeDefined();
-    expect(
-      (layer!.layout as Record<string, unknown>).visibility,
-    ).toBe("visible");
+    expect(map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID)).toBeDefined();
+    expect(layerVisibility(map)).toBe("visible");
     const features = map.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID);
     expect(features.length).toBe(remainder.length);
-    /* The ghost never landed: no ghost source or layer joined
-       through this call. */
+    for (const feature of features) {
+      expect(feature.properties.color).toBe(GREEN);
+    }
     expect(map.sources.get("unridden-lines")).toBeUndefined();
     expect(map.layers.get("unridden-lines-ghost")).toBeUndefined();
 
     /* Off the 路線 tab the same selection still fills the
        source, but the layer starts hidden. */
     const offTab = new MockMap();
-    setUnriddenRemainderFocus(
+    applySelectedLineRemainderFocus(
       asMap(offTab),
-      remainderKeys,
-      remainder,
+      row,
+      painted,
+      westOnly,
       "yamanote",
-      null,
+      ghostNotLanded,
       "spots",
     );
-    const hidden = offTab.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
-    expect(
-      (hidden!.layout as Record<string, unknown>).visibility,
-    ).toBe("none");
+    expect(layerVisibility(offTab)).toBe("none");
     expect(offTab.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID).length).toBe(
       remainder.length,
     );
 
-    /* And with no variant handed in — the dropped pass-through
-       — the layer strands at the spec's default "none" even
-       though the tab is the 路線 tab: this is the fault the
-       test exists to catch. */
+    /* And with the variant dropped — the pass-through fault —
+       the layer strands at the spec's default "none" even
+       though the tab is the 路線 tab. */
     const dropped = new MockMap();
-    setUnriddenRemainderFocus(
+    applySelectedLineRemainderFocus(
       asMap(dropped),
-      remainderKeys,
-      remainder,
+      row,
+      painted,
+      westOnly,
       "yamanote",
-      null,
+      ghostNotLanded,
+      undefined as unknown as RecordMapVariant,
     );
-    const stranded = dropped.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(layerVisibility(dropped)).toBe("none");
+
+    /* The re-apply path (mount completion / ghost's late join)
+       resolves the same selection from the ledger rows and the
+       focused row id, and starts visible on the 路線 tab too. */
+    const reapplyMap = new MockMap();
+    reapplyUnriddenRemainderFocus(
+      asMap(reapplyMap),
+      [{ ...row, id: 1 }],
+      westOnly,
+      1,
+      ghostNotLanded,
+      "lines",
+    );
+    expect(layerVisibility(reapplyMap)).toBe("visible");
     expect(
-      (stranded!.layout as Record<string, unknown>).visibility,
-    ).toBe("none");
+      reapplyMap.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID).length,
+    ).toBe(remainder.length);
+
+    /* With the variant dropped on the re-apply path, the same
+       stranded layer. */
+    const reapplyDropped = new MockMap();
+    reapplyUnriddenRemainderFocus(
+      asMap(reapplyDropped),
+      [{ ...row, id: 1 }],
+      westOnly,
+      1,
+      ghostNotLanded,
+      undefined as unknown as RecordMapVariant,
+    );
+    expect(layerVisibility(reapplyDropped)).toBe("none");
+
+    /* No applicable selection (nothing focused): the re-apply
+       leaves the layers as they are — no layer is created. */
+    const noSelection = new MockMap();
+    reapplyUnriddenRemainderFocus(
+      asMap(noSelection),
+      [{ ...row, id: 1 }],
+      westOnly,
+      null,
+      ghostNotLanded,
+      "lines",
+    );
+    expect(noSelection.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID)).toBeUndefined();
+    expect(
+      noSelection.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID).length,
+    ).toBe(0);
   });
 
   test("control: a non-unified service keeps its own formal-line color on all three paths", () => {
