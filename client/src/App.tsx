@@ -3201,9 +3201,16 @@ function setUnriddenRemainderFocus(
   legs: readonly RemainderLeg[],
   serviceId?: string | null,
   ghost?: RemainderGhostContext | null,
+  variant?: RecordMapVariant,
 ) {
   const active = keys && keys.length > 0 ? [...keys] : null;
-  ensureUnriddenRemainderFocus(map);
+  /* The current tab rides along so a remainder layer CREATED
+     by this call starts at that tab's visibility (subtask
+     1648): no variant paint runs after a focus call, so the
+     spec's default "none" would strand a filled layer
+     invisible whenever the ghost had not landed yet — and
+     for good if the ghost computation then failed. */
+  ensureUnriddenRemainderFocus(map, variant);
   map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
     /* remainderLegFeature (line-geometry.ts) builds these —
@@ -3290,6 +3297,7 @@ function setFocusSection(
 function clearFocusLineGeometry(
   map: MapLibreLike,
   ghost?: Omit<RemainderGhostContext, "spans"> | null,
+  variant?: RecordMapVariant,
 ) {
   setNormalLineExclusion(map, null);
   /* No spans: the ghost's source goes back to the canonical
@@ -3300,6 +3308,7 @@ function clearFocusLineGeometry(
     [],
     null,
     ghost ? { ...ghost, spans: [] } : ghost,
+    variant,
   );
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
 }
@@ -3692,7 +3701,7 @@ function VisitedMapSection({
       setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null, {
         ...remainderGhostContext(),
         spans,
-      });
+      }, variantRef.current);
     }
   };
   const lineCoverageSettled =
@@ -5716,6 +5725,7 @@ function VisitedMapSection({
               map,
               unriddenGhostRef.current,
               lineCoverageKeyRef.current,
+              variantRef.current,
             );
           } catch {
             /* the ghost is an underlay; its data effect retries */
@@ -6024,6 +6034,7 @@ function VisitedMapSection({
           map,
           unriddenGhostRef.current,
           lineCoverageKeyRef.current,
+          variantRef.current,
         );
         applyVariantPaint(map, variantRef.current);
         /* A focus set before the ghost landed found no
@@ -6179,7 +6190,7 @@ function VisitedMapSection({
     const map = mapHandleRef.current?.getMap() ?? null;
     if (map) {
       try {
-        clearFocusLineGeometry(map, remainderGhostContext());
+        clearFocusLineGeometry(map, remainderGhostContext(), variantRef.current);
       } catch {
         /* the map may already be gone; the row emphasis is cleared */
       }
@@ -6956,7 +6967,7 @@ function VisitedMapSection({
         withLiveMap((map) => {
           if (focusedLineIdRef.current !== line.id) return;
           try {
-            clearFocusLineGeometry(map, remainderGhostContext());
+            clearFocusLineGeometry(map, remainderGhostContext(), variantRef.current);
           } catch {
             /* the map may already be gone; the row emphasis is the cue */
           }
@@ -7006,6 +7017,7 @@ function VisitedMapSection({
                 spans:
                   remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
               },
+              variantRef.current,
             );
           }
           if (bounds) {
@@ -7101,6 +7113,7 @@ function VisitedMapSection({
                 spans:
                   remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
               },
+              variantRef.current,
             );
           }
         } catch {
@@ -7114,7 +7127,7 @@ function VisitedMapSection({
       withLiveMap((map) => {
         if (focusedLineIdRef.current !== row.id) return;
         try {
-          clearFocusLineGeometry(map, remainderGhostContext());
+          clearFocusLineGeometry(map, remainderGhostContext(), variantRef.current);
         } catch {
           /* a failed clear leaves the row emphasis as the cue */
         }
@@ -7209,6 +7222,7 @@ function VisitedMapSection({
               spans:
                 remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
             },
+            variantRef.current,
           );
           /* Fit the whole line into the frame, with the row
              tap's framing (focusRiddenLine): same padding,
@@ -7228,7 +7242,7 @@ function VisitedMapSection({
         } else {
           /* No track to paint (a row with no service link): the
              previous row's highlight must not linger. */
-          clearFocusLineGeometry(map, remainderGhostContext());
+          clearFocusLineGeometry(map, remainderGhostContext(), variantRef.current);
         }
       } catch {
         /* a failed highlight or camera move leaves the row emphasis as the cue */

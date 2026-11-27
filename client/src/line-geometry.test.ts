@@ -1515,6 +1515,74 @@ describe("serviceUnriddenLegs: the focused line's midway paint is the service's 
   });
 });
 
+describe("the midway remainder yields to other services' rides (subtask 1648)", () => {
+  test("むさしの号's remainder vanishes under a full 武蔵野線 ride (review of 1635, finding 2)", () => {
+    /* Codex's case: むさしの号 ridden 北府中→大宮 leaves only
+       府中本町→北府中 unridden — and that stretch is the
+       武蔵野線's own first leg, painted solid by a full
+       武蔵野線 ride. The 1635 remainder cut only the
+       service's OWN spans, so the midway paint drew over the
+       solid line for the whole ~1.7 km. */
+    clearLineGraphCache();
+    const paths = new Map<string, ServicePath>();
+    paths.set("jr-musashino-omiya", servicePath("jr-musashino-omiya"));
+    paths.set("jr-musashino", servicePath("jr-musashino"));
+    const coverage = computeLineCoverage(
+      new Map([
+        [
+          "jr-musashino-omiya",
+          [{ serviceId: "jr-musashino-omiya", from: S.北府中, to: S.大宮 }],
+        ],
+      ]),
+      new Set(["jr-musashino"]),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    expect(
+      coverage.perServiceUnriddenLegs.get("jr-musashino-omiya"),
+    ).toEqual([]);
+    /* The full ride itself still leaves nothing. */
+    expect(coverage.perServiceUnriddenLegs.get("jr-musashino")).toEqual(
+      [],
+    );
+  });
+
+  test("a remainder no other ride touches survives the cross-service cut", () => {
+    /* Control: the same むさしの号 ride next to an unrelated
+       full ride （京王線） — the second pass must leave the
+       remainder exactly as the own-service cut left it. */
+    clearLineGraphCache();
+    const paths = new Map<string, ServicePath>();
+    paths.set("jr-musashino-omiya", servicePath("jr-musashino-omiya"));
+    paths.set("keio", servicePath("keio"));
+    const coverage = computeLineCoverage(
+      new Map([
+        [
+          "jr-musashino-omiya",
+          [{ serviceId: "jr-musashino-omiya", from: S.北府中, to: S.大宮 }],
+        ],
+      ]),
+      new Set(["keio"]),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    const remainder = coverage.perServiceUnriddenLegs.get(
+      "jr-musashino-omiya",
+    )!;
+    expect(sectionBounds(remainder)).toEqual(
+      sectionBounds(
+        clipServicePath(
+          servicePath("jr-musashino-omiya"),
+          S.府中本町,
+          S.北府中,
+        )!.legs,
+      )!,
+    );
+  });
+});
+
 describe("distanceToLineGeometryM (the nearest-line pick, subtask 1483)", () => {
   test("a point on a segment is 0, a point off it is its perpendicular distance", () => {
     const geometry: GeoJsonLineGeometry = {
