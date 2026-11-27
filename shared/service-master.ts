@@ -147,6 +147,18 @@ export type ServiceMasterEntry = {
   operator: string;
   /* The formal lines, in running order. */
   segments: ServiceSegment[];
+  /* Optional: the formal-line key whose asset color paints ALL
+     of this service's legs on the map, instead of each leg's own
+     formal-line color. For a service the reader knows as ONE
+     named line whose path happens to run over several formal
+     lines — 山手線's loop runs on 山手線・東北線・東海道線,
+     whose own colors (green / dark blue / orange) would paint
+     the one loop in three colors, the 東海道線 stretch
+     indistinguishable from 中央線's orange (subtask 1680).
+     Coverage and distance stay per formal-line key; only the
+     paint color is unified. Unset services keep the per-leg
+     formal-line colors. */
+  paintColorKey?: string;
   /* The stage-2 input blocks, in running order: a partition of
      the service between boundary stations (see ServiceBlock).
      Single-block services (りんかい線・北総線) have one block =
@@ -672,6 +684,11 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     displayName: "山手線",
     ledgerNames: ["山手線"],
     operator: "東日本旅客鉄道",
+    /* The whole loop paints in 山手線 green: the reader rode
+       "the Yamanote", and the 東北線・東海道線 stretches of the
+       loop are Yamanote trains on those formal lines, not
+       Tōhoku/Tōkaidō services (subtask 1680). */
+    paintColorKey: "山手線|東日本旅客鉄道",
     segments: [
       {
         formalLineName: "山手線",

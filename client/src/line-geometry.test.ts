@@ -24,6 +24,7 @@ import {
   haversineKm,
   parseFullPathSnapshot,
   sectionBounds,
+  servicePaintColor,
   serviceUnriddenLegs,
   slicePolyline,
   wholeLineBounds,
@@ -35,6 +36,7 @@ import {
 import {
   blocksForService,
   MIGRATED_RIDES,
+  SERVICE_MASTER,
   SERVICE_MASTER_VERSION,
   serviceById,
   serviceFullPathSnapshot,
@@ -677,6 +679,84 @@ describe("real asset: the subtask-1455 estimated sections", () => {
     );
     expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
     expect(coverage.completeServiceIds).toEqual([]);
+  });
+});
+
+describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
+  test("山手線 paints in its own green, not its formal lines' colors", () => {
+    /* The loop's path runs on three formal lines whose asset
+       colors differ — 山手線 #80C241 green, 東北線 #00418E dark
+       blue, 東海道線 #F15A22 orange (the same orange as 中央線).
+       Per-leg coloring painted the 大崎→東京 ride's 品川→東京
+       stretch Tōkaidō orange; the master unifies the service's
+       paint on the 山手線 key instead. */
+    expect(servicePaintColor("yamanote", GEOMETRIES)).toBe("#80C241");
+    /* A service without paintColorKey keeps per-leg colors:
+       the helper must yield null so callers fall back. */
+    expect(servicePaintColor("jr-chuo-rapid", GEOMETRIES)).toBeNull();
+    expect(servicePaintColor("jr-saikyo", GEOMETRIES)).toBeNull();
+  });
+
+  test("every paintColorKey in the master resolves to a colored asset entry", () => {
+    for (const entry of SERVICE_MASTER) {
+      if (!entry.paintColorKey) continue;
+      expect(GEOMETRIES[entry.paintColorKey]?.color).toBeTruthy();
+      expect(servicePaintColor(entry.id, GEOMETRIES)).toBe(
+        GEOMETRIES[entry.paintColorKey]!.color,
+      );
+    }
+  });
+
+  test("the yamanote sections really do paint legs on the 東海道線・東北線 keys", () => {
+    /* Pins WHY the unification exists: with the reader's actual
+       sections, the painted legs span all three formal-line
+       keys — without the override the map would show the loop
+       in three colors. */
+    const rows = [
+      {
+        name: "山手線",
+        serviceId: "yamanote",
+        serviceLinkSource: null,
+        recordedServiceId: "yamanote",
+        fromStationId: S.大崎.id,
+        toStationId: S.目黒.id,
+        pathSnapshot: null as string | null,
+        rideState: "partial" as const,
+        sections: [
+          {
+            fromStationId: S.新宿.id,
+            toStationId: S.大崎.id,
+            direction: "inner" as const,
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+          {
+            fromStationId: S.大崎.id,
+            toStationId: S.目黒.id,
+            direction: "outer" as const,
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+          {
+            fromStationId: S.大崎.id,
+            toStationId: S.東京.id,
+            direction: "inner" as const,
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ],
+      },
+    ];
+    const coverage = computeRiddenLineCoverage(rows, GEOMETRIES, 597);
+    const keys = new Set(
+      coverage.perServiceLegs.get("yamanote")!.legs.map((leg) => leg.key),
+    );
+    expect(keys.has("山手線|東日本旅客鉄道")).toBe(true);
+    expect(keys.has("東海道線|東日本旅客鉄道")).toBe(true);
+    /* …and every one of those legs takes the unified color. */
+    expect(servicePaintColor("yamanote", GEOMETRIES)).toBe(
+      GEOMETRIES["山手線|東日本旅客鉄道"]!.color,
+    );
   });
 });
 
