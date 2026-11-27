@@ -19,6 +19,7 @@ import {
   computeRiddenLineCoverage,
   coveredBlockIds,
   EdgeCoverage,
+  FOCUS_FALLBACK_COLOR,
   focusSectionFeature,
   ghostLineLegs,
   graphSectionLegs,
@@ -1579,6 +1580,95 @@ describe("the midway remainder yields to other services' rides (subtask 1648)", 
           S.北府中,
         )!.legs,
       )!,
+    );
+  });
+
+  test("a colorless full ride leaves the other service's remainder for the focus fallback (1648 review, medium)", () => {
+    /* Codex's case: the 武蔵野線's asset entry loses its
+       color. The normal overlay then skips its legs, so
+       nothing solid covers 府中本町→北府中 — and the second
+       pass must not cut that stretch out of むさしの号's
+       remainder either, or the focus layer would have nothing
+       to show there (not even its signal fallback). The
+       distance accounting must not move: the full ride still
+       counts its kilometres. */
+    clearLineGraphCache();
+    const paths = new Map<string, ServicePath>();
+    paths.set("jr-musashino-omiya", servicePath("jr-musashino-omiya"));
+    paths.set("jr-musashino", servicePath("jr-musashino"));
+    const MUSASHINO_KEY = "武蔵野線|東日本旅客鉄道";
+    /* The fixture really does paint the stretch through this
+       key, or the test would not cover the cut. */
+    expect(
+      legPaintColor("jr-musashino", MUSASHINO_KEY, GEOMETRIES),
+    ).not.toBeNull();
+    const colorless = {
+      ...GEOMETRIES,
+      [MUSASHINO_KEY]: {
+        ...GEOMETRIES[MUSASHINO_KEY]!,
+        color: undefined,
+      },
+    } as unknown as LineGeometryMap;
+    expect(legPaintColor("jr-musashino", MUSASHINO_KEY, colorless)).toBeNull();
+    const intervals = new Map([
+      [
+        "jr-musashino-omiya",
+        [{ serviceId: "jr-musashino-omiya", from: S.北府中, to: S.大宮 }],
+      ],
+    ]);
+    const full = new Set(["jr-musashino"]);
+    /* With the color in place the remainder vanishes, as the
+       first test pins. */
+    const colored = computeLineCoverage(
+      intervals,
+      full,
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    expect(
+      colored.perServiceUnriddenLegs.get("jr-musashino-omiya"),
+    ).toEqual([]);
+    /* With the color gone the remainder survives, exactly as
+       the own-service cut left it. */
+    const colorlessCoverage = computeLineCoverage(
+      intervals,
+      full,
+      paths,
+      colorless,
+      597,
+    );
+    const remainder = colorlessCoverage.perServiceUnriddenLegs.get(
+      "jr-musashino-omiya",
+    )!;
+    expect(sectionBounds(remainder)).toEqual(
+      sectionBounds(
+        clipServicePath(
+          servicePath("jr-musashino-omiya"),
+          S.府中本町,
+          S.北府中,
+        )!.legs,
+      )!,
+    );
+    /* The surviving leg is the stretch the teacher's scenario
+       is about: the normal overlay skips it, and the focus
+       layer shows it in the signal fallback. */
+    const surviving = remainder.find((leg) => leg.key === MUSASHINO_KEY);
+    expect(surviving).toBeDefined();
+    expect(
+      paintedLegFeature("jr-musashino", surviving!, false, colorless),
+    ).toBeNull();
+    expect(
+      remainderLegFeature("jr-musashino-omiya", surviving!, colorless)
+        .properties.color,
+    ).toBe(FOCUS_FALLBACK_COLOR);
+    /* The distance accounting is untouched by the gate. */
+    expect(
+      colorlessCoverage.perService.get("jr-musashino")!.riddenKm,
+    ).toBeCloseTo(colored.perService.get("jr-musashino")!.riddenKm, 6);
+    expect(colorlessCoverage.networkRiddenKm).toBeCloseTo(
+      colored.networkRiddenKm,
+      6,
     );
   });
 });
