@@ -22,6 +22,7 @@ import {
   ghostLineLegs,
   graphSectionLegs,
   haversineKm,
+  legPaintColor,
   parseFullPathSnapshot,
   sectionBounds,
   servicePaintColor,
@@ -757,6 +758,106 @@ describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
     expect(servicePaintColor("yamanote", GEOMETRIES)).toBe(
       GEOMETRIES["山手線|東日本旅客鉄道"]!.color,
     );
+  });
+
+  test("the features the map builds carry the unified color in properties.color (fix2)", () => {
+    /* Review round 1, finding 3: the resolver alone is not
+       the bar — build the features the way App.tsx does
+       (each coverage leg mapped through legPaintColor into
+       properties.color) for a ride that includes 大崎→東京,
+       whose legs run on the 東北線 key explicitly, and check
+       every generated feature's color. */
+    const GREEN = "#80C241";
+    const section = (
+      fromStationId: string,
+      toStationId: string,
+      direction: "inner" | "outer",
+    ) => ({
+      fromStationId,
+      toStationId,
+      direction,
+      blockId: null,
+      recordedServiceId: "yamanote",
+    });
+    const yamanoteRow = (sections: ReturnType<typeof section>[]) => ({
+      name: "山手線",
+      serviceId: "yamanote",
+      serviceLinkSource: null,
+      recordedServiceId: "yamanote",
+      fromStationId: S.大崎.id,
+      toStationId: S.目黒.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections,
+    });
+
+    /* Normal overlay features: painted legs of a ride that
+       includes 大崎→東京 (inner). */
+    const coverage = computeRiddenLineCoverage(
+      [
+        yamanoteRow([
+          section(S.新宿.id, S.大崎.id, "inner"),
+          section(S.大崎.id, S.東京.id, "inner"),
+        ]),
+      ],
+      GEOMETRIES,
+      597,
+    );
+    const painted = coverage.perServiceLegs.get("yamanote")!;
+    const paintedKeys = new Set(painted.legs.map((leg) => leg.key));
+    /* The input really does put legs on all three keys —
+       東北線 explicitly (田端→東京), or the color assertions
+       below would not cover the stretch that broke. */
+    expect(paintedKeys.has("山手線|東日本旅客鉄道")).toBe(true);
+    expect(paintedKeys.has("東北線|東日本旅客鉄道")).toBe(true);
+    expect(paintedKeys.has("東海道線|東日本旅客鉄道")).toBe(true);
+    const normalFeatures = painted.legs.map((leg) => ({
+      type: "Feature" as const,
+      properties: {
+        key: leg.key,
+        serviceId: "yamanote",
+        color: legPaintColor("yamanote", leg.key, GEOMETRIES),
+      },
+      geometry: { type: "LineString" as const, coordinates: leg.coords },
+    }));
+    expect(normalFeatures.length).toBeGreaterThan(0);
+    for (const f of normalFeatures) {
+      expect(f.properties.color).toBe(GREEN);
+    }
+
+    /* Focus features: the highlight paints the same painted
+       legs (setFocusSection's mapping, with its signal-color
+       fallback), and the remainder focus paints the unridden
+       legs of the west-side-only ride — the loop's east side,
+       again on all three keys. */
+    for (const f of normalFeatures) {
+      expect(
+        legPaintColor("yamanote", f.properties.key, GEOMETRIES) ?? "#ea580c",
+      ).toBe(GREEN);
+    }
+    const westOnly = computeRiddenLineCoverage(
+      [yamanoteRow([section(S.新宿.id, S.大崎.id, "inner")])],
+      GEOMETRIES,
+      597,
+    );
+    const remainder = westOnly.perServiceUnriddenLegs.get("yamanote")!;
+    const remainderKeys = new Set(remainder.map((leg) => leg.key));
+    expect(remainderKeys.has("東北線|東日本旅客鉄道")).toBe(true);
+    expect(remainderKeys.has("東海道線|東日本旅客鉄道")).toBe(true);
+    expect(remainder.length).toBeGreaterThan(0);
+    for (const leg of remainder) {
+      expect(
+        legPaintColor("yamanote", leg.key, GEOMETRIES) ?? "#ea580c",
+      ).toBe(GREEN);
+    }
+
+    /* Control: a service without unification keeps its own
+       formal-line color through the same helper. */
+    const chuoKey = "中央線|東日本旅客鉄道";
+    expect(legPaintColor("jr-chuo-rapid", chuoKey, GEOMETRIES)).toBe(
+      GEOMETRIES[chuoKey]!.color,
+    );
+    expect(GEOMETRIES[chuoKey]!.color).not.toBe(GREEN);
   });
 });
 

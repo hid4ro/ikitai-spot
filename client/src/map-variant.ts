@@ -245,9 +245,12 @@ export const UNRIDDEN_FOCUS_SOURCE_ID = "unridden-lines-focus";
    clearly below the ridden paint and the focus highlight, and
    never dashed (the reader's no-dash rule). App.tsx's focus
    switching fills the layer's own source with the focused
-   service's remainder legs and excludes the service's
-   formal-line keys from the ghost layer meanwhile, so each
-   stretch is painted exactly once, at exactly this strength. */
+   service's remainder legs and trims the stretches they
+   cover out of the ghost's source data meanwhile — span-
+   precise by formal-line key and graph edge (subtask 1680,
+   review round 1; the first cut excluded whole keys by
+   layer filter) — so each stretch is painted exactly once,
+   at exactly this strength. */
 export const UNRIDDEN_FOCUS_LINE_WIDTH = 2.4;
 export const UNRIDDEN_FOCUS_LINE_OPACITY = 0.5;
 
@@ -506,8 +509,9 @@ export type RemainderLeg = {
    empty list when nothing may be singled out. The vetoes are
    the keys helper's, exactly — no painted legs, a
    service-level unknown, or the row's own unknown ride — so
-   the keys (which still drive the ghost exclusion) and the
-   legs (which fill the focus source) can never disagree about
+   the keys (which decide whether an emphasis exists) and the
+   legs (which fill the focus source and, in their full edge
+   frame, drive the ghost's trim) can never disagree about
    whether an emphasis exists. An empty list is a decision,
    not an absence: callers apply it, clearing any emphasis a
    previous selection left on the layers. */

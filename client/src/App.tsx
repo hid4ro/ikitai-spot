@@ -69,15 +69,18 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
+  legPaintColor,
   riddenLineIntervals,
   servicePaintColor,
   wholeLineBounds,
   type LineCoverage,
   type LineGeometryMap,
+  type PathLeg,
 } from "./line-geometry";
 import {
   ghostCoverageKey,
   serializeGhostCoverage,
+  trimUnriddenGhostFeatures,
 } from "./unridden-ghost";
 import { createUnriddenGhostClient } from "./unridden-ghost-client";
 import {
@@ -103,6 +106,7 @@ import {
   spotsInitialCamera,
   stickyPaneVisibleTop,
   UNRIDDEN_FOCUS_SOURCE_ID,
+  UNRIDDEN_LINES_SOURCE_ID,
   ensureUnriddenRemainderFocus,
   unriddenRemainderKeysForRow,
   unriddenRemainderKeysForSelection,
@@ -3134,6 +3138,20 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
   }
 }
 
+/* The ghost context a remainder-focus call rewrites the
+   ghost's source from: the canonical features (the worker's
+   latest result, held by the caller) and the coverage they
+   were computed from. `spans` are the focused service's
+   remainder legs in their full edge frame — the stretches
+   the ghost must not also paint while the focus layer shows
+   them at midway strength. No spans restores the canonical
+   features untouched. */
+type RemainderGhostContext = {
+  features: readonly UnriddenLineFeature[];
+  coverage: LineCoverage;
+  spans: readonly PathLeg[];
+};
+
 /* The focused line's unridden remainder (subtask 1589,
    rescoped to the service itself by subtask 1635): while a
    line is focused, the stretches of ITS OWN path it has not
@@ -3145,31 +3163,37 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
    old cut shared the ghost source and selected by formal-line
    key, so a branch service painted its whole formal line's
    remainder (むさしの号's 東北線 slice drew Tokyo→Aomori).
-   The switching mirrors setNormalLineExclusion: the ghost
-   layer excludes the focused service's formal-line keys
-   meanwhile, so every stretch is painted exactly once, at
-   exactly one strength. The rest of a shared formal line's
-   ghost hides while its service is focused, exactly as the
-   key exclusion hid it before. An unknown ride passes no
-   keys and no legs — nothing is recorded as ridden for it, so
-   there is no remainder to single out, and its whole path is
-   the focus highlight already. Null (or no keys) restores the
-   ghost's full set and empties the focus source. A map whose
-   focus layer never joined yet gains it here, as in
-   ensureLineFocusLayers. */
+   The switching mirrors setNormalLineExclusion: every stretch
+   is painted exactly once, at exactly one strength — the
+   ghost's source is rewritten with the remainder's stretches
+   trimmed out of it (trimUnriddenGhostFeatures in
+   unridden-ghost.ts), span-precise by formal-line key and
+   graph edge, so the rest of a shared formal line keeps its
+   ghost while its service is focused （東北線 north of 田端
+   survives a 山手線 focus). The first cut excluded whole
+   formal-line keys by layer filter, keyed off the PAINTED
+   legs' keys: a ride painting only one of a service's keys
+   left the other keys' ghosts stacked under the remainder,
+   shifting its hue (subtask 1680, review round 1). An
+   unknown ride passes no keys and no legs — nothing is
+   recorded as ridden for it, so there is no remainder to
+   single out, and its whole path is the focus highlight
+   already. Null (or no keys) restores the ghost's canonical
+   features and empties the focus source. A map whose focus
+   layer never joined yet gains it here, as in
+   ensureLineFocusLayers. A caller that cannot supply the
+   ghost context (ghost = null) leaves the ghost's source as
+   it stands; the paths that can — every focus change and
+   clear — pass it, and the ghost's own late join re-applies
+   the current focus right after landing. */
 function setUnriddenRemainderFocus(
   map: MapLibreLike,
   keys: readonly string[] | null,
   legs: readonly RemainderLeg[],
   serviceId?: string | null,
+  ghost?: RemainderGhostContext | null,
 ) {
   const active = keys && keys.length > 0 ? [...keys] : null;
-  /* A paint-unified service (山手線, subtask 1680) keeps its
-     representative color on the remainder too, so the focused
-     loop reads as one line at both strengths. */
-  const unifiedColor = serviceId
-    ? servicePaintColor(serviceId, RIDDEN_LINE_GEOMETRIES)
-    : null;
   ensureUnriddenRemainderFocus(map);
   map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
@@ -3177,21 +3201,37 @@ function setUnriddenRemainderFocus(
       type: "Feature",
       properties: {
         key: leg.key,
+        /* A paint-unified service (山手線, subtask 1680) keeps
+           its representative color on the remainder too, so
+           the focused loop reads as one line at both
+           strengths — legPaintColor carries that decision. */
         color:
-          unifiedColor ??
-          RIDDEN_LINE_GEOMETRIES[leg.key]?.color ??
+          legPaintColor(serviceId ?? null, leg.key, RIDDEN_LINE_GEOMETRIES) ??
           "#ea580c",
       },
       geometry: { type: "LineString", coordinates: leg.coords },
     })),
   });
+  if (ghost && ghost.features.length > 0) {
+    map.getSource(UNRIDDEN_LINES_SOURCE_ID)?.setData({
+      type: "FeatureCollection",
+      features:
+        active && ghost.spans.length > 0
+          ? trimUnriddenGhostFeatures(
+              ghost.features,
+              ghost.coverage,
+              RIDDEN_LINE_GEOMETRIES,
+              ghost.spans,
+            )
+          : ghost.features,
+    });
+  }
+  /* The ghost layer carries no filter: the exclusion lives in
+     its source data now, not in a key filter. Clearing any
+     filter a previous build set keeps that invariant on a map
+     that outlives the switch. */
   if (map.getLayer("unridden-lines-ghost")) {
-    map.setFilter(
-      "unridden-lines-ghost",
-      active
-        ? ["!", ["in", ["get", "key"], ["literal", active]]]
-        : null,
-    );
+    map.setFilter("unridden-lines-ghost", null);
   }
 }
 
@@ -3215,10 +3255,6 @@ function setFocusSection(
 ) {
   ensureLineFocusLayers(map);
   setNormalLineExclusion(map, serviceId);
-  /* A paint-unified service (山手線, subtask 1680) highlights
-     in its representative color throughout, not per formal
-     line — the highlight is the service's identity cue. */
-  const unifiedColor = servicePaintColor(serviceId, RIDDEN_LINE_GEOMETRIES);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
     features: legs.map((leg) => ({
@@ -3226,9 +3262,12 @@ function setFocusSection(
       properties: {
         key: leg.key,
         serviceId,
+        /* A paint-unified service (山手線, subtask 1680)
+           highlights in its representative color throughout,
+           not per formal line — the highlight is the service's
+           identity cue, and legPaintColor carries it. */
         color:
-          unifiedColor ??
-          RIDDEN_LINE_GEOMETRIES[leg.key]?.color ??
+          legPaintColor(serviceId, leg.key, RIDDEN_LINE_GEOMETRIES) ??
           "#ea580c",
       },
       geometry: { type: "LineString", coordinates: leg.coords },
@@ -3236,9 +3275,20 @@ function setFocusSection(
   });
 }
 
-function clearFocusLineGeometry(map: MapLibreLike) {
+function clearFocusLineGeometry(
+  map: MapLibreLike,
+  ghost?: Omit<RemainderGhostContext, "spans"> | null,
+) {
   setNormalLineExclusion(map, null);
-  setUnriddenRemainderFocus(map, null, []);
+  /* No spans: the ghost's source goes back to the canonical
+     features, undoing the cleared focus's trim. */
+  setUnriddenRemainderFocus(
+    map,
+    null,
+    [],
+    null,
+    ghost ? { ...ghost, spans: [] } : ghost,
+  );
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
 }
 
@@ -3571,17 +3621,28 @@ function VisitedMapSection({
      where the overlay is built (the coverage-key check). */
   const unriddenLineFeatures: readonly UnriddenLineFeature[] =
     unriddenGhost?.features ?? [];
+  /* The ghost context every focus change hands to
+     setUnriddenRemainderFocus: the canonical features as the
+     worker last delivered them and the current coverage, read
+     from the refs at call time, like the selection itself. */
+  const remainderGhostContext = (): Omit<
+    RemainderGhostContext,
+    "spans"
+  > => ({
+    features: unriddenGhostRef.current?.features ?? [],
+    coverage: lineCoverageRef.current,
+  });
   /* Re-applies the CURRENT selection's unridden-remainder
      emphasis to a map whose remainder layer was (re)created
      under it — the mount completion and the ghost's late join
      share this routine (Codex review batch round 1, finding 3):
-     both paths (re)build the layer with its empty-key filter,
-     and when the ghost result itself did not change, the ghost
+     both paths (re)build the layer with its empty source, and
+     when the ghost result itself did not change, the ghost
      effect never re-runs, so without this the row would stay
      selected while its emphasis is gone. The selection is read
      from the same refs the tap handlers write, at call time.
-     No applicable selection — the layers keep their filters
-     (a fresh layer's empty filter is exactly that state). */
+     No applicable selection — the layers keep their state
+     (a fresh layer's empty source is exactly that state). */
   const applyUnriddenRemainderFocus = (map: MapLibreLike) => {
     const keys = unriddenRemainderKeysForSelection(
       riddenRowsRef.current,
@@ -3605,7 +3666,20 @@ function VisitedMapSection({
       const focusService = focusedRow
         ? usableRiddenService(focusedRow)
         : undefined;
-      setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null);
+      /* The ghost trim's spans: the service's remainder legs
+         in their full edge frame — the same legs the focus
+         source paints, before the RemainderLeg projection
+         drops the frame. An empty remainder trims nothing. */
+      const spans =
+        legs.length > 0 && focusService
+          ? (lineCoverageRef.current.perServiceUnriddenLegs.get(
+              focusService.id,
+            ) ?? [])
+          : [];
+      setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null, {
+        ...remainderGhostContext(),
+        spans,
+      });
     }
   };
   const lineCoverageSettled =
@@ -3661,24 +3735,22 @@ function VisitedMapSection({
       };
     }[] = [];
     for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
-      /* A paint-unified service (山手線, subtask 1680) paints
-         every leg in its representative color: the loop is one
-         named line to the reader even where its trains run on
-         the 東北線・東海道線 formal lines. The leg's key still
-         names its formal line for coverage and the ghost. */
-      const unifiedColor = servicePaintColor(
-        serviceId,
-        RIDDEN_LINE_GEOMETRIES,
-      );
       for (const leg of painted.legs) {
-        const entry = RIDDEN_LINE_GEOMETRIES[leg.key];
-        if (!entry) continue;
+        /* A paint-unified service (山手線, subtask 1680) paints
+           every leg in its representative color: the loop is
+           one named line to the reader even where its trains
+           run on the 東北線・東海道線 formal lines. The leg's
+           key still names its formal line for coverage and the
+           ghost. legPaintColor carries the decision; a leg
+           with no color at all is skipped, as before. */
+        const color = legPaintColor(serviceId, leg.key, RIDDEN_LINE_GEOMETRIES);
+        if (color === null) continue;
         features.push({
           type: "Feature",
           properties: {
             key: leg.key,
             serviceId,
-            color: unifiedColor ?? entry.color,
+            color,
             unknown: painted.unknown,
           },
           geometry: { type: "LineString", coordinates: leg.coords },
@@ -5413,9 +5485,9 @@ function VisitedMapSection({
          remainder at midway strength (subtask 1589) rides its
          OWN source since subtask 1635, filled by a focus call
          with the service's own remainder legs — it no longer
-         rides along here, and a focus call excludes the
-         focused line's keys from the ghost layer meanwhile
-         (see setUnriddenRemainderFocus).
+         rides along here, and a focus call trims the focused
+         remainder's stretches out of the ghost's source data
+         meanwhile (see setUnriddenRemainderFocus).
          The layer rides along on every mount, but its
          visibility starts at "none": the variant paint applied
          right after the mount (and on every tab switch) shows
@@ -5664,7 +5736,7 @@ function VisitedMapSection({
           /* The rebuilt layers also lost the current selection's
              unridden-remainder emphasis (Codex review batch
              round 1, finding 3): the remainder layer was created
-             with its empty-key filter, and when the ghost result
+             with its empty source, and when the ghost result
              did not change, the ghost effect never re-runs to
              restore it — the row would stay selected with its
              emphasis gone. Re-apply from the latest selection,
@@ -5958,10 +6030,10 @@ function VisitedMapSection({
         applyVariantPaint(map, variantRef.current);
         /* A focus set before the ghost landed found no
            remainder layer to select (subtask 1589): re-apply
-           the current focus's remainder keys now that the
+           the current focus's remainder emphasis now that the
            layer exists, through the routine the mount
            completion shares. No focus — nothing to re-apply;
-           the layer keeps its empty-key filter. */
+           the layer keeps its empty source. */
         applyUnriddenRemainderFocus(map);
       } catch {
         /* the ghost is an underlay; a failed refresh leaves the
@@ -6109,7 +6181,7 @@ function VisitedMapSection({
     const map = mapHandleRef.current?.getMap() ?? null;
     if (map) {
       try {
-        clearFocusLineGeometry(map);
+        clearFocusLineGeometry(map, remainderGhostContext());
       } catch {
         /* the map may already be gone; the row emphasis is cleared */
       }
@@ -6886,7 +6958,7 @@ function VisitedMapSection({
         withLiveMap((map) => {
           if (focusedLineIdRef.current !== line.id) return;
           try {
-            clearFocusLineGeometry(map);
+            clearFocusLineGeometry(map, remainderGhostContext());
           } catch {
             /* the map may already be gone; the row emphasis is the cue */
           }
@@ -6917,15 +6989,25 @@ function VisitedMapSection({
           ensureFocusListeners(map);
           if (service) setFocusSection(map, service.id, painted.legs);
           if (service) {
+            const unriddenLegs =
+              lineCoverage.perServiceUnriddenLegs.get(service.id);
+            const remainderLegs = unriddenRemainderLegsForRow(
+              line,
+              painted,
+              unriddenLegs,
+            );
             setUnriddenRemainderFocus(
               map,
               unriddenRemainderKeysForRow(line, painted),
-              unriddenRemainderLegsForRow(
-                line,
-                painted,
-                lineCoverage.perServiceUnriddenLegs.get(service.id),
-              ),
+              remainderLegs,
               service.id,
+              {
+                ...remainderGhostContext(),
+                /* The trim cuts exactly the legs the focus
+                   source paints, in their full edge frame. */
+                spans:
+                  remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
+              },
             );
           }
           if (bounds) {
@@ -7002,15 +7084,25 @@ function VisitedMapSection({
         try {
           if (service) setFocusSection(map, service.id, painted.legs);
           if (service) {
+            const unriddenLegs =
+              lineCoverage.perServiceUnriddenLegs.get(service.id);
+            const remainderLegs = unriddenRemainderLegsForRow(
+              row,
+              painted,
+              unriddenLegs,
+            );
             setUnriddenRemainderFocus(
               map,
               unriddenRemainderKeysForRow(row, painted),
-              unriddenRemainderLegsForRow(
-                row,
-                painted,
-                lineCoverage.perServiceUnriddenLegs.get(service.id),
-              ),
+              remainderLegs,
               service.id,
+              {
+                ...remainderGhostContext(),
+                /* The trim cuts exactly the legs the focus
+                   source paints, in their full edge frame. */
+                spans:
+                  remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
+              },
             );
           }
         } catch {
@@ -7024,7 +7116,7 @@ function VisitedMapSection({
       withLiveMap((map) => {
         if (focusedLineIdRef.current !== row.id) return;
         try {
-          clearFocusLineGeometry(map);
+          clearFocusLineGeometry(map, remainderGhostContext());
         } catch {
           /* a failed clear leaves the row emphasis as the cue */
         }
@@ -7100,15 +7192,25 @@ function VisitedMapSection({
       try {
         if (painted && painted.legs.length > 0 && service) {
           setFocusSection(map, service.id, painted.legs);
+          const unriddenLegs =
+            lineCoverage.perServiceUnriddenLegs.get(service.id);
+          const remainderLegs = unriddenRemainderLegsForRow(
+            line,
+            painted,
+            unriddenLegs,
+          );
           setUnriddenRemainderFocus(
             map,
             unriddenRemainderKeysForRow(line, painted),
-            unriddenRemainderLegsForRow(
-              line,
-              painted,
-              lineCoverage.perServiceUnriddenLegs.get(service.id),
-            ),
+            remainderLegs,
             service.id,
+            {
+              ...remainderGhostContext(),
+              /* The trim cuts exactly the legs the focus
+                 source paints, in their full edge frame. */
+              spans:
+                remainderLegs.length > 0 ? (unriddenLegs ?? []) : [],
+            },
           );
           /* Fit the whole line into the frame, with the row
              tap's framing (focusRiddenLine): same padding,
@@ -7128,7 +7230,7 @@ function VisitedMapSection({
         } else {
           /* No track to paint (a row with no service link): the
              previous row's highlight must not linger. */
-          clearFocusLineGeometry(map);
+          clearFocusLineGeometry(map, remainderGhostContext());
         }
       } catch {
         /* a failed highlight or camera move leaves the row emphasis as the cue */
@@ -8385,15 +8487,22 @@ function RiddenLinesBlock({
             /* A paint-unified service (山手線, subtask 1680)
                chips in its representative color too — the
                first-leg fallback below would otherwise depend
-               on which section's clip happens to come first. */
-            const color = key
-              ? RIDDEN_LINE_GEOMETRIES[key]?.color
-              : (service
-                  ? servicePaintColor(service.id, RIDDEN_LINE_GEOMETRIES)
-                  : null) ??
-                (paintedLegs && paintedLegs.legs.length > 0
-                  ? RIDDEN_LINE_GEOMETRIES[paintedLegs.legs[0]!.key]?.color
-                  : undefined);
+               on which section's clip happens to come first.
+               The representative color is evaluated FIRST, the
+               same priority the map's features use (subtask
+               1680, review round 1): a future single-key
+               service with a paintColorKey would otherwise chip
+               in its formal line's color while the map paints
+               the representative one. Null falls back to the
+               resolved key's color, then the first leg's. */
+            const color =
+              (service
+                ? servicePaintColor(service.id, RIDDEN_LINE_GEOMETRIES)
+                : null) ??
+              (key ? RIDDEN_LINE_GEOMETRIES[key]?.color : undefined) ??
+              (paintedLegs && paintedLegs.legs.length > 0
+                ? RIDDEN_LINE_GEOMETRIES[paintedLegs.legs[0]!.key]?.color
+                : undefined);
             const usableService = usableRiddenService(line);
             const coverage = usableService
               ? lineCoverage.perService.get(usableService.id)

@@ -1004,6 +1004,24 @@ export function servicePaintColor(
   return geometries[key]?.color ?? null;
 }
 
+/* The color ONE leg paints with in a feature the map builds —
+   the single decision behind the normal overlay, the focus
+   highlight and the remainder focus (subtask 1680, review
+   round 1, finding 3: the decision lives here so the tests
+   verify the colors the features actually carry, not just
+   the resolver). A paint-unified service's representative
+   color wins; otherwise the leg's own formal-line color.
+   Null when neither exists — the normal overlay skips such
+   a leg, the focus layers substitute their signal color. */
+export function legPaintColor(
+  serviceId: string | null,
+  legKey: string,
+  geometries: LineGeometryMap,
+): string | null {
+  const unified = serviceId ? servicePaintColor(serviceId, geometries) : null;
+  return unified ?? geometries[legKey]?.color ?? null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Coverage: what the map paints, what the graphs count               */
 /* ------------------------------------------------------------------ */
@@ -1420,13 +1438,13 @@ export function computeLineCoverage(
    ride): the ghost is the remainder of the SHAPE, not of the
    service, so the map and the painted distance can only agree
    by construction. */
-export function ghostLineLegs(
+/* Painted spans per (formal-line key, graph edge), merged
+   across services — two services on one key (総武線) or two
+   blocks of one service count once. Unknown rides paint thin
+   and count nothing, so their legs never enter the spans. */
+function paintedSpansByKeyEdge(
   coverage: LineCoverage,
-  geometries: LineGeometryMap,
-): ReadonlyMap<string, readonly PathLeg[]> {
-  /* Painted spans per (formal-line key, graph edge), merged
-     across services — two services on one key (総武線) or two
-     blocks of one service count once. */
+): Map<string, [number, number][]> {
   const covered = new Map<string, [number, number][]>();
   for (const [, painted] of coverage.perServiceLegs) {
     if (painted.unknown) continue;
@@ -1437,24 +1455,94 @@ export function ghostLineLegs(
       covered.set(composite, list);
     }
   }
+  return covered;
+}
+
+/* One formal line's ghost legs against a prebuilt span map:
+   the line's shape minus the painted spans, edge by edge. */
+function ghostLegsFromSpans(
+  covered: ReadonlyMap<string, [number, number][]>,
+  key: string,
+  graph: LineGraph,
+): PathLeg[] {
+  const legs: PathLeg[] = [];
+  for (const edge of graph.edges) {
+    if (edge.bridge) continue;
+    const ranges = mergeRanges(
+      covered.get(`${key}\u0000edge:${edge.id}`) ?? [],
+    );
+    let cursor = 0;
+    for (const [a, b] of ranges) {
+      if (a > cursor + 1e-9) legs.push(...sliceEdge(key, edge, cursor, a));
+      cursor = Math.max(cursor, b);
+    }
+    if (cursor < 1 - 1e-9) legs.push(...sliceEdge(key, edge, cursor, 1));
+  }
+  return legs;
+}
+
+/* One formal line's ghost legs (the per-key half of
+   ghostLineLegs): the focused line's ghost trim (subtask
+   1680, review round 1) recomputes just the keys a remainder
+   touches, on the main thread, instead of the whole network. */
+export function ghostLegsForKey(
+  coverage: LineCoverage,
+  geometries: LineGeometryMap,
+  key: string,
+): readonly PathLeg[] {
+  const graph = getLineGraph(key, geometries);
+  if (!graph) return [];
+  return ghostLegsFromSpans(paintedSpansByKeyEdge(coverage), key, graph);
+}
+
+export function ghostLineLegs(
+  coverage: LineCoverage,
+  geometries: LineGeometryMap,
+): ReadonlyMap<string, readonly PathLeg[]> {
+  const covered = paintedSpansByKeyEdge(coverage);
   const out = new Map<string, PathLeg[]>();
   for (const key of Object.keys(geometries)) {
     const graph = getLineGraph(key, geometries);
     if (!graph) continue;
-    const legs: PathLeg[] = [];
-    for (const edge of graph.edges) {
-      if (edge.bridge) continue;
-      const ranges = mergeRanges(
-        covered.get(`${key}\u0000edge:${edge.id}`) ?? [],
-      );
-      let cursor = 0;
-      for (const [a, b] of ranges) {
-        if (a > cursor + 1e-9) legs.push(...sliceEdge(key, edge, cursor, a));
-        cursor = Math.max(cursor, b);
-      }
-      if (cursor < 1 - 1e-9) legs.push(...sliceEdge(key, edge, cursor, 1));
-    }
+    const legs = ghostLegsFromSpans(covered, key, graph);
     if (legs.length > 0) out.set(key, legs);
+  }
+  return out;
+}
+
+/* Legs minus cut spans, on the shared (key, edge, [fromT, toT])
+   frame: each leg keeps the parts of its own span the cuts do
+   not cover. The cuts name their spans in the same edge frame
+   the legs were sliced from, so the subtraction is exact. */
+export function subtractLegSpans(
+  legs: readonly PathLeg[],
+  cuts: readonly {
+    key: string;
+    edge: string;
+    fromT: number;
+    toT: number;
+  }[],
+): PathLeg[] {
+  const covered = new Map<string, [number, number][]>();
+  for (const cut of cuts) {
+    const composite = `${cut.key}\u0000${cut.edge}`;
+    const list = covered.get(composite) ?? [];
+    list.push([cut.fromT, cut.toT]);
+    covered.set(composite, list);
+  }
+  const out: PathLeg[] = [];
+  for (const leg of legs) {
+    const ranges = mergeRanges(
+      covered.get(`${leg.key}\u0000${leg.edge}`) ?? [],
+    );
+    let cursor = leg.fromT;
+    for (const [a, b] of ranges) {
+      if (a > cursor + 1e-9) out.push(...sliceLegSpan(leg, cursor, a));
+      cursor = Math.max(cursor, b);
+    }
+    if (cursor < leg.toT - 1e-9) {
+      out.push(...sliceLegSpan(leg, cursor, leg.toT));
+    }
   }
   return out;
 }
@@ -1481,28 +1569,7 @@ export function serviceUnriddenLegs(
   path: ServicePath,
   paintedLegs: readonly PathLeg[],
 ): PathLeg[] {
-  const covered = new Map<string, [number, number][]>();
-  for (const leg of paintedLegs) {
-    const composite = `${leg.key}\u0000${leg.edge}`;
-    const list = covered.get(composite) ?? [];
-    list.push([leg.fromT, leg.toT]);
-    covered.set(composite, list);
-  }
-  const out: PathLeg[] = [];
-  for (const leg of path.legs) {
-    const ranges = mergeRanges(
-      covered.get(`${leg.key}\u0000${leg.edge}`) ?? [],
-    );
-    let cursor = leg.fromT;
-    for (const [a, b] of ranges) {
-      if (a > cursor + 1e-9) out.push(...sliceLegSpan(leg, cursor, a));
-      cursor = Math.max(cursor, b);
-    }
-    if (cursor < leg.toT - 1e-9) {
-      out.push(...sliceLegSpan(leg, cursor, leg.toT));
-    }
-  }
-  return out;
+  return subtractLegSpans(path.legs, paintedLegs);
 }
 
 /* The sub-polyline of one path leg between two fractions along
