@@ -105,6 +105,19 @@ export type ServiceSegment = {
   formalLineKey: string;
   from: StationRef;
   to: StationRef;
+  /* Points the segment's route must pass through, in running
+     order — a station's coordinates, or a point on the track
+     where the formal line forks and no station sits on the
+     branch. One formal line can fork into two services (京王線
+     本線 vs 京王新線 share the 京王線 key): the shortest path
+     alone cannot tell which branch a service takes, so the
+     branch is pinned here, in the route definition, and the
+     path is the shortest path chained through these points
+     (subtask 1613, Codex review of 1574). A station point
+     pins the branch through that station; a bare track point
+     pins a branch with no station on it (the 本線 strand
+     新宿—笹塚 has none — 本線の新宿の次は笹塚). */
+  via?: RoutePoint[];
   /* True when the geometry behind this segment is a stand-in rather
      than the line itself — any distance drawn from it is an
      approximation, and the segment must be recorded as such. */
@@ -114,6 +127,16 @@ export type ServiceSegment = {
      uses it to tell which side of the loop a ride took. */
   direction?: "inner" | "outer";
   note?: string;
+};
+
+/* A point on the track a segment's route must pass through: a
+   station's coordinates under its name, or a bare track point
+   (see ServiceSegment.via). Not a station — it carries no N02
+   code, so it never stands in where a station id is required. */
+export type RoutePoint = {
+  lng: number;
+  lat: number;
+  name: string;
 };
 
 export type ServiceMasterEntry = {
@@ -514,6 +537,17 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         formalLineKey: "京王線|京王電鉄",
         from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
         to: { id: "003934", name: "京王八王子", lng: 139.34298, lat: 35.65805 },
+        /* The 本線 strand 新宿—笹塚 has no station on it (本線の
+           新宿の次は笹塚), so the branch is pinned with a point
+           on the track itself: a vertex of the N02 本線 strand
+           (edge 73), ~840 m from 初台 — far enough from the 新線
+           strand that the projection is unambiguous. Without it
+           the shortest path takes the 新線 strand, and a
+           京王線-only ride paints the whole 新線 service
+           (subtask 1613, Codex review of 1574). */
+        via: [
+          { lng: 139.69516, lat: 35.68657, name: "本線側の線路上点" },
+        ],
       },
     ],
     blocks: [
@@ -804,6 +838,16 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
         formalLineKey: "京王線|京王電鉄",
         from: { id: "003700", name: "新宿", lng: 139.69993, lat: 35.6898 },
         to: { id: "003806", name: "笹塚", lng: 139.66717, lat: 35.67366 },
+        /* The 新線 strand is pinned through its two stations
+           (新線の新宿の次は初台 — Codex review of 1574,
+           subtask 1613): without them the shortest path takes
+           the 本線 strand and a 京王線-only ride paints the
+           whole 新線 service. Coordinates are the block
+           stations below. */
+        via: [
+          { lng: 139.68827, lat: 35.68142, name: "初台" },
+          { lng: 139.67772, lat: 35.67676, name: "幡ヶ谷" },
+        ],
       },
     ],
     blocks: [
@@ -828,7 +872,7 @@ export const SERVICE_MASTER: readonly ServiceMasterEntry[] = [
     verifiedAt: null,
     verificationStatus: "draft",
     note:
-      "N02（2025年度版）に「京王新線」の独立した路線単位は無く、4駅はすべて京王線|京王電鉄に含まれる（新線新宿は新宿と同一コード 003700）。そのため formalLineKey は既存の keio と同じ「京王線|京王電鉄」を使う（監督の判断、むさしの号と同じ形）。新宿→笹塚の形状は新線側の分岐（N02グラフで 3.57km、営業キロ 3.6km）で、本線側より短い。新宿の座標はマスタ既存値（keio・jr-saikyo と同一。N02の路線別重心とは約110mの開きがあるが、300mのしきい値の内側）を再利用し、同一駅に2つの座標を作らない。2026-11-25の乗車（新宿→幡ヶ谷付近）は降車駅が未確定のため区間登録はしない。人手の地図照合は未了（draftのまま）。",
+      "N02（2025年度版）に「京王新線」の独立した路線単位は無く、4駅はすべて京王線|京王電鉄に含まれる（新線新宿は新宿と同一コード 003700）。そのため formalLineKey は既存の keio と同じ「京王線|京王電鉄」を使う（監督の判断、むさしの号と同じ形）。新宿→笹塚の形状は新線側の分岐（N02グラフで 3.57km、営業キロ 3.6km）で、本線側より短い。新宿の座標はマスタ既存値（keio・jr-saikyo と同一。N02の路線別重心とは約110mの開きがあるが、300mのしきい値の内側）を再利用し、同一駅に2つの座標を作らない。2026-11-25の乗車（新宿→幡ヶ谷付近）は降車駅が未確定のため区間登録はしない。枝の指定は segment の via（初台・幡ヶ谷）で行う（subtask 1613、Codexレビュー指摘の修正）。人手の地図照合は未了（draftのまま）。",
   },
 ];
 
@@ -1566,6 +1610,7 @@ export type FullPathSnapshot = {
     formalLineKey: string;
     from: StationRef;
     to: StationRef;
+    via?: RoutePoint[];
     direction?: "inner" | "outer";
     approximate?: boolean;
   }[];
@@ -1583,6 +1628,10 @@ export function serviceFullPathSnapshot(
       formalLineKey: segment.formalLineKey,
       from: segment.from,
       to: segment.to,
+      /* A snapshot cut before via existed has none: it keeps
+         reproducing the range it was recorded at (the old
+         shortest path), by design. */
+      ...(segment.via ? { via: segment.via } : {}),
       ...(segment.direction ? { direction: segment.direction } : {}),
       ...(segment.approximate ? { approximate: true } : {}),
     })),

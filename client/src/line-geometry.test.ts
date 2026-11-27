@@ -151,6 +151,38 @@ describe("synthetic graph", () => {
     );
   });
 
+  test("a dangling strand end is bridged to its own junction (subtask 1613)", () => {
+    /* Two strands out of one station, meeting at their far end
+       (0, 0.09) but with their near ends 0.0008° (~89 m) apart:
+       the same component, so the component bridges above never
+       join them — without the dangling-end pass the short way
+       from the second strand's end to its middle is the long
+       way round (15 km). N02 digitises 京王線's 新宿 throat
+       exactly like this (the 新線 strand's east end sits 88 m
+       from the 本線 strand's 新宿 node). */
+    const geometry = {
+      type: "MultiLineString",
+      coordinates: [
+        [
+          [0, 0],
+          [0, 0.09],
+        ],
+        [
+          [0.0008, 0],
+          [0, 0.09],
+        ],
+      ],
+    };
+    const graph = buildLineGraph("dangling|test", geometry as never);
+    const section = graphSectionLegs(graph, [0.0008, 0], [0, 0.045])!;
+    /* The bridge (0.09 km) plus half the second strand (5 km):
+       the long way round would be 15 km. */
+    expect(section.lengthKm).toBeCloseTo(5.1, 0);
+    expect(section.legs.some((leg) => leg.edge.startsWith("bridge:"))).toBe(
+      true,
+    );
+  });
+
   test("slicePolyline interpolates its ends", () => {
     const pts: [number, number][] = [
       [0, 0],
@@ -209,6 +241,66 @@ describe("real asset: service totals against railway kilometres", () => {
       expect(clip.lengthKm).toBeGreaterThan(n02Km * 0.9);
       expect(clip.lengthKm).toBeLessThan(n02Km * 1.1);
     }
+  });
+
+  test("京王線 and 京王新線 take different branches out of 新宿 (subtask 1613)", () => {
+    /* The two services share the 京王線 key but fork east of
+       笹塚: 本線 runs straight 新宿—笹塚, 新線 via 初台・幡ヶ谷.
+       The key totals alone cannot tell the branches apart (they
+       are nearly the same length), so pin the assignment itself:
+       each path must run through its own branch's points — a via
+       point projects onto its own strand at distance 0 — and
+       stay off the other's stations. Distances are to the path's
+       legs (nearest point on any segment), not to its vertices,
+       with 10 m as "on the track": the two strands run only
+       ~24 m apart near 初台 (measured), so a wider threshold
+       could not tell them apart. */
+    const nearestToPathM = (
+      path: ServicePath,
+      point: [number, number],
+    ): number => {
+      const kx = 111320 * Math.cos((point[1] * Math.PI) / 180);
+      const ky = 110540;
+      let best = Infinity;
+      for (const leg of path.legs) {
+        for (let i = 0; i < leg.coords.length - 1; i++) {
+          const a = leg.coords[i]!;
+          const b = leg.coords[i + 1]!;
+          const ax = (point[0] - a[0]) * kx;
+          const ay = (point[1] - a[1]) * ky;
+          const bx = (b[0] - a[0]) * kx;
+          const by = (b[1] - a[1]) * ky;
+          const len2 = bx * bx + by * by;
+          const t =
+            len2 === 0
+              ? 0
+              : Math.max(0, Math.min(1, (ax * bx + ay * by) / len2));
+          best = Math.min(
+            best,
+            Math.hypot(ax - t * bx, ay - t * by),
+          );
+        }
+      }
+      return best;
+    };
+    /* The 本線 strand's track point (a vertex of the N02 本線
+       strand, see the keio segment's via). */
+    const trackPoint: [number, number] = [139.69516, 35.68657];
+    const keioPath = servicePath("keio");
+    const newPath = servicePath("keio-new-line");
+    expect(nearestToPathM(keioPath, trackPoint)).toBeLessThan(10);
+    expect(
+      nearestToPathM(keioPath, [S.初台.lng, S.初台.lat]),
+    ).toBeGreaterThan(10);
+    expect(
+      nearestToPathM(keioPath, [S.幡ヶ谷.lng, S.幡ヶ谷.lat]),
+    ).toBeGreaterThan(10);
+    expect(
+      nearestToPathM(newPath, [S.初台.lng, S.初台.lat]),
+    ).toBeLessThan(10);
+    expect(
+      nearestToPathM(newPath, [S.幡ヶ谷.lng, S.幡ヶ谷.lat]),
+    ).toBeLessThan(10);
   });
 
   test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
@@ -1517,27 +1609,60 @@ describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, rev
     expect(ghostBounds(coverage, KEIO_KEY)!.maxLng).toBeGreaterThan(139.69);
   });
 
-  test("a full Keio New Line ride leaves the rest of the 京王線 key as ghost", () => {
+  test("a full Keio New Line ride leaves the rest of the 京王線 key as ghost (subtask 1613)", () => {
     /* 新宿〜笹塚 paints 3.52 km of the 京王線 key's 40.58 km
-       shape; the rest — the main line west of 笹塚 — stays as
-       ghost, reaching the 京王八王子 side (lng 139.34). */
+       shape; the rest — the 本線 strand and the main line west
+       of 笹塚 — stays as ghost, reaching the 京王八王子 side
+       (lng 139.34). The 2.87 km 本線 strand is ghost now that
+       the 新線 ride takes its own strand via 初台・幡ヶ谷
+       (before the fix it painted the 本線 strand instead, so
+       the ghost was 37.07 km). */
     const coverage = coverageFor(new Map(), new Set(["keio-new-line"]));
     expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(3.52, 1);
-    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(37.07, 1);
+    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(37.15, 1);
     expect(ghostBounds(coverage, KEIO_KEY)!.minLng).toBeLessThan(139.35);
   });
 
-  test("a full Keio New Line ride adds nothing beyond a full Keio ride (subtask 1574)", () => {
-    /* Both services share the 京王線|京王電鉄 key and the 新宿〜
-       笹塚 stretch: the new service's legs are a subset of the
-       Keio ride's, so the key total stays 37.65 and the ghost
-       stays 2.93 — no double-counting, no ghost change. */
-    const coverage = coverageFor(
-      new Map(),
-      new Set(["keio", "keio-new-line"]),
+  test("a full Keio ride and a full Keio New Line ride add up (subtask 1613)", () => {
+    /* The review's fix (Codex review of 1574): the two services
+       share the 京王線|京王電鉄 key but take different branches
+       — 本線 via the straight strand, 新線 via 初台・幡ヶ谷 —
+       so each full ride paints only its own branch, and riding
+       both adds the second branch (minus the edges they
+       genuinely share west of the merge). Before the fix both
+       services resolved to the same branch and the key total
+       stayed 37.65 either way. Both paths are in the map here
+       so the unridden service's perService entry can be read
+       too (a service with no intervals and no full row reads
+       riddenKm 0 / not complete in either version — the proof
+       of the fix is the key totals, not that entry). */
+    const paths = new Map(
+      ["keio", "keio-new-line"].map((id) => [id, servicePath(id)]),
     );
-    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(37.65, 1);
-    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(2.93, 1);
+    const coverageForBoth = (full: string[]) =>
+      computeLineCoverage(new Map(), new Set(full), paths, GEOMETRIES, 597);
+    // 本線のみ: 37.65 km painted, the 新線 strand (2.93 km)
+    // stays ghost, and the 新線 service is not complete.
+    const keioOnly = coverageForBoth(["keio"]);
+    expect(keioOnly.perKeyKm.get(KEIO_KEY)).toBeCloseTo(37.65, 1);
+    expect(ghostKm(keioOnly, KEIO_KEY)).toBeCloseTo(2.93, 1);
+    expect(keioOnly.perService.get("keio")!.complete).toBe(true);
+    expect(keioOnly.perService.get("keio-new-line")!.complete).toBe(false);
+    // 新線のみ: 3.52 km painted, the 本線 strand stays ghost.
+    const newOnly = coverageForBoth(["keio-new-line"]);
+    expect(newOnly.perKeyKm.get(KEIO_KEY)).toBeCloseTo(3.52, 1);
+    expect(ghostKm(newOnly, KEIO_KEY)).toBeCloseTo(37.15, 1);
+    expect(newOnly.perService.get("keio-new-line")!.complete).toBe(true);
+    expect(newOnly.perService.get("keio")!.complete).toBe(false);
+    // 両方: each branch is added once, only the genuinely
+    // shared edges (west of the merge) are deduped: 37.65 +
+    // 3.52 − 0.65 shared ≈ 40.53, and the ghost shrinks to
+    // the endpoint slivers.
+    const both = coverageForBoth(["keio", "keio-new-line"]);
+    expect(both.perKeyKm.get(KEIO_KEY)).toBeCloseTo(40.53, 1);
+    expect(ghostKm(both, KEIO_KEY)).toBeCloseTo(0.15, 1);
+    expect(both.perService.get("keio")!.complete).toBe(true);
+    expect(both.perService.get("keio-new-line")!.complete).toBe(true);
   });
 
   test("a partial Keio ride keeps the rest of the line as ghost", () => {

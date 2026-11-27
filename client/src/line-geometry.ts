@@ -147,6 +147,17 @@ export type LineGraph = {
    apart) and far too short to invent a connection anywhere else. */
 export const GRAPH_BRIDGE_MAX_M = 500;
 
+/* A strand end the source data leaves dangling next to its own
+   junction is bridged only within this, much tighter, radius:
+   a chord inside a component can shortcut, so it heals a strand
+   end and never a mid-strand gap. N02 digitises one station
+   throat as two pieces whose ends differ by tens of metres
+   （京王線 at 新宿: the 新線 strand's east end sits 88 m from
+   the 本線 strand's 新宿 node), so the two strands meet only at
+   their far end and the short way between them does not exist
+   (subtask 1613, Codex review of 1574). */
+export const GRAPH_DANGLING_BRIDGE_MAX_M = 100;
+
 /* The projection of a station point onto the graph: the nearest
    point on any edge, as a fraction along that edge by arc length.
    distanceM is how far the recorded station point sits from the
@@ -236,6 +247,63 @@ export function buildLineGraph(
       lengthKm: pair.dM / 1000,
       bridge: true,
     });
+  }
+  /* Heal a strand end left dangling next to its own junction.
+     The pass above only joins different components, so two
+     strands that meet at their far end stay apart at the near
+     end when the source data leaves their ends tens of metres
+     apart （京王線 at 新宿). A degree-1 node is bridged to its
+     nearest node within GRAPH_DANGLING_BRIDGE_MAX_M, shortest
+     first — the same straight-join shape as above, but only a
+     strand end is healed, so the chord can only restore the
+     junction the source data split, never shortcut a mid-strand
+     gap. Re-checked per pair: an earlier bridge may have cured
+     the end or joined the pair already. */
+  {
+    const degree = new Map<number, number>();
+    const adjacent = new Map<number, Set<number>>();
+    for (const edge of edges) {
+      degree.set(edge.a, (degree.get(edge.a) ?? 0) + 1);
+      degree.set(edge.b, (degree.get(edge.b) ?? 0) + 1);
+      (adjacent.get(edge.a) ??
+        adjacent.set(edge.a, new Set()).get(edge.a)!).add(edge.b);
+      (adjacent.get(edge.b) ??
+        adjacent.set(edge.b, new Set()).get(edge.b)!).add(edge.a);
+    }
+    const danglingPairs: { i: number; j: number; dM: number }[] = [];
+    for (let i = 0; i < nodes.length; i++) {
+      if ((degree.get(i) ?? 0) !== 1) continue;
+      let bestJ = -1;
+      let bestM = Infinity;
+      for (let j = 0; j < nodes.length; j++) {
+        if (j === i || adjacent.get(i)?.has(j)) continue;
+        const dM = haversineKm(nodes[i]!, nodes[j]!) * 1000;
+        if (dM > 0 && dM <= GRAPH_DANGLING_BRIDGE_MAX_M && dM < bestM) {
+          bestM = dM;
+          bestJ = j;
+        }
+      }
+      if (bestJ >= 0) danglingPairs.push({ i, j: bestJ, dM: bestM });
+    }
+    danglingPairs.sort((a, b) => a.dM - b.dM);
+    for (const pair of danglingPairs) {
+      if ((degree.get(pair.i) ?? 0) !== 1) continue;
+      if (adjacent.get(pair.i)?.has(pair.j)) continue;
+      edges.push({
+        id: edges.length,
+        a: pair.i,
+        b: pair.j,
+        pts: [nodes[pair.i]!, nodes[pair.j]!],
+        lengthKm: pair.dM / 1000,
+        bridge: true,
+      });
+      degree.set(pair.i, 2);
+      degree.set(pair.j, (degree.get(pair.j) ?? 0) + 1);
+      (adjacent.get(pair.i) ??
+        adjacent.set(pair.i, new Set()).get(pair.i)!).add(pair.j);
+      (adjacent.get(pair.j) ??
+        adjacent.set(pair.j, new Set()).get(pair.j)!).add(pair.i);
+    }
   }
   const adj = new Map<number, { to: number; wKm: number; edge: number }[]>();
   const link = (u: number, v: number, wKm: number, edge: number) => {
@@ -571,7 +639,13 @@ export type ServicePath = {
 /* A service's whole path: its segments' shortest paths, in
    running order. `snapshot` (a full ride's stored path) overrides
    the current master, so a past full ride reproduces the range it
-   was recorded at. */
+   was recorded at. A segment with `via` chains the shortest path
+   through those points in order, so two services on one formal
+   line take different branches （京王線 本線 vs 京王新線):
+   each sub-leg is a shortest path of its own, and the legs join
+   at the via points' projections. Via points sit on the track
+   itself (a station, or a bare track point), so consecutive
+   sub-legs abut without overlap. */
 export function buildServicePath(
   service: ServiceMasterEntry,
   geometries: LineGeometryMap,
@@ -586,6 +660,7 @@ export function buildServicePath(
         formalLineKey: s.formalLineKey,
         from: s.from,
         to: s.to,
+        via: s.via,
         approximate: s.approximate,
       }))
     : service.segments;
@@ -599,21 +674,28 @@ export function buildServicePath(
       approximate = true;
       continue;
     }
-    const section = graphSectionLegs(
-      graph,
-      [segment.from.lng, segment.from.lat],
-      [segment.to.lng, segment.to.lat],
-    );
-    if (!section) {
-      missing.push(
-        `${segment.formalLineKey}: ${segment.from.name}〜${segment.to.name} does not join`,
+    const stops: { lng: number; lat: number; name: string }[] = [
+      segment.from,
+      ...(segment.via ?? []),
+      segment.to,
+    ];
+    for (let s = 0; s < stops.length - 1; s++) {
+      const section = graphSectionLegs(
+        graph,
+        [stops[s]!.lng, stops[s]!.lat],
+        [stops[s + 1]!.lng, stops[s + 1]!.lat],
       );
-      approximate = true;
-      continue;
+      if (!section) {
+        missing.push(
+          `${segment.formalLineKey}: ${stops[s]!.name}〜${stops[s + 1]!.name} does not join`,
+        );
+        approximate = true;
+        continue;
+      }
+      if (section.maxProjM > APPROXIMATE_PROJECTION_M) approximate = true;
+      maxProjM = Math.max(maxProjM, section.maxProjM);
+      legs.push(...section.legs);
     }
-    if (section.maxProjM > APPROXIMATE_PROJECTION_M) approximate = true;
-    maxProjM = Math.max(maxProjM, section.maxProjM);
-    legs.push(...section.legs);
   }
   return {
     serviceId: service.id,

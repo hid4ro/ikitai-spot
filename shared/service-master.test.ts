@@ -1078,6 +1078,34 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toEqual(["003700", "003764", "003791", "003806"]);
   });
 
+  test("京王線 and 京王新線 pin their branches with via (subtask 1613)", () => {
+    /* The review's fix (Codex review of 1574): the two services
+       share the 京王線 formal-line key, so the branch each one
+       takes is pinned in the route definition. The 新線 runs
+       via its two stations (初台・幡ヶ谷); the 本線 has no
+       station between 新宿 and 笹塚, so it is pinned with a
+       track point — a vertex of the N02 本線 strand, ~840 m
+       from 初台 — which is deliberately NOT a station (no N02
+       code) and never used where a station id is required. The
+       snapshot carries the via, so a stored full ride replays
+       the same branch. */
+    const keio = serviceById("keio")!;
+    expect(keio.segments[0]!.via).toEqual([
+      { lng: 139.69516, lat: 35.68657, name: "本線側の線路上点" },
+    ]);
+    const newLine = serviceById("keio-new-line")!;
+    expect(newLine.segments[0]!.via).toEqual([
+      { lng: 139.68827, lat: 35.68142, name: "初台" },
+      { lng: 139.67772, lat: 35.67676, name: "幡ヶ谷" },
+    ]);
+    expect(serviceFullPathSnapshot("keio")!.segments[0]!.via).toEqual(
+      keio.segments[0]!.via,
+    );
+    expect(
+      serviceFullPathSnapshot("keio-new-line")!.segments[0]!.via,
+    ).toEqual(newLine.segments[0]!.via);
+  });
+
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {
     // 新宿→渋谷 inner runs yamanote/b2 （渋谷〜新宿) end to
     // end — a real ride. The old block-direction check
