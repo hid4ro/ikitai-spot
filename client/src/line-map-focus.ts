@@ -320,6 +320,51 @@ export function applySelectedLineRemainderFocus(
   );
 }
 
+/* The unridden-line focus (subtask 1623): a formal line with
+   no ride at all, picked from the まだ乗っていない路線 section.
+   Its whole remainder — the full line, since nothing of it is
+   ridden — paints at the same midway strength as a focused
+   ridden line's unridden stretches (the ghost's 0.25 whisper
+   is the constant, the midway 0.5 the temporary selection),
+   through the same source and layer, so the paint never
+   recolors (the leg's own formal-line color, via
+   remainderLegFeature with no service) and the ghost trim
+   cuts exactly the stretches the focus paints, in their full
+   edge frame — the same contract
+   applySelectedLineRemainderFocus keeps for a ridden line.
+   `legs` are the key's remainder legs from ghostLegsForKey
+   (the caller computes them once and reuses them for the
+   camera fit); an empty list means the key has no remainder
+   left — fully ridden meanwhile, or no graph — and the call
+   is a no-op returning false, so the caller can drop the
+   stale selection instead of painting nothing. The variant
+   is REQUIRED, as on the ridden assemblies: a remainder
+   layer created by this call must start at the current tab's
+   visibility. */
+export function applyUnriddenLineFocus(
+  map: MapLibreLike,
+  key: string,
+  legs: readonly PathLeg[],
+  ghost: Omit<RemainderGhostContext, "spans">,
+  variant: RecordMapVariant,
+): boolean {
+  if (legs.length === 0) return false;
+  setUnriddenRemainderFocus(
+    map,
+    [key],
+    legs,
+    null,
+    {
+      ...ghost,
+      /* The trim cuts exactly the legs the focus source
+         paints, in their full edge frame. */
+      spans: legs,
+    },
+    variant,
+  );
+  return true;
+}
+
 /* The CURRENT selection's re-apply (subtask 1648 fix3): the
    mount completion and the ghost's late join share this routine
    in App.tsx (Codex review batch round 1, finding 3) — both

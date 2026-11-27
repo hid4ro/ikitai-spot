@@ -42,11 +42,13 @@ import { RIDDEN_LINE_GEOMETRIES } from "./assets/visited-lines";
 import type { MapLibreLike } from "./map-helpers.mjs";
 import {
   computeRiddenLineCoverage,
+  ghostLegsForKey,
   type LineGeometryMap,
   type PathLeg,
 } from "./line-geometry";
 import {
   applySelectedLineRemainderFocus,
+  applyUnriddenLineFocus,
   clearFocusLineGeometry,
   LINE_FOCUS_SOURCE_ID,
   reapplyUnriddenRemainderFocus,
@@ -59,8 +61,14 @@ import {
 import {
   UNRIDDEN_FOCUS_SOURCE_ID,
   UNRIDDEN_LINES_FOCUS_LAYER_ID,
+  UNRIDDEN_LINES_SOURCE_ID,
   type RecordMapVariant,
 } from "./map-variant";
+import {
+  computeUnriddenGhostFeatures,
+  ghostCoverageKey,
+  serializeGhostCoverage,
+} from "./unridden-ghost";
 import type { StationRef } from "../../shared/service-master";
 
 const GEOMETRIES = RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap;
@@ -439,6 +447,94 @@ describe("the colors the line sources receive (subtask 1680 fix5)", () => {
     );
     expect(remainderFeatures).toHaveLength(1);
     expect(remainderFeatures[0]!.properties.color).toBe(chuoColor);
+  });
+
+  test("unridden-line focus (subtask 1623): a fully unridden line paints its whole remainder at its own color, and the ghost loses exactly that line", () => {
+    /* West-side-only 山手線 ride: 中央線 has no painted leg
+       anywhere, so its remainder is the whole line. */
+    const westOnly = computeRiddenLineCoverage(
+      [yamanoteRow([section(S.新宿.id, S.大崎.id, "inner")])],
+      GEOMETRIES,
+      597,
+    );
+    const chuoKey = "中央線|東日本旅客鉄道";
+    const legs = ghostLegsForKey(westOnly, GEOMETRIES, chuoKey);
+    expect(legs.length).toBeGreaterThan(0);
+    /* The ghost as the worker would deliver it for this
+       coverage, already joined on the map — the trim writes
+       back into this source. */
+    const wire = serializeGhostCoverage(westOnly);
+    const ghostFeatures = computeUnriddenGhostFeatures(wire, GEOMETRIES);
+    expect(
+      ghostFeatures.some((f) => f.properties.key === chuoKey),
+    ).toBe(true);
+    const ghost: Omit<RemainderGhostContext, "spans"> = {
+      features: ghostFeatures,
+      coverageKey: ghostCoverageKey(wire),
+      coverage: westOnly,
+    };
+    const map = new MockMap();
+    map.addSource(UNRIDDEN_LINES_SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: ghostFeatures },
+    });
+    expect(
+      applyUnriddenLineFocus(asMap(map), chuoKey, legs, ghost, "lines"),
+    ).toBe(true);
+    /* The focus layer starts visible on the 路線 tab, and its
+       source holds the whole line in the line's own orange —
+       the midway paint, never a recolor. */
+    expect(
+      (
+        map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID)!
+          .layout as Record<string, unknown>
+      ).visibility,
+    ).toBe("visible");
+    const features = map.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID);
+    expect(features.length).toBe(legs.length);
+    for (const feature of features) {
+      expect(feature.properties.key).toBe(chuoKey);
+      expect(feature.properties.color).toBe(TOKAIDO_ORANGE);
+    }
+    /* The ghost trimmed exactly that line out — every other
+       unridden line stays in the ghost. */
+    const ghostAfter = map.sourceFeatures(UNRIDDEN_LINES_SOURCE_ID);
+    expect(
+      ghostAfter.some((f) => f.properties.key === chuoKey),
+    ).toBe(false);
+    expect(ghostAfter.length).toBe(ghostFeatures.length - 1);
+  });
+
+  test("unridden-line focus (subtask 1623): no remainder left means the call is a no-op", () => {
+    /* A full ride still leaves slivers of its formal lines'
+       asset shapes unpainted (parallel strands the service
+       path never uses), so a "fully ridden" key is not the
+       way to reach an empty remainder — the contract under
+       test is the empty-legs guard itself: no legs, no
+       layer, no paint, false. */
+    const full = computeRiddenLineCoverage(
+      [{ ...yamanoteRow([]), rideState: "full" as const }],
+      GEOMETRIES,
+      597,
+    );
+    expect(full.perServiceLegs.get("yamanote")).toBeDefined();
+    const map = new MockMap();
+    const ghost: Omit<RemainderGhostContext, "spans"> = {
+      features: [],
+      coverageKey: null,
+      coverage: full,
+    };
+    expect(
+      applyUnriddenLineFocus(
+        asMap(map),
+        "山手線|東日本旅客鉄道",
+        [],
+        ghost,
+        "lines",
+      ),
+    ).toBe(false);
+    expect(map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID)).toBeUndefined();
+    expect(map.sourceFeatures(UNRIDDEN_FOCUS_SOURCE_ID)).toHaveLength(0);
   });
 
   test("clearing the focus empties the focus source again", () => {

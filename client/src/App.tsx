@@ -69,7 +69,9 @@ import {
 import {
   computeRiddenLineCoverage,
   coveredBlockIds,
+  ghostLegsForKey,
   riddenLineIntervals,
+  sectionBounds,
   servicePaintColor,
   wholeLineBounds,
   type LineCoverage,
@@ -82,6 +84,7 @@ import {
 import { createUnriddenGhostClient } from "./unridden-ghost-client";
 import {
   applySelectedLineRemainderFocus,
+  applyUnriddenLineFocus,
   clearFocusLineGeometry,
   EMPTY_FOCUS_DATA,
   reapplyUnriddenRemainderFocus,
@@ -100,6 +103,15 @@ import {
   operatorOfLine,
   UNKNOWN_OPERATOR_GROUP,
 } from "./line-focus";
+import {
+  groupUnriddenLinesByOperator,
+  groupUnvisitedByPrefecture,
+  unriddenFormalLines,
+  unvisitedMunicipalities,
+  type UnriddenLineGroup,
+  type UnvisitedMunicipality,
+  type UnvisitedPrefectureGroup,
+} from "./unridden-lists";
 import {
   applyUnriddenLineGhostLatest,
   applyVariantPaint,
@@ -3283,6 +3295,46 @@ function VisitedMapSection({
     ),
     [riddenQuery.data],
   );
+  /* The まだ乗っていない路線 section (subtask 1623): the
+     formal lines no ledger row paints, grouped by operator.
+     Gated on the ledger having landed — an empty coverage
+     would list all 597 lines as unridden while the fetch is
+     still in flight. */
+  const unriddenLineGroups: UnriddenLineGroup[] = useMemo(() => {
+    if (riddenQuery.data === undefined) return [];
+    return groupUnriddenLinesByOperator(
+      unriddenFormalLines(
+        lineCoverage,
+        RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
+      ),
+    );
+  }, [riddenQuery.data, lineCoverage]);
+  const unriddenLineCount = useMemo(
+    () => unriddenLineGroups.reduce((n, g) => n + g.lines.length, 0),
+    [unriddenLineGroups],
+  );
+  /* The まだ行っていない市区町村 section (subtask 1623):
+     boundary keys minus the ledger, grouped by prefecture in
+     manifest order. Re-derived when the boundary version
+     bumps, so prefectures that land in the background join
+     the list; the totals come from the manifest, so a group
+     knows its whole-prefecture denominator before its own
+     geometries arrive. */
+  const unvisitedPrefectureGroups: UnvisitedPrefectureGroup[] = useMemo(() => {
+    const visitedKeys = new Set(
+      municipalities.map((m) => `${m.prefecture}|${m.name}`),
+    );
+    const totals = getPrefectureMunicipalityTotals();
+    return groupUnvisitedByPrefecture(
+      unvisitedMunicipalities(visitedKeys, getBoundaryGeometryByKey()),
+      [...totals.keys()],
+      totals,
+    );
+  }, [municipalities, boundaryVersion]);
+  const unvisitedMunicipalityCount = useMemo(
+    () => unvisitedPrefectureGroups.reduce((n, g) => n + g.rows.length, 0),
+    [unvisitedPrefectureGroups],
+  );
   /* The map exists for the lines as much as for the municipalities
      (integrated review round 1, high): a reader whose only
      records are rides — zero visited municipalities — still gets
@@ -3391,6 +3443,38 @@ function VisitedMapSection({
      No applicable selection — the layers keep their state
      (a fresh layer's empty source is exactly that state). */
   const applyUnriddenRemainderFocus = (map: MapLibreLike) => {
+    /* A picked unridden line (subtask 1623) owns the
+       remainder layer instead: its whole line at midway
+       strength, re-applied here the same way the ridden
+       selection is. A key the ledger has painted meanwhile
+       is no longer unridden — drop the stale selection and
+       fall through to the ridden path (which then finds
+       nothing, and leaves the ghost whole). */
+    const unriddenKey = focusedUnriddenLineKeyRef.current;
+    if (unriddenKey !== null) {
+      const stillUnridden = ![...lineCoverageRef.current.perServiceLegs.values()].some(
+        (painted) => painted.legs.some((leg) => leg.key === unriddenKey),
+      );
+      if (stillUnridden) {
+        const legs = ghostLegsForKey(
+          lineCoverageRef.current,
+          RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
+          unriddenKey,
+        );
+        if (legs.length > 0) {
+          applyUnriddenLineFocus(
+            map,
+            unriddenKey,
+            legs,
+            remainderGhostContext(),
+            variantRef.current,
+          );
+          return;
+        }
+      }
+      focusedUnriddenLineKeyRef.current = null;
+      setFocusedUnriddenLineKey(null);
+    }
     reapplyUnriddenRemainderFocus(
       map,
       riddenRowsRef.current,
@@ -4090,7 +4174,12 @@ function VisitedMapSection({
       riddenPending: riddenQuery.isPending,
       focusPicked: {
         municipalities: focusedIdRef.current !== null,
-        lines: focusedLineIdRef.current !== null,
+        /* A picked unridden line counts as a picked focus too
+           (subtask 1623): an entry auto-fit must not overwrite
+           its fit, the same as a ridden line's. */
+        lines:
+          focusedLineIdRef.current !== null ||
+          focusedUnriddenLineKeyRef.current !== null,
       },
     });
     if (gate === "wait") return;
@@ -4127,7 +4216,8 @@ function VisitedMapSection({
         runCurrent: autoFitRunsRef.current.isCurrent(shotTab, runToken),
         focusPicked:
           shotTab === "lines"
-            ? focusedLineIdRef.current !== null
+            ? focusedLineIdRef.current !== null ||
+              focusedUnriddenLineKeyRef.current !== null
             : focusedIdRef.current !== null,
       });
     /* The same run token gates the read's publication into
@@ -4567,6 +4657,38 @@ function VisitedMapSection({
      the row). */
   const [focusedLineId, setFocusedLineId] = useState<number | null>(null);
   const focusedLineIdRef = useRef<number | null>(null);
+  /* The unridden-line focus (subtask 1623): the formal-line
+     key the reader picked from the まだ乗っていない路線
+     section — a temporary preview, not a ledger row. Its whole
+     line paints at the midway strength (see
+     applyUnriddenLineFocus) until another pick, a blank map
+     tap, or a tab switch clears it. Mutually exclusive with
+     both focuses above: picking any ridden line or municipality
+     clears this, and picking this clears those — the clearing
+     rides on clearLineFocus below (for the municipality paths
+     and the tab switch) and on the three ridden-line setters,
+     which clear it directly. */
+  const [focusedUnriddenLineKey, setFocusedUnriddenLineKey] =
+    useState<string | null>(null);
+  const focusedUnriddenLineKeyRef = useRef<string | null>(null);
+  /* The まだ行っていない市区町村 section's expansion (subtask
+     1623): the section itself, and its prefecture groups. The
+     groups' expansion is lifted for the same reason as the
+     visited groups' — the list-tap handler opens the tapped
+     row's group before the map flies to it. */
+  const [unvisitedExpanded, setUnvisitedExpanded] = useState(false);
+  const [expandedUnvisitedPrefectures, setExpandedUnvisitedPrefectures] =
+    useState<ReadonlySet<string>>(() => new Set());
+  const toggleUnvisitedPrefecture = (name: string) =>
+    setExpandedUnvisitedPrefectures((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
   /* The 乗った路線 list's expansion, lifted out of RiddenLinesBlock:
      a 事業者別 bar tap must open the list before its target row can
      be scrolled to. */
@@ -5819,6 +5941,13 @@ function VisitedMapSection({
   const clearLineFocus = () => {
     focusedLineIdRef.current = null;
     setFocusedLineId(null);
+    /* An unridden-line preview is a line focus too (subtask
+       1623): every path that clears the ridden focus — a
+       municipality pick, the スポット tab switch via
+       clearFocus, a row delete — clears the preview as well,
+       so a stale midway paint can never outlive its row. */
+    focusedUnriddenLineKeyRef.current = null;
+    setFocusedUnriddenLineKey(null);
     pendingLineScrollRef.current = null;
     const map = mapHandleRef.current?.getMap() ?? null;
     if (map) {
@@ -5937,22 +6066,43 @@ function VisitedMapSection({
   const focusFromMapRef = useRef(focusMunicipalityFromMap);
   focusFromMapRef.current = focusMunicipalityFromMap;
 
+  /* The list-tap fit's supersede guard (subtask 1623): the
+     place a まだ行っていない市区町村 row tap is still
+     flying to. A map tap or a clear nulls it, so a fit that
+     was still waiting when the reader picked something else
+     never lands on the wrong place. */
+  const pendingUnvisitedFitRef = useRef<{
+    prefecture: string;
+    name: string;
+  } | null>(null);
   /* Map tap on a municipality that is NOT in the ledger yet: clear
      any visited focus, show its name under the map, and paint its
      boundary with the same orange highlight — the reader is already
      looking at the place, so the camera does not move, and nothing
-     is recorded as visited. */
-  const showUnvisitedMunicipality = (hit: {
-    name: string;
-    prefecture: string;
-    geometry: GeoJsonGeometry;
-  }) => {
+     is recorded as visited. A row tap in the まだ行っていない
+     市区町村 section (subtask 1623) takes the same path with
+     fit: true, so the whole municipality frames like a visited
+     row tap does — the reader picked it from a list, not from
+     the map in front of them. */
+  const showUnvisitedMunicipality = (
+    hit: {
+      name: string;
+      prefecture: string;
+      geometry: GeoJsonGeometry;
+    },
+    opts?: { fit?: boolean },
+  ) => {
     focusedIdRef.current = null;
     setFocusedId(null);
     clearLineFocusRef.current();
     /* A row scroll still heading for a cleared row stops too. */
     rowScrollSeqRef.current += 1;
     setTappedMunicipality({ kind: "unvisited", name: hit.name, prefecture: hit.prefecture });
+    /* A map tap (no fit) supersedes any list-tap fit still
+       waiting; a list tap arms it for the draw below. */
+    pendingUnvisitedFitRef.current = opts?.fit
+      ? { prefecture: hit.prefecture, name: hit.name }
+      : null;
     withLiveMap((map) => {
       /* The highlight belongs to the 市区町村 tab alone: if the
          reader has switched away while this draw was waiting, it
@@ -5982,6 +6132,31 @@ function VisitedMapSection({
             : undefined,
           `${hit.prefecture} ${hit.name}`,
         );
+        /* The list tap's fit: the whole municipality in frame,
+           with the row tap's framing (focusMunicipality). A
+           superseded tap never flies — the guard above the draw
+           already dropped a stale variant, and this checks the
+           place itself. */
+        if (opts?.fit) {
+          const pending = pendingUnvisitedFitRef.current;
+          if (
+            pending?.prefecture === hit.prefecture &&
+            pending?.name === hit.name
+          ) {
+            const reduceMotion =
+              typeof window !== "undefined" &&
+              window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            const plan = focusCameraPlan(geometryBounds(hit.geometry), null);
+            if (plan.kind === "fit-bounds") {
+              stopCamera(map);
+              map.fitBounds(plan.bounds, {
+                padding: mapFitPadding(),
+                maxZoom: 15,
+                duration: reduceMotion ? 0 : 1200,
+              });
+            }
+          }
+        }
       } catch {
         /* a failed highlight leaves the name label as the cue */
       }
@@ -5989,6 +6164,58 @@ function VisitedMapSection({
   };
   const showUnvisitedRef = useRef(showUnvisitedMunicipality);
   showUnvisitedRef.current = showUnvisitedMunicipality;
+
+  /* Row tap in the まだ行っていない市区町村 section (subtask
+     1623): the temporary preview — highlight the boundary,
+     name the place under the map, and fit the whole
+     municipality in frame, exactly as a visited row tap
+     frames its municipality. Nothing is recorded as visited.
+     Re-tapping the same row clears the preview, the same
+     toggle a focused ridden line's row has. */
+  const focusUnvisitedMunicipality = (entry: UnvisitedMunicipality) => {
+    if (
+      tappedMunicipality?.kind === "unvisited" &&
+      tappedMunicipality.prefecture === entry.prefecture &&
+      tappedMunicipality.name === entry.name
+    ) {
+      pendingUnvisitedFitRef.current = null;
+      clearFocusRef.current();
+      return;
+    }
+    setExpandedUnvisitedPrefectures((prev) =>
+      prev.has(entry.prefecture)
+        ? prev
+        : new Set(prev).add(entry.prefecture),
+    );
+    /* A row tap supersedes any map-tap row scroll still running. */
+    rowScrollSeqRef.current += 1;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!mapFailed) {
+      mapContainerRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+      showUnvisitedRef.current(
+        { name: entry.name, prefecture: entry.prefecture, geometry: entry.geometry },
+        { fit: true },
+      );
+    } else {
+      /* No live map: the static map image scrolls into view and
+         only the name label and the row emphasis apply. */
+      clearFocusRef.current();
+      setTappedMunicipality({
+        kind: "unvisited",
+        name: entry.name,
+        prefecture: entry.prefecture,
+      });
+      fallbackMapRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }
+  };
 
   /* Map tap outside every known boundary: clear the highlight and
      say so under the map instead of leaving the reader guessing.
@@ -6573,6 +6800,10 @@ function VisitedMapSection({
     focusedIdRef.current = null;
     setFocusedId(null);
     setTappedMunicipality(null);
+    /* An unridden-line preview is a line focus too (subtask
+       1623): a ridden pick replaces it. */
+    focusedUnriddenLineKeyRef.current = null;
+    setFocusedUnriddenLineKey(null);
     const currentMap = mapHandleRef.current?.getMap() ?? null;
     if (currentMap) {
       try {
@@ -6660,6 +6891,107 @@ function VisitedMapSection({
     }
   };
 
+  /* Unridden-line row tap (subtask 1623): the temporary preview
+     — the line's whole track paints at the midway strength
+     (the same 0.5 paint a focused ridden line's unridden
+     stretches get), the camera fits the whole line, and the
+     row shows the line's information (name, operator, whole
+     length). The ghost stays the always-on view: only the
+     picked line steps up to midway, and only while it is
+     picked. Re-tapping the same row clears the preview, the
+     same toggle a focused ridden line's row has. Nothing is
+     recorded as ridden. */
+  const focusUnriddenLine = (key: string) => {
+    if (focusedUnriddenLineKeyRef.current === key) {
+      /* Toggle off: the remainder paint goes back to the ghost
+         and the row emphasis clears with it. */
+      clearLineFocusRef.current();
+      return;
+    }
+    /* A line tap supersedes any row scroll still running. */
+    rowScrollSeqRef.current += 1;
+    const legs = ghostLegsForKey(
+      lineCoverage,
+      RIDDEN_LINE_GEOMETRIES as unknown as LineGeometryMap,
+      key,
+    );
+    if (legs.length === 0) {
+      /* No remainder left to preview (ridden meanwhile, or no
+         graph): leave every focus as it was rather than
+         clearing the reader's current pick for a row that is
+         about to leave the section anyway. */
+      return;
+    }
+    /* The two focuses are mutually exclusive: clear the
+       municipality focus (state + geometry) without going
+       through clearFocus, which would clear this line focus
+       too — and the ridden-line focus, whose remainder paint
+       this preview replaces. */
+    focusedIdRef.current = null;
+    setFocusedId(null);
+    setTappedMunicipality(null);
+    const currentMap = mapHandleRef.current?.getMap() ?? null;
+    if (currentMap) {
+      try {
+        clearFocusGeometry(currentMap);
+      } catch {
+        /* the map may already be gone; the row emphasis is the cue */
+      }
+    }
+    focusedLineIdRef.current = null;
+    setFocusedLineId(null);
+    pendingLineScrollRef.current = null;
+    focusedUnriddenLineKeyRef.current = key;
+    setFocusedUnriddenLineKey(key);
+
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (!mapFailed && showLiveMap) {
+      mapContainerRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+      const bounds = sectionBounds(legs);
+      withLiveMap((map) => {
+        /* A later tap supersedes this one: never paint a stale
+           preview (or fly the camera) for a row the reader has
+           already left — and never paint it on another tab. */
+        if (
+          focusedUnriddenLineKeyRef.current !== key ||
+          variantRef.current !== "lines"
+        )
+          return;
+        try {
+          stopCamera(map);
+          ensureFocusListeners(map);
+          applyUnriddenLineFocus(
+            map,
+            key,
+            legs,
+            remainderGhostContext(),
+            variantRef.current,
+          );
+          if (bounds) {
+            map.fitBounds(bounds, {
+              padding: mapFitPadding(),
+              maxZoom: 15,
+              duration: reduceMotion ? 0 : 1200,
+            });
+          }
+        } catch {
+          /* a failed camera move leaves the row emphasis as the cue */
+        }
+      });
+    } else {
+      fallbackMapRef.current?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }
+  };
+
   /* 事業者別（路線）bar tap: the reverse direction. The operator's
      first ledger row is emphasized, its track gets the same focus
      highlight on the map (no camera move — the reader is looking
@@ -6676,6 +7008,10 @@ function VisitedMapSection({
     focusedIdRef.current = null;
     setFocusedId(null);
     setTappedMunicipality(null);
+    /* An unridden-line preview is a line focus too (subtask
+       1623): a ridden pick replaces it. */
+    focusedUnriddenLineKeyRef.current = null;
+    setFocusedUnriddenLineKey(null);
     const currentMap = mapHandleRef.current?.getMap() ?? null;
     if (currentMap) {
       try {
@@ -6782,6 +7118,10 @@ function VisitedMapSection({
     focusedIdRef.current = null;
     setFocusedId(null);
     setTappedMunicipality(null);
+    /* An unridden-line preview is a line focus too (subtask
+       1623): a ridden pick replaces it. */
+    focusedUnriddenLineKeyRef.current = null;
+    setFocusedUnriddenLineKey(null);
     const currentMap = mapHandleRef.current?.getMap() ?? null;
     if (currentMap) {
       try {
@@ -7594,6 +7934,90 @@ function VisitedMapSection({
               </div>
               );
             })}
+            {/* The まだ行っていない市区町村 section (subtask
+                1623): the boundary data minus the ledger, grouped
+                by prefecture like the visited ledger above — the
+                way in to previewing a place before ever going
+                there. Rows render only while their group is open:
+                ~1,700 municipalities would otherwise sit mounted
+                (hidden) in the DOM, and unlike the visited rows
+                nothing needs them mounted — no map tap scrolls to
+                an unvisited row. */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setUnvisitedExpanded((v) => !v)}
+                aria-expanded={unvisitedExpanded}
+                aria-label={`まだ行っていない市区町村の一覧を${unvisitedExpanded ? "閉じる" : "開く"}`}
+                className="flex w-full items-baseline justify-between gap-3 text-left"
+              >
+                <span className="font-[family-name:var(--font-display)] text-base font-bold">
+                  まだ行っていない市区町村
+                </span>
+                <span className="flex shrink-0 items-baseline gap-2 text-sm text-[var(--dim)]">
+                  {unvisitedMunicipalityCount > 0 && <span>{unvisitedMunicipalityCount}市区町村</span>}
+                  <span aria-hidden="true" className="text-xs">
+                    {unvisitedExpanded ? "▾" : "▸"}
+                  </span>
+                </span>
+              </button>
+              <p className="mt-1 text-sm text-[var(--dim)]">
+                地図では境界線だけ表示されている、まだ行っていない市区町村です。タップすると一時的に表示します。
+              </p>
+              {!isBoundaryCoverageComplete() && (
+                <p className="mt-1 text-xs text-[var(--dim)]">
+                  境界データを読み込み中です — 読み込めた都道府県分を表示しています。
+                </p>
+              )}
+              {unvisitedExpanded && unvisitedPrefectureGroups.map((group) => {
+                const groupExpanded = expandedUnvisitedPrefectures.has(group.prefecture);
+                return (
+                <div key={group.prefecture} className="mt-3">
+                  <h3>
+                    <button
+                      type="button"
+                      onClick={() => toggleUnvisitedPrefecture(group.prefecture)}
+                      aria-expanded={groupExpanded}
+                      aria-label={`${group.prefecture}の未訪問の市区町村一覧を${groupExpanded ? "閉じる" : "開く"}`}
+                      className="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-[var(--dim)]"
+                    >
+                      <span>
+                        {group.prefecture}（{group.rows.length}{group.total !== null ? ` / ${group.total}` : ""}）
+                      </span>
+                      <span aria-hidden="true" className="shrink-0 text-xs">
+                        {groupExpanded ? "▾" : "▸"}
+                      </span>
+                    </button>
+                  </h3>
+                  {groupExpanded && (
+                  <ul className="mt-1.5 divide-y divide-[var(--border)] rounded-[var(--radius)] bg-[var(--surface)]">
+                    {group.rows.map((entry) => {
+                      const tapped =
+                        tappedMunicipality?.kind === "unvisited" &&
+                        tappedMunicipality.prefecture === entry.prefecture &&
+                        tappedMunicipality.name === entry.name;
+                      return (
+                      <li
+                        key={`${entry.prefecture}|${entry.name}`}
+                        className={`px-3 py-2.5 ${tapped ? "map-focused" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => focusUnvisitedMunicipality(entry)}
+                          aria-label={`${entry.prefecture}${entry.name}を地図で見る`}
+                          className="min-w-0 flex-1 cursor-pointer text-left"
+                        >
+                          <span className="block truncate text-sm font-medium">{entry.name}</span>
+                        </button>
+                      </li>
+                      );
+                    })}
+                  </ul>
+                  )}
+                </div>
+                );
+              })}
+            </div>
           </div>
           {deleteVisitedMutation.isError && (
             <p className="mt-2 text-sm text-[var(--signal)] xl:col-start-2 xl:row-start-5">削除に失敗しました</p>
@@ -7751,6 +8175,10 @@ function VisitedMapSection({
           registerLineRow={(id, el) => {
             lineRowRefs.current.set(id, el);
           }}
+          unriddenGroups={unriddenLineGroups}
+          unriddenLineCount={unriddenLineCount}
+          focusedUnriddenLineKey={focusedUnriddenLineKey}
+          onUnriddenLineTap={focusUnriddenLine}
         />
       </div>
       )}
@@ -7777,6 +8205,10 @@ function RiddenLinesBlock({
   onLineTap,
   onLineDeleted,
   registerLineRow,
+  unriddenGroups,
+  unriddenLineCount,
+  focusedUnriddenLineKey,
+  onUnriddenLineTap,
 }: {
   /* The ledger rows and their fetch state, owned by
      VisitedMapSection (integrated review round 1, medium): the
@@ -7826,8 +8258,38 @@ function RiddenLinesBlock({
   /* Registers each rendered row element by ledger id, so the
      owner can scroll a bar tap's target row into view. */
   registerLineRow: (id: number, el: HTMLElement | null) => void;
+  /* The まだ乗っていない路線 section (subtask 1623): the
+     formal lines no ledger row paints, grouped by operator like
+     the ridden list above, and the tap that previews one. The
+     count is gated on the ledger having landed (the owner passes
+     0 while it has not), so the header never claims the whole
+     country is unridden during the first load. */
+  unriddenGroups: UnriddenLineGroup[];
+  unriddenLineCount: number;
+  focusedUnriddenLineKey: string | null;
+  onUnriddenLineTap: (key: string) => void;
 }) {
   const queryClient = useQueryClient();
+  /* The unridden section's expansion and its operator groups
+     (subtask 1623): local to this block — nothing outside it
+     needs to open them. Rows render only while their group is
+     open: ~590 unridden lines would otherwise sit mounted
+     (hidden) in the DOM, and unlike the ridden rows nothing
+     needs them mounted — no bar tap or map tap scrolls to an
+     unridden row. */
+  const [unriddenExpanded, setUnriddenExpanded] = useState(false);
+  const [expandedUnriddenOperators, setExpandedUnriddenOperators] =
+    useState<ReadonlySet<string>>(() => new Set());
+  const toggleUnriddenOperator = (operator: string) =>
+    setExpandedUnriddenOperators((prev) => {
+      const next = new Set(prev);
+      if (next.has(operator)) {
+        next.delete(operator);
+      } else {
+        next.add(operator);
+      }
+      return next;
+    });
   /* Grouped by operator (tab split, subtask 1439), the same
      shape as the municipality ledger's prefecture groups:
      groups in first-appearance order, rows in ledger order,
@@ -8787,6 +9249,111 @@ function RiddenLinesBlock({
           {lMsg && <p className="text-sm text-[var(--dim)]">{lMsg}</p>}
         </form>
       )}
+
+      {/* The まだ乗っていない路線 section (subtask 1623): the
+          formal lines no ledger row paints, grouped by operator
+          like the ridden list above. The ghost is the always-on
+          view of these lines; tapping a row previews it at the
+          midway strength and fits the whole line. Rows render
+          only while their group is open: ~590 unridden lines
+          would otherwise sit mounted (hidden) in the DOM, and
+          unlike the ridden rows nothing needs them mounted — no
+          bar tap or map tap scrolls to an unridden row. */}
+      <div className="mt-8">
+        <button
+          type="button"
+          onClick={() => setUnriddenExpanded((v) => !v)}
+          aria-expanded={unriddenExpanded}
+          aria-label={`まだ乗っていない路線の一覧を${unriddenExpanded ? "閉じる" : "開く"}`}
+          className="flex w-full items-baseline justify-between gap-3 text-left"
+        >
+          <span className="font-[family-name:var(--font-display)] text-base font-bold">
+            まだ乗っていない路線
+          </span>
+          <span className="flex shrink-0 items-baseline gap-2 text-sm text-[var(--dim)]">
+            {unriddenLineCount > 0 && <span>{unriddenLineCount}路線</span>}
+            <span aria-hidden="true" className="text-xs">
+              {unriddenExpanded ? "▾" : "▸"}
+            </span>
+          </span>
+        </button>
+        <p className="mt-1 text-sm text-[var(--dim)]">
+          地図では薄い線で表示されている、まだ乗っていない路線です。タップすると一時的に濃く表示します。
+        </p>
+
+        {unriddenExpanded && linesLoaded && unriddenLineCount === 0 && (
+          <p className="mt-3 text-sm text-[var(--dim)]">
+            全部の路線に乗りました。
+          </p>
+        )}
+
+        {unriddenExpanded && unriddenLineCount > 0 && (
+          <div className="mt-3 space-y-4">
+            {unriddenGroups.map((group) => {
+              const groupExpanded = expandedUnriddenOperators.has(group.operator);
+              return (
+              <div key={group.operator}>
+                <h4>
+                  <button
+                    type="button"
+                    onClick={() => toggleUnriddenOperator(group.operator)}
+                    aria-expanded={groupExpanded}
+                    aria-label={`${group.operator}の未乗車の路線一覧を${groupExpanded ? "閉じる" : "開く"}`}
+                    className="flex w-full items-center justify-between gap-3 py-1 text-left text-sm font-medium text-[var(--dim)]"
+                  >
+                    <span>
+                      {group.operator}（{group.lines.length}）
+                    </span>
+                    <span aria-hidden="true" className="shrink-0 text-xs">
+                      {groupExpanded ? "▾" : "▸"}
+                    </span>
+                  </button>
+                </h4>
+                {groupExpanded && (
+                <ul className="mt-1.5 divide-y divide-[var(--border)] rounded-[var(--radius)] bg-[var(--surface)]">
+                  {group.lines.map((entry) => {
+                    const focused = focusedUnriddenLineKey === entry.key;
+                    return (
+                    <li
+                      key={entry.key}
+                      className={`px-3 py-2.5 ${focused ? "map-focused-line" : ""}`}
+                      style={
+                        focused
+                          ? ({ "--line-focus-color": entry.color } as CSSProperties)
+                          : undefined
+                      }
+                    >
+                      <div className="flex items-center gap-3">
+                        <span
+                          aria-hidden="true"
+                          className="h-3 w-3 shrink-0 rounded-full"
+                          style={{ backgroundColor: entry.color }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => onUnriddenLineTap(entry.key)}
+                          aria-label={`${entry.name}を地図で見る`}
+                          className="min-w-0 flex-1 cursor-pointer text-left"
+                        >
+                          <span className="block truncate text-sm font-medium">{entry.name}</span>
+                          <span className="block text-xs text-[var(--dim)]">
+                            {entry.totalKm !== null
+                              ? `全長 約${entry.totalKm.toLocaleString(undefined, { maximumFractionDigits: 1 })}km ・ まだ乗っていません`
+                              : "まだ乗っていません"}
+                          </span>
+                        </button>
+                      </div>
+                    </li>
+                    );
+                  })}
+                </ul>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
