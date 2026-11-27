@@ -10,6 +10,7 @@ import {
   applyVariantPaint,
   decideSpotDataRemount,
   ensureUnriddenLineGhost,
+  ensureUnriddenRemainderFocus,
   GHOST_SPOT_PAINT,
   lineRowForPaintedFeature,
   lineRowForPaintedKey,
@@ -19,11 +20,14 @@ import {
   shouldSkipSpotRemount,
   spotsInitialCamera,
   stickyPaneVisibleTop,
+  UNRIDDEN_FOCUS_SOURCE_ID,
   UNRIDDEN_LINES_FOCUS_LAYER_ID,
   UNRIDDEN_LINES_LAYER_ID,
   UNRIDDEN_LINES_SOURCE_ID,
   unriddenRemainderKeysForRow,
   unriddenRemainderKeysForSelection,
+  unriddenRemainderLegsForRow,
+  unriddenRemainderLegsForSelection,
   variantPaintOps,
   type MapMountKeys,
   type UnriddenGhostResult,
@@ -230,25 +234,27 @@ describe("ensureUnriddenLineGhost (the ghost joins the map late, review round 2)
     expect(data.features).toHaveLength(1);
   });
 
-  test("the focused line's remainder layer joins with the family (subtask 1589)", () => {
+  test("the focused line's remainder layer joins with the family (subtask 1589, own source since subtask 1635)", () => {
     const map = fakeMap(["visited-lines-casing", "visited-lines-color"]);
     ensureUnriddenLineGhost(map, [feature("山手線|東日本旅客鉄道")]);
     const focus = map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
     expect(focus).toBeDefined();
-    /* The shared spec from map-variant.ts — the same object
-       App.tsx's mount overlay carries: midway paint (2.4 /
+    /* The shared spec from map-variant.ts: midway paint (2.4 /
        0.5, between the ghost's 1.6 / 0.25 and a ridden
-       section's 3.5 / 0.95), the line's own color, and an
-       empty-key filter that paints nothing until a focus call
-       selects a line. */
+       section's 3.5 / 0.95), the line's own color, and its OWN
+       source (subtask 1635 — it used to share the ghost
+       source and select by formal-line key, which painted a
+       branch service's whole formal line at midway strength).
+       The source arrives empty, so the layer paints nothing
+       until a focus call fills it; there is no filter to pin. */
     expect(focus!.spec).toEqual({
       id: "unridden-lines-focus",
       type: "line",
-      source: "unridden-lines",
+      source: "unridden-lines-focus",
       layout: { "line-cap": "round", "line-join": "round", visibility: "none" },
-      filter: ["in", ["get", "key"], ["literal", []]],
       paint: { "line-color": ["get", "color"], "line-width": 2.4, "line-opacity": 0.5 },
     });
+    expect(map.sources.get("unridden-lines-focus")).toBeDefined();
     /* Above the ghost, below the ridden lines: the same
        insertion anchor as the ghost layer. */
     expect(focus!.beforeId).toBe("visited-lines-casing");
@@ -256,6 +262,23 @@ describe("ensureUnriddenLineGhost (the ghost joins the map late, review round 2)
        the two seeded layers plus the family's two). */
     ensureUnriddenLineGhost(map, [feature("a|b"), feature("c|d")]);
     expect(map.layers.size).toBe(4);
+  });
+
+  test("ensureUnriddenRemainderFocus adds the source and layer to a map the ghost never reached (subtask 1635)", () => {
+    /* A focus call on a map whose ghost worker never answered
+       (or whose mount never baked the ghost) must still gain
+       its remainder layer — setUnriddenRemainderFocus calls
+       this before filling the source. */
+    const map = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenRemainderFocus(map);
+    expect(map.sources.get(UNRIDDEN_FOCUS_SOURCE_ID)).toBeDefined();
+    const focus = map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(focus).toBeDefined();
+    expect(focus!.beforeId).toBe("visited-lines-casing");
+    /* A second call is a no-op (the count stays at the seeded
+       layer plus the focus layer). */
+    ensureUnriddenRemainderFocus(map);
+    expect(map.layers.size).toBe(2);
   });
 
   test("an existing source is refreshed in place, never re-added", () => {
@@ -565,6 +588,126 @@ describe("unriddenRemainderKeysForSelection (the mount / ghost-late-join re-appl
     ];
     expect(
       unriddenRemainderKeysForSelection(unlinked, perServiceLegs, 23),
+    ).toBeNull();
+  });
+});
+
+describe("unriddenRemainderLegsForRow / unriddenRemainderLegsForSelection (the focus layer's own source, subtask 1635)", () => {
+  /* The finding-4 ledger again, with the service's own
+     remainder legs beside it: むさしの号's remainder is its
+     府中本町〜北府中 stretch only — one leg on the 武蔵野線
+     key, never the 東北線 asset shape. */
+  const rows = [
+    {
+      id: 21,
+      name: "むさしの号",
+      serviceId: "jr-musashino-omiya",
+      serviceLinkSource: "explicit" as const,
+      rideState: "partial" as const,
+    },
+    {
+      id: 22,
+      name: "JRむさしの号",
+      serviceId: "jr-musashino-omiya",
+      serviceLinkSource: "explicit" as const,
+      rideState: "unknown" as const,
+    },
+  ];
+  const perServiceLegs = new Map([
+    [
+      "jr-musashino-omiya",
+      {
+        legs: [
+          { key: "武蔵野線|東日本旅客鉄道" },
+          { key: "東北線|東日本旅客鉄道" },
+        ],
+        unknown: false,
+      },
+    ],
+  ]);
+  const remainderLegs = [
+    {
+      key: "武蔵野線|東日本旅客鉄道",
+      coords: [
+        [139.47718, 35.66583],
+        [139.47179, 35.68086],
+      ] as [number, number][],
+    },
+  ];
+  const perServiceUnriddenLegs = new Map([
+    ["jr-musashino-omiya", remainderLegs],
+  ]);
+
+  test("the focused partial row's legs are its own remainder", () => {
+    expect(
+      unriddenRemainderLegsForRow(
+        { rideState: "partial" },
+        perServiceLegs.get("jr-musashino-omiya"),
+        remainderLegs,
+      ),
+    ).toEqual(remainderLegs);
+    expect(
+      unriddenRemainderLegsForSelection(
+        rows,
+        perServiceLegs,
+        perServiceUnriddenLegs,
+        21,
+      ),
+    ).toEqual(remainderLegs);
+  });
+
+  test("the vetoes match the keys helper exactly — keys and legs can never disagree", () => {
+    const painted = perServiceLegs.get("jr-musashino-omiya")!;
+    expect(unriddenRemainderLegsForRow({ rideState: "unknown" }, painted, remainderLegs)).toEqual([]);
+    expect(
+      unriddenRemainderLegsForRow(
+        { rideState: "partial" },
+        { legs: [], unknown: false },
+        remainderLegs,
+      ),
+    ).toEqual([]);
+    expect(
+      unriddenRemainderLegsForRow(
+        { rideState: "partial" },
+        { legs: painted.legs, unknown: true },
+        remainderLegs,
+      ),
+    ).toEqual([]);
+    expect(unriddenRemainderLegsForRow({ rideState: "partial" }, painted, undefined)).toEqual([]);
+    expect(
+      unriddenRemainderLegsForSelection(
+        rows,
+        perServiceLegs,
+        perServiceUnriddenLegs,
+        22,
+      ),
+    ).toEqual([]);
+  });
+
+  test("no focus / a row that left the ledger / a service that paints nothing — null, like the keys helper", () => {
+    expect(
+      unriddenRemainderLegsForSelection(
+        rows,
+        perServiceLegs,
+        perServiceUnriddenLegs,
+        null,
+      ),
+    ).toBeNull();
+    expect(
+      unriddenRemainderLegsForSelection(
+        rows,
+        perServiceLegs,
+        perServiceUnriddenLegs,
+        99,
+      ),
+    ).toBeNull();
+    expect(
+      unriddenRemainderLegsForSelection(
+        rows,
+        new Map(),
+        perServiceUnriddenLegs,
+        21,
+      ),
     ).toBeNull();
   });
 });
