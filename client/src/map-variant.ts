@@ -223,9 +223,19 @@ export function applyVariantPaint(
 export const UNRIDDEN_LINES_SOURCE_ID = "unridden-lines";
 export const UNRIDDEN_LINES_LAYER_ID = "unridden-lines-ghost";
 export const UNRIDDEN_LINES_FOCUS_LAYER_ID = "unridden-lines-focus";
+/* The focused service's own unridden remainder rides its OWN
+   source (subtask 1635) — it used to share the ghost source
+   and select by formal-line key, so a branch service painted
+   its whole formal line's remainder at midway strength
+   (むさしの号's 東北線 slice drew the full Tokyo→Aomori
+   shape). The source holds only the focused service's
+   remainder features, so the layer needs no filter: an empty
+   source paints nothing until a focus call fills it. */
+export const UNRIDDEN_FOCUS_SOURCE_ID = "unridden-lines-focus";
 
 /* The FOCUSED line's unridden remainder (subtask 1589, the
-   reader's request of 2026-11-26): while a line is focused, its
+   reader's request of 2026-11-26; rescoped to the service
+   itself by subtask 1635): while a line is focused, its
    not-yet-ridden stretches repaint from the ghost's whisper to
    a midway strength, so "where is this line still unridden"
    reads at a glance. The paint keeps each line's OWN color
@@ -234,25 +244,23 @@ export const UNRIDDEN_LINES_FOCUS_LAYER_ID = "unridden-lines-focus";
    (3.5 / 0.95) — clearly above the unselected lines' ghost,
    clearly below the ridden paint and the focus highlight, and
    never dashed (the reader's no-dash rule). App.tsx's focus
-   switching drives the layer's filter (the focused service's
-   formal-line keys; an empty key list matches nothing) and
-   excludes those keys from the ghost layer meanwhile, so each
+   switching fills the layer's own source with the focused
+   service's remainder legs and excludes the service's
+   formal-line keys from the ghost layer meanwhile, so each
    stretch is painted exactly once, at exactly this strength. */
 export const UNRIDDEN_FOCUS_LINE_WIDTH = 2.4;
 export const UNRIDDEN_FOCUS_LINE_OPACITY = 0.5;
 
 /* The remainder layer's spec — ONE source of truth, shared by
-   App.tsx's mount overlay and the late join below (the ghost
+   the late join below and App.tsx's focus switching (the ghost
    layer's spec predates this sharing and is pinned equal by
    test instead). A fresh object per call, so no two layers
-   ever share a mutable spec. The filter starts on an empty key
-   list: nothing is focused until a focus call says otherwise. */
+   ever share a mutable spec. */
 export type UnriddenLineFocusLayerSpec = {
   id: string;
   type: string;
   source: string;
   layout: Record<string, unknown>;
-  filter: unknown[];
   paint: Record<string, unknown>;
 };
 
@@ -260,13 +268,12 @@ export function unriddenLineFocusLayerSpec(): UnriddenLineFocusLayerSpec {
   return {
     id: UNRIDDEN_LINES_FOCUS_LAYER_ID,
     type: "line",
-    source: UNRIDDEN_LINES_SOURCE_ID,
+    source: UNRIDDEN_FOCUS_SOURCE_ID,
     layout: {
       "line-cap": "round",
       "line-join": "round",
       visibility: "none",
     },
-    filter: ["in", ["get", "key"], ["literal", [] as string[]]],
     paint: {
       "line-color": ["get", "color"],
       "line-width": UNRIDDEN_FOCUS_LINE_WIDTH,
@@ -308,37 +315,53 @@ export type UnriddenGhostMap = {
    joining elsewhere stays hidden. With no features and no
    source there is nothing to join yet — the next arrival
    retries. */
+/* The family's insertion anchor: directly below the ridden
+   lines, the paint order the mount's sort gives it. */
+function unriddenInsertionAnchor(
+  map: UnriddenGhostMap,
+): string | undefined {
+  return [
+    "visited-lines-casing",
+    "visited-lines-color",
+    "visited-lines-unknown",
+    "list-spot-points-circle",
+  ].find((id) => map.getLayer(id));
+}
+
+/* Ensures the focused remainder's own source + layer exist on
+   a live map (subtask 1589, own source since subtask 1635):
+   the source arrives empty, the layer directly above the
+   ghost. Callers fill the source with the focused service's
+   remainder legs; an empty source paints nothing. A map whose
+   ghost arrived through the mount already has the layer (the
+   checks are no-ops there), and one built before the layer
+   existed gains it here — a focus already active when the
+   ghost lands is re-applied by the caller (App.tsx's ghost
+   effect). */
+export function ensureUnriddenRemainderFocus(map: UnriddenGhostMap): void {
+  if (!map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)) {
+    map.addSource(UNRIDDEN_FOCUS_SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+  if (!map.getLayer(UNRIDDEN_LINES_FOCUS_LAYER_ID)) {
+    map.addLayer(
+      unriddenLineFocusLayerSpec(),
+      unriddenInsertionAnchor(map),
+    );
+  }
+}
+
 export function ensureUnriddenLineGhost(
   map: UnriddenGhostMap,
   features: readonly UnriddenLineFeature[],
 ): void {
   const data = { type: "FeatureCollection", features };
-  /* The family's insertion anchor: directly below the ridden
-     lines, the paint order the mount's sort gives it. */
-  const beforeId = () =>
-    [
-      "visited-lines-casing",
-      "visited-lines-color",
-      "visited-lines-unknown",
-      "list-spot-points-circle",
-    ].find((id) => map.getLayer(id));
-  /* The focused line's remainder layer (subtask 1589) joins
-     with the family, directly above the ghost: a map whose
-     ghost arrived through the mount already has it (the check
-     is a no-op there), and one built before the layer existed
-     gains it here. It arrives with its empty-key filter, so it
-     paints nothing until a focus call selects a line — a focus
-     already active when the ghost lands is re-applied by the
-     caller (App.tsx's ghost effect). */
-  const ensureFocusLayer = () => {
-    if (!map.getLayer(UNRIDDEN_LINES_FOCUS_LAYER_ID)) {
-      map.addLayer(unriddenLineFocusLayerSpec(), beforeId());
-    }
-  };
   const source = map.getSource(UNRIDDEN_LINES_SOURCE_ID);
   if (source) {
     source.setData(data);
-    ensureFocusLayer();
+    ensureUnriddenRemainderFocus(map);
     return;
   }
   if (features.length === 0) return;
@@ -359,9 +382,9 @@ export function ensureUnriddenLineGhost(
         "line-opacity": 0.25,
       },
     },
-    beforeId(),
+    unriddenInsertionAnchor(map),
   );
-  ensureFocusLayer();
+  ensureUnriddenRemainderFocus(map);
 }
 
 /* A computed ghost and the ledger it belongs to: the coverage
@@ -443,7 +466,7 @@ export function unriddenRemainderKeysForRow(
    batch round 1, finding 3). A map rebuilt under a live
    selection (a municipality data update remounts the map while
    the ghost result stands, so the ghost effect never re-runs)
-   creates the remainder layer with its empty-key filter, and
+   creates the remainder layer with its empty source, and
    only this re-apply restores the emphasis on it. Returns null
    when there is no applicable selection — no focused row, a
    focused row that has left the ledger or whose link is
@@ -466,6 +489,64 @@ export function unriddenRemainderKeysForSelection<
   const painted = perServiceLegs.get(service.id);
   if (!painted || painted.legs.length === 0) return null;
   return unriddenRemainderKeysForRow(row, painted);
+}
+
+/* One leg of a service's own unridden remainder, as the focus
+   layer paints it: its formal-line key (for the color) and its
+   coordinates. The coverage's perServiceUnriddenLegs entries
+   satisfy this shape (PathLeg carries both, plus the edge
+   frame the subtraction ran on). */
+export type RemainderLeg = {
+  key: string;
+  coords: readonly [number, number][];
+};
+
+/* The remainder LEGS for one selected row (subtask 1635): the
+   service's own unridden stretches from the coverage, or an
+   empty list when nothing may be singled out. The vetoes are
+   the keys helper's, exactly — no painted legs, a
+   service-level unknown, or the row's own unknown ride — so
+   the keys (which still drive the ghost exclusion) and the
+   legs (which fill the focus source) can never disagree about
+   whether an emphasis exists. An empty list is a decision,
+   not an absence: callers apply it, clearing any emphasis a
+   previous selection left on the layers. */
+export function unriddenRemainderLegsForRow(
+  row: { rideState: RideState },
+  painted: RemainderPaintedLegs | undefined,
+  unriddenLegs: readonly RemainderLeg[] | undefined,
+): readonly RemainderLeg[] {
+  if (!painted || painted.legs.length === 0) return [];
+  if (painted.unknown) return [];
+  if (row.rideState === "unknown") return [];
+  return unriddenLegs ?? [];
+}
+
+/* The remainder legs for the CURRENT selection — the legs twin
+   of unriddenRemainderKeysForSelection, resolved the same way
+   and returning null under the same conditions, so the
+   re-apply the mount completion and the ghost's late join
+   share restores the keys and the legs together. */
+export function unriddenRemainderLegsForSelection<
+  Row extends RiddenServiceLink & { id: number; rideState: RideState },
+>(
+  rows: readonly Row[],
+  perServiceLegs: ReadonlyMap<string, RemainderPaintedLegs>,
+  perServiceUnriddenLegs: ReadonlyMap<string, readonly RemainderLeg[]>,
+  focusedRowId: number | null,
+): readonly RemainderLeg[] | null {
+  if (focusedRowId === null) return null;
+  const row = rows.find((candidate) => candidate.id === focusedRowId);
+  if (!row) return null;
+  const service = usableRiddenService(row);
+  if (!service) return null;
+  const painted = perServiceLegs.get(service.id);
+  if (!painted || painted.legs.length === 0) return null;
+  return unriddenRemainderLegsForRow(
+    row,
+    painted,
+    perServiceUnriddenLegs.get(service.id),
+  );
 }
 
 /* The ledger row a tap on a painted line track belongs to: the

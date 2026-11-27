@@ -24,6 +24,7 @@ import {
   haversineKm,
   parseFullPathSnapshot,
   sectionBounds,
+  serviceUnriddenLegs,
   slicePolyline,
   wholeLineBounds,
   distanceToLineGeometryM,
@@ -1090,6 +1091,118 @@ describe("wholeLineBounds (the whole-service focus fit, subtasks 1589 + 1618)", 
       [139.1, 35.1],
     ]);
     expect(wholeLineBounds(unbuildable, [], GEOMETRIES)).toBeNull();
+  });
+});
+
+describe("serviceUnriddenLegs: the focused line's midway paint is the service's OWN remainder (subtask 1635)", () => {
+  test("むさしの号's partial ride leaves only 府中本町〜北府中, never the 東北線 asset shape", () => {
+    /* The 2026-11-26 ride 北府中→大宮 is the painted section;
+       the remainder must be the ~1.8 km the service itself has
+       not ridden — 府中本町→北府中 — inside the service's own
+       run (lat below 36). Before subtask 1635 the midway paint
+       reused the ghost's per-key remainder, so it drew the
+       whole 東北線 asset shape (東京〜青森, lat up to ~39.7)
+       at midway strength, which the reader caught on the real
+       device (item 244). */
+    const path = servicePath("jr-musashino-omiya");
+    const clip = clipServicePath(path, S.北府中, S.大宮)!;
+    const remainder = serviceUnriddenLegs(path, clip.legs);
+    expect(remainder.length).toBeGreaterThan(0);
+    const remainderKm = remainder.reduce((sum, leg) => sum + leg.lengthKm, 0);
+    expect(remainderKm).toBeGreaterThan(1.5);
+    expect(remainderKm).toBeLessThan(2.2);
+    const bounds = sectionBounds(remainder)!;
+    expect(bounds).toEqual(
+      sectionBounds(clipServicePath(path, S.府中本町, S.北府中)!.legs)!,
+    );
+    expect(bounds[1][1]).toBeLessThan(36);
+    /* And the remainder plus the painted section tile the
+       whole path, with no overlap: together they are the
+       service's own run, nothing more. */
+    const paintedKm = clip.legs.reduce((sum, leg) => sum + leg.lengthKm, 0);
+    const pathKm = path.legs.reduce((sum, leg) => sum + leg.lengthKm, 0);
+    expect(remainderKm + paintedKm).toBeCloseTo(pathKm, 1);
+  });
+
+  test("a full ride — and an unknown ride — leave no remainder", () => {
+    const path = servicePath("keio");
+    expect(serviceUnriddenLegs(path, path.legs)).toEqual([]);
+    /* An unknown ride's legs are its whole path, so it leaves
+       no remainder either (the focus vetoes unknown rows
+       regardless). */
+    clearLineGraphCache();
+    const coverage = computeLineCoverage(
+      new Map(),
+      new Set(),
+      new Map([["keio", path]]),
+      GEOMETRIES,
+      597,
+    );
+    expect(coverage.perServiceUnriddenLegs.get("keio")).toEqual([]);
+  });
+
+  test("しもうさ号 and 京王新線 stay inside their own runs too", () => {
+    /* しもうさ号 shares the same 東北線 slice the other way:
+       painting 大宮→武蔵浦和 leaves only 武蔵浦和→西船橋. */
+    const shimousa = servicePath("jr-shimousa");
+    const shimousaClip = clipServicePath(shimousa, S.大宮, S.武蔵浦和)!;
+    const shimousaRemainder = serviceUnriddenLegs(
+      shimousa,
+      shimousaClip.legs,
+    );
+    const shimousaBounds = sectionBounds(shimousaRemainder)!;
+    expect(shimousaBounds).toEqual(
+      sectionBounds(
+        clipServicePath(shimousa, S.武蔵浦和, S.西船橋)!.legs,
+      )!,
+    );
+    expect(shimousaBounds[1][1]).toBeLessThan(36);
+    /* 京王新線 shares 京王線's key with the main-line service:
+       painting 新宿→初台 leaves only 初台→笹塚, never out
+       to 高尾. */
+    const newLine = servicePath("keio-new-line");
+    const newLineClip = clipServicePath(newLine, S.新宿, S.初台)!;
+    const newLineRemainder = serviceUnriddenLegs(newLine, newLineClip.legs);
+    const newLineBounds = sectionBounds(newLineRemainder)!;
+    expect(newLineBounds).toEqual(
+      sectionBounds(clipServicePath(newLine, S.初台, S.笹塚)!.legs)!,
+    );
+    expect(newLineBounds[0][0]).toBeGreaterThan(139.6);
+  });
+
+  test("the coverage carries the remainder per service", () => {
+    /* The same むさしの号 ride through computeLineCoverage:
+       the focus layer reads perServiceUnriddenLegs, not the
+       ghost. */
+    clearLineGraphCache();
+    const paths = new Map<string, ServicePath>();
+    paths.set("jr-musashino-omiya", servicePath("jr-musashino-omiya"));
+    const coverage = computeLineCoverage(
+      new Map([
+        [
+          "jr-musashino-omiya",
+          [{ serviceId: "jr-musashino-omiya", from: S.北府中, to: S.大宮 }],
+        ],
+      ]),
+      new Set(),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    const remainder = coverage.perServiceUnriddenLegs.get(
+      "jr-musashino-omiya",
+    )!;
+    const bounds = sectionBounds(remainder)!;
+    expect(bounds[1][1]).toBeLessThan(36);
+    expect(bounds).toEqual(
+      sectionBounds(
+        clipServicePath(
+          servicePath("jr-musashino-omiya"),
+          S.府中本町,
+          S.北府中,
+        )!.legs,
+      )!,
+    );
   });
 });
 

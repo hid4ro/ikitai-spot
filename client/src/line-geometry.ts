@@ -973,6 +973,15 @@ export type LineCoverage = {
     string,
     { legs: readonly PathLeg[]; unknown: boolean }
   >;
+  /* Per service: the path minus ITS OWN painted legs — the
+     stretches the service itself has not ridden yet (subtask
+     1635). The focused line's midway paint reads this, not the
+     ghost's per-key remainder: a branch service that only
+     touches a slice of a formal line (むさしの号 on 東北線)
+     must not paint the whole line's remainder. A full ride
+     leaves nothing; an unknown ride's legs are its whole path,
+     so it leaves nothing too. */
+  perServiceUnriddenLegs: ReadonlyMap<string, readonly PathLeg[]>;
   /* Deduped ridden distance per formal-line key (what the map
      paints on that key), and per operator (the parent bar: the
      formal-line-based total, matching the painted total). */
@@ -1123,6 +1132,7 @@ export function computeLineCoverage(
     string,
     { legs: readonly PathLeg[]; unknown: boolean }
   >();
+  const perServiceUnriddenLegs = new Map<string, readonly PathLeg[]>();
   const perKeyCoverage = new Map<string, EdgeCoverage>();
   const completeServiceIds: string[] = [];
   const coverFor = (key: string): EdgeCoverage => {
@@ -1164,6 +1174,11 @@ export function computeLineCoverage(
     const unknown = !isFull && serviceIntervals.length === 0;
     if (unknown) legs.push(...path.legs);
     perServiceLegs.set(serviceId, { legs, unknown });
+    /* The service's own unridden remainder (subtask 1635):
+       the path with exactly these painted spans cut out — the
+       same path object the clips above were sliced from, so
+       the edge frames agree by construction. */
+    perServiceUnriddenLegs.set(serviceId, serviceUnriddenLegs(path, legs));
     if (!unknown) {
       for (const leg of legs) coverFor(leg.key).addLeg(leg);
     }
@@ -1214,6 +1229,7 @@ export function computeLineCoverage(
   return {
     perService,
     perServiceLegs,
+    perServiceUnriddenLegs,
     perKeyKm,
     perOperatorKm,
     networkRiddenKm,
@@ -1285,6 +1301,78 @@ export function ghostLineLegs(
     if (legs.length > 0) out.set(key, legs);
   }
   return out;
+}
+
+/* One service's own unridden remainder (subtask 1635): the
+   service path minus ITS OWN painted legs, edge by edge — the
+   same subtraction basis as ghostLineLegs, but scoped to one
+   service instead of one formal line's whole asset shape. The
+   focused line's midway paint (subtask 1589) used to reuse the
+   ghost's per-key remainder, so a branch service that only
+   touches a slice of a formal line (むさしの号 on 東北線,
+   与野〜大宮) painted the whole line's remainder at midway
+   strength — the full Tokyo→Aomori shape, which the reader
+   caught on the real device (item 244). The remainder is the
+   service's path with its ridden spans cut out: a full ride
+   leaves nothing, an unknown ride's legs are its whole path so
+   it leaves nothing too (the focus vetoes unknown rows
+   regardless), and a partial ride leaves exactly the stretches
+   it has not ridden yet. Painted legs share the path legs'
+   edge frame — clips are sliced off the same path object
+   (sliceServicePath), with the loop inner-clip canonicalised
+   back to it — so the spans subtract exactly. */
+export function serviceUnriddenLegs(
+  path: ServicePath,
+  paintedLegs: readonly PathLeg[],
+): PathLeg[] {
+  const covered = new Map<string, [number, number][]>();
+  for (const leg of paintedLegs) {
+    const composite = `${leg.key}\u0000${leg.edge}`;
+    const list = covered.get(composite) ?? [];
+    list.push([leg.fromT, leg.toT]);
+    covered.set(composite, list);
+  }
+  const out: PathLeg[] = [];
+  for (const leg of path.legs) {
+    const ranges = mergeRanges(
+      covered.get(`${leg.key}\u0000${leg.edge}`) ?? [],
+    );
+    let cursor = leg.fromT;
+    for (const [a, b] of ranges) {
+      if (a > cursor + 1e-9) out.push(...sliceLegSpan(leg, cursor, a));
+      cursor = Math.max(cursor, b);
+    }
+    if (cursor < leg.toT - 1e-9) {
+      out.push(...sliceLegSpan(leg, cursor, leg.toT));
+    }
+  }
+  return out;
+}
+
+/* The sub-polyline of one path leg between two fractions along
+   its graph edge — the same slicing sliceServicePath applies
+   when it clips a path (the fractions are in the leg's own
+   edge frame, so they map onto the leg's coords by their
+   position inside the leg's [fromT, toT] span). */
+function sliceLegSpan(leg: PathLeg, fromT: number, toT: number): PathLeg[] {
+  const span = leg.toT - leg.fromT;
+  if (span <= 1e-9 || toT - fromT < 1e-9) return [];
+  const coords = slicePolyline(
+    leg.coords,
+    leg.lengthKm,
+    (fromT - leg.fromT) / span,
+    (toT - leg.fromT) / span,
+  );
+  if (coords.length < 2) return [];
+  return [
+    {
+      ...leg,
+      fromT,
+      toT,
+      coords,
+      lengthKm: polylineLengthKm(coords),
+    },
+  ];
 }
 
 /* The snapshot a full ride stores, parsed back — null when the

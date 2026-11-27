@@ -101,12 +101,15 @@ import {
   shouldMountLiveMap,
   spotsInitialCamera,
   stickyPaneVisibleTop,
-  UNRIDDEN_LINES_FOCUS_LAYER_ID,
-  unriddenLineFocusLayerSpec,
+  UNRIDDEN_FOCUS_SOURCE_ID,
+  ensureUnriddenRemainderFocus,
   unriddenRemainderKeysForRow,
   unriddenRemainderKeysForSelection,
+  unriddenRemainderLegsForRow,
+  unriddenRemainderLegsForSelection,
   type MapMountKeys,
   type RecordMapVariant,
+  type RemainderLeg,
   type UnriddenGhostResult,
   type UnriddenLineFeature,
 } from "./map-variant";
@@ -3130,35 +3133,47 @@ function setNormalLineExclusion(map: MapLibreLike, serviceId: string | null) {
   }
 }
 
-/* The focused line's unridden remainder (subtask 1589): while a
-   line is focused, the ghost stretches of ITS formal line(s)
-   repaint at the midway strength of the unridden-lines-focus
-   layer (see map-variant.ts for the paint), so where the
-   selected line is still unridden reads at a glance. The
-   switching mirrors setNormalLineExclusion: the focus layer's
-   filter selects the focused keys, and the ghost layer
-   excludes them meanwhile, so every stretch is painted exactly
-   once, at exactly one strength. The remainder is per FORMAL
-   LINE (the ghost's own unit), not per service: two services
-   sharing one formal line share its remainder, exactly as they
-   share the ghost. An unknown ride passes no keys — nothing is
-   recorded as ridden for it, so there is no remainder to single
-   out, and its whole path is the focus highlight already. Null
-   (or no keys) restores the ghost's full set and empties the
-   focus layer. Layers a mount never created are skipped, as
-   in setNormalLineExclusion. */
+/* The focused line's unridden remainder (subtask 1589,
+   rescoped to the service itself by subtask 1635): while a
+   line is focused, the stretches of ITS OWN path it has not
+   ridden yet repaint at the midway strength of the
+   unridden-lines-focus layer (see map-variant.ts for the
+   paint), so where the selected line is still unridden reads
+   at a glance. The layer reads its OWN source, filled here
+   with the service's remainder legs from the coverage — the
+   old cut shared the ghost source and selected by formal-line
+   key, so a branch service painted its whole formal line's
+   remainder (むさしの号's 東北線 slice drew Tokyo→Aomori).
+   The switching mirrors setNormalLineExclusion: the ghost
+   layer excludes the focused service's formal-line keys
+   meanwhile, so every stretch is painted exactly once, at
+   exactly one strength. The rest of a shared formal line's
+   ghost hides while its service is focused, exactly as the
+   key exclusion hid it before. An unknown ride passes no
+   keys and no legs — nothing is recorded as ridden for it, so
+   there is no remainder to single out, and its whole path is
+   the focus highlight already. Null (or no keys) restores the
+   ghost's full set and empties the focus source. A map whose
+   focus layer never joined yet gains it here, as in
+   ensureLineFocusLayers. */
 function setUnriddenRemainderFocus(
   map: MapLibreLike,
   keys: readonly string[] | null,
+  legs: readonly RemainderLeg[],
 ) {
   const active = keys && keys.length > 0 ? [...keys] : null;
-  if (map.getLayer(UNRIDDEN_LINES_FOCUS_LAYER_ID)) {
-    map.setFilter(UNRIDDEN_LINES_FOCUS_LAYER_ID, [
-      "in",
-      ["get", "key"],
-      ["literal", active ?? []],
-    ]);
-  }
+  ensureUnriddenRemainderFocus(map);
+  map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
+    type: "FeatureCollection",
+    features: legs.map((leg) => ({
+      type: "Feature",
+      properties: {
+        key: leg.key,
+        color: RIDDEN_LINE_GEOMETRIES[leg.key]?.color ?? "#ea580c",
+      },
+      geometry: { type: "LineString", coordinates: leg.coords },
+    })),
+  });
   if (map.getLayer("unridden-lines-ghost")) {
     map.setFilter(
       "unridden-lines-ghost",
@@ -3205,7 +3220,7 @@ function setFocusSection(
 
 function clearFocusLineGeometry(map: MapLibreLike) {
   setNormalLineExclusion(map, null);
-  setUnriddenRemainderFocus(map, null);
+  setUnriddenRemainderFocus(map, null, []);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData(EMPTY_FOCUS_DATA);
 }
 
@@ -3555,7 +3570,15 @@ function VisitedMapSection({
       lineCoverageRef.current.perServiceLegs,
       focusedLineIdRef.current,
     );
-    if (keys !== null) setUnriddenRemainderFocus(map, keys);
+    const legs = unriddenRemainderLegsForSelection(
+      riddenRowsRef.current,
+      lineCoverageRef.current.perServiceLegs,
+      lineCoverageRef.current.perServiceUnriddenLegs,
+      focusedLineIdRef.current,
+    );
+    if (keys !== null && legs !== null) {
+      setUnriddenRemainderFocus(map, keys, legs);
+    }
   };
   const lineCoverageSettled =
     riddenQuery.data !== undefined || riddenQuery.isError;
@@ -5349,16 +5372,17 @@ function VisitedMapSection({
          edge (subtask 1456 — a partially painted line keeps
          exactly its unridden stretches as the underlay), in its
          own color at a whisper of the ridden lines' strength,
-         BELOW them in the paint order. The second layer is the
-         focused line's remainder at midway strength (subtask
-         1589): it shares the source and starts filtered to no
-         line at all — a focus call selects the focused line's
-         keys and excludes them from the ghost layer meanwhile
+         BELOW them in the paint order. The focused line's
+         remainder at midway strength (subtask 1589) rides its
+         OWN source since subtask 1635, filled by a focus call
+         with the service's own remainder legs — it no longer
+         rides along here, and a focus call excludes the
+         focused line's keys from the ghost layer meanwhile
          (see setUnriddenRemainderFocus).
-         The layers ride along on every mount, but their
+         The layer rides along on every mount, but its
          visibility starts at "none": the variant paint applied
          right after the mount (and on every tab switch) shows
-         them only on the 路線 tab.
+         it only on the 路線 tab.
          The bake is gated on the result still belonging to THIS
          render's ledger (review round 3, finding 1 — the same
          condition the late-join paths use): a remount that finds
@@ -5392,7 +5416,6 @@ function VisitedMapSection({
                 "line-opacity": 0.25,
               },
             },
-            unriddenLineFocusLayerSpec(),
           ],
         });
       }
@@ -6860,6 +6883,11 @@ function VisitedMapSection({
             setUnriddenRemainderFocus(
               map,
               unriddenRemainderKeysForRow(line, painted),
+              unriddenRemainderLegsForRow(
+                line,
+                painted,
+                lineCoverage.perServiceUnriddenLegs.get(service.id),
+              ),
             );
           }
           if (bounds) {
@@ -6939,6 +6967,11 @@ function VisitedMapSection({
             setUnriddenRemainderFocus(
               map,
               unriddenRemainderKeysForRow(row, painted),
+              unriddenRemainderLegsForRow(
+                row,
+                painted,
+                lineCoverage.perServiceUnriddenLegs.get(service.id),
+              ),
             );
           }
         } catch {
@@ -7031,6 +7064,11 @@ function VisitedMapSection({
           setUnriddenRemainderFocus(
             map,
             unriddenRemainderKeysForRow(line, painted),
+            unriddenRemainderLegsForRow(
+              line,
+              painted,
+              lineCoverage.perServiceUnriddenLegs.get(service.id),
+            ),
           );
           /* Fit the whole line into the frame, with the row
              tap's framing (focusRiddenLine): same padding,
