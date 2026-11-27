@@ -281,6 +281,61 @@ describe("ensureUnriddenLineGhost (the ghost joins the map late, review round 2)
     expect(map.layers.size).toBe(2);
   });
 
+  test("a remainder layer created for the current tab starts at that tab's visibility (subtask 1648)", () => {
+    /* Codex's case (review of 1635, finding 3): a focus call
+       creates this layer when the ghost has not landed yet,
+       and no variant paint runs after a focus call — so the
+       creation itself must carry the current tab's
+       visibility. Before the fix the layer kept the spec's
+       "none", and when the ghost computation then failed,
+       the filled layer stayed invisible until the next tab
+       switch re-applied the paint. */
+    const onLines = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenRemainderFocus(onLines, "lines");
+    const focusOnLines = onLines.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(
+      (focusOnLines!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("visible");
+    /* Off the 路線 tab the same creation starts hidden. */
+    const onSpots = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenRemainderFocus(onSpots, "spots");
+    const focusOnSpots = onSpots.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(
+      (focusOnSpots!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("none");
+    /* Creation never overrides an existing layer: from the
+       first join on, the variant paint owns the visibility. */
+    ensureUnriddenRemainderFocus(onSpots, "lines");
+    expect(
+      (focusOnSpots!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("none");
+    /* And with no variant handed in, the spec's default
+       stands (the ghost join paths apply the paint right
+       after, as before). */
+    const noVariant = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenRemainderFocus(noVariant);
+    const focusDefault = noVariant.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(
+      (focusDefault!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("none");
+  });
+
+  test("the ghost's join hands the variant through to the remainder layer it creates", () => {
+    const map = fakeMap(["visited-lines-casing"]);
+    ensureUnriddenLineGhost(map, [feature("a|b")], "lines");
+    const focus = map.layers.get(UNRIDDEN_LINES_FOCUS_LAYER_ID);
+    expect(
+      (focus!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("visible");
+    /* The ghost layer itself keeps the mount spec verbatim:
+       its callers apply the variant paint right after the
+       join, as they always have. */
+    const ghost = map.layers.get(UNRIDDEN_LINES_LAYER_ID);
+    expect(
+      (ghost!.spec.layout as Record<string, unknown>).visibility,
+    ).toBe("none");
+  });
+
   test("an existing source is refreshed in place, never re-added", () => {
     const map = fakeMap([]);
     ensureUnriddenLineGhost(map, [feature("a|b")]);

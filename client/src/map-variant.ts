@@ -340,8 +340,21 @@ function unriddenInsertionAnchor(
    checks are no-ops there), and one built before the layer
    existed gains it here — a focus already active when the
    ghost lands is re-applied by the caller (App.tsx's ghost
-   effect). */
-export function ensureUnriddenRemainderFocus(map: UnriddenGhostMap): void {
+   effect).
+   A layer CREATED here starts at the CURRENT tab's visibility
+   when the caller hands the variant in (subtask 1648, Codex
+   review of subtask 1635, finding 3): the spec's "none" is
+   only the safe default for a caller that applies the variant
+   paint right after (the ghost's join paths). A focus call
+   creates this layer without any paint application after it —
+   a reader who selects a line before the ghost lands, on a
+   map whose ghost then fails outright, would otherwise hold
+   a filled source on an invisible layer until the next tab
+   switch re-applied the paint. */
+export function ensureUnriddenRemainderFocus(
+  map: UnriddenGhostMap,
+  variant?: RecordMapVariant,
+): void {
   if (!map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)) {
     map.addSource(UNRIDDEN_FOCUS_SOURCE_ID, {
       type: "geojson",
@@ -349,22 +362,29 @@ export function ensureUnriddenRemainderFocus(map: UnriddenGhostMap): void {
     });
   }
   if (!map.getLayer(UNRIDDEN_LINES_FOCUS_LAYER_ID)) {
-    map.addLayer(
-      unriddenLineFocusLayerSpec(),
-      unriddenInsertionAnchor(map),
-    );
+    const spec = unriddenLineFocusLayerSpec();
+    if (variant) {
+      const op = variantPaintOps(variant).layout.find(
+        (candidate) =>
+          candidate.layer === UNRIDDEN_LINES_FOCUS_LAYER_ID &&
+          candidate.name === "visibility",
+      );
+      if (op) spec.layout.visibility = op.value;
+    }
+    map.addLayer(spec, unriddenInsertionAnchor(map));
   }
 }
 
 export function ensureUnriddenLineGhost(
   map: UnriddenGhostMap,
   features: readonly UnriddenLineFeature[],
+  variant?: RecordMapVariant,
 ): void {
   const data = { type: "FeatureCollection", features };
   const source = map.getSource(UNRIDDEN_LINES_SOURCE_ID);
   if (source) {
     source.setData(data);
-    ensureUnriddenRemainderFocus(map);
+    ensureUnriddenRemainderFocus(map, variant);
     return;
   }
   if (features.length === 0) return;
@@ -387,7 +407,7 @@ export function ensureUnriddenLineGhost(
     },
     unriddenInsertionAnchor(map),
   );
-  ensureUnriddenRemainderFocus(map);
+  ensureUnriddenRemainderFocus(map, variant);
 }
 
 /* A computed ghost and the ledger it belongs to: the coverage
@@ -417,9 +437,10 @@ export function applyUnriddenLineGhostLatest(
   map: UnriddenGhostMap,
   latest: UnriddenGhostResult | null,
   currentCoverageKey: string,
+  variant?: RecordMapVariant,
 ): boolean {
   if (!latest || latest.coverageKey !== currentCoverageKey) return false;
-  ensureUnriddenLineGhost(map, latest.features);
+  ensureUnriddenLineGhost(map, latest.features, variant);
   return true;
 }
 

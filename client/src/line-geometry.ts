@@ -1251,12 +1251,17 @@ export type LineCoverage = {
   >;
   /* Per service: the path minus ITS OWN painted legs — the
      stretches the service itself has not ridden yet (subtask
-     1635). The focused line's midway paint reads this, not the
-     ghost's per-key remainder: a branch service that only
-     touches a slice of a formal line (むさしの号 on 東北線)
-     must not paint the whole line's remainder. A full ride
-     leaves nothing; an unknown ride's legs are its whole path,
-     so it leaves nothing too. */
+     1635) — with every OTHER service's painted spans cut out
+     as well (subtask 1648): the focused line's midway paint
+     reads this, and a stretch already painted solid as some
+     other service's ride must not resurface at midway
+     strength under this service's focus. The focused line's
+     midway paint reads this, not the ghost's per-key
+     remainder: a branch service that only touches a slice of
+     a formal line (むさしの号 on 東北線) must not paint the
+     whole line's remainder. A full ride leaves nothing; an
+     unknown ride's legs are its whole path, so it leaves
+     nothing too. */
   perServiceUnriddenLegs: ReadonlyMap<string, readonly PathLeg[]>;
   /* Deduped ridden distance per formal-line key (what the map
      paints on that key), and per operator (the parent bar: the
@@ -1478,6 +1483,35 @@ export function computeLineCoverage(
       approximate,
       missing: path.missing,
     });
+  }
+  /* Second pass over the remainders (subtask 1648, Codex
+     review of subtask 1635, finding 2): the midway paint must
+     not draw over a stretch ANOTHER service has ridden either.
+     The per-service remainder above cuts only the service's
+     own painted spans, so むさしの号's unridden 府中本町→北府中
+     kept its midway paint even when a full 武蔵野線 ride had
+     already painted that exact stretch solid. Cut every
+     service's remainder by the union of all services' painted
+     spans, on the same (key, edge, [fromT, toT]) frame — a
+     service's own spans are already absent from its remainder,
+     so including them in the cuts changes nothing for it.
+     Unknown rides' legs stay out of the cuts, the ghost's own
+     discipline (paintedSpansByKeyEdge): an unknown ride paints
+     thin, the unridden look, so a remainder running under it
+     is no double paint. */
+  const allPaintedLegs: PathLeg[] = [];
+  for (const painted of perServiceLegs.values()) {
+    if (painted.unknown) continue;
+    allPaintedLegs.push(...painted.legs);
+  }
+  if (allPaintedLegs.length > 0) {
+    for (const [serviceId, remainder] of perServiceUnriddenLegs) {
+      if (remainder.length === 0) continue;
+      perServiceUnriddenLegs.set(
+        serviceId,
+        subtractLegSpans(remainder, allPaintedLegs),
+      );
+    }
   }
   const perKeyKm = new Map<string, number>();
   const perOperatorKm = new Map<string, number>();

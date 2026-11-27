@@ -410,6 +410,106 @@ describe("trimUnriddenGhostFeatures on the real asset", () => {
     expect(untouched.length).toBe(canonical.length);
     untouched.forEach((f, i) => expect(f).toBe(canonical[i]!));
   });
+
+  test("a remainder on keys with no ridden section still trims the ghost (review of 1635, finding 1)", () => {
+    /* Codex's case: a 埼京線 ride of only 大崎→新宿 paints the
+       山手線 key alone, while the service's remainder runs on
+       赤羽線・東北線・川越線 — formal lines with no ridden
+       section at all (≈38.8 km of remainder). The 1635-era
+       ghost exclusion keyed off the PAINTED legs' keys, so
+       those keys never left the ghost and the 0.25 stayed
+       under the midway paint's 0.5. The trim is driven by
+       the remainder spans themselves (subtask 1680), so every
+       key the remainder runs on is cut, painted or not. */
+    const osaki: StationRef = {
+      id: "004135",
+      name: "大崎",
+      lng: 139.72807,
+      lat: 35.61985,
+    };
+    const shinjuku: StationRef = {
+      id: "003700",
+      name: "新宿",
+      lng: 139.69993,
+      lat: 35.6898,
+    };
+    const intervals = new Map<string, readonly RideInterval[]>([
+      [
+        "jr-saikyo",
+        [
+          {
+            serviceId: "jr-saikyo",
+            from: osaki,
+            to: shinjuku,
+            direction: null,
+          },
+        ],
+      ],
+    ]);
+    const paths = new Map([
+      ["jr-saikyo", buildServicePath(serviceById("jr-saikyo")!, GEOMETRIES)],
+    ]);
+    const coverage = computeLineCoverage(
+      intervals,
+      new Set(),
+      paths,
+      GEOMETRIES,
+      597,
+    );
+    const painted = coverage.perServiceLegs.get("jr-saikyo")!;
+    const remainder = coverage.perServiceUnriddenLegs.get("jr-saikyo")!;
+    /* The precondition, as Codex measured it: one painted
+       key, and over 35 km of remainder on keys without a
+       single painted leg. */
+    expect(new Set(painted.legs.map((leg) => leg.key))).toEqual(
+      new Set([YAMA_KEY]),
+    );
+    const paintedKeys = new Set(painted.legs.map((leg) => leg.key));
+    const unpaintedRemainderKm = remainder
+      .filter((leg) => !paintedKeys.has(leg.key))
+      .reduce((sum, leg) => sum + leg.lengthKm, 0);
+    expect(unpaintedRemainderKm).toBeGreaterThan(35);
+    const canonical = computeUnriddenGhostFeatures(
+      serializeGhostCoverage(coverage),
+      RIDDEN_LINE_GEOMETRIES,
+    );
+    const trimmed = trimUnriddenGhostFeatures(
+      canonical,
+      coverage,
+      RIDDEN_LINE_GEOMETRIES,
+      remainder,
+    );
+    /* On each unpainted key the remainder runs on, the ghost
+       either leaves entirely or keeps clear of the remainder
+       — sampled along segments, not just at vertices (the
+       corridor cut is exact at 100 m; the 95 leaves the
+       frames' rounding, as in the loop test above). */
+    for (const key of [
+      "赤羽線|東日本旅客鉄道",
+      "東北線|東日本旅客鉄道",
+      "川越線|東日本旅客鉄道",
+    ]) {
+      const cuts = remainder.filter((leg) => leg.key === key);
+      expect(cuts.length).toBeGreaterThan(0);
+      const feature = trimmed.find((f) => f.properties.key === key);
+      if (!feature) continue;
+      for (const run of feature.geometry.coordinates) {
+        for (let i = 0; i + 1 < run.length; i++) {
+          const a = run[i]!;
+          const b = run[i + 1]!;
+          const steps = Math.max(1, Math.ceil(pointPointM(a, b) / 25));
+          for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            const p = [
+              a[0]! + (b[0]! - a[0]!) * t,
+              a[1]! + (b[1]! - a[1]!) * t,
+            ];
+            expect(pointLegsM(p, cuts)).toBeGreaterThan(95);
+          }
+        }
+      }
+    }
+  });
 });
 
 /* The corridor cut's segment accuracy (subtask 1680, review
