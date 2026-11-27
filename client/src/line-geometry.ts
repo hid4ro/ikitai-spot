@@ -1065,6 +1065,34 @@ export function paintedLegFeature(
   };
 }
 
+/* The normal overlay's whole feature list — one feature per
+   painted leg of every service in the coverage, legs with no
+   color at all skipped. This is the exact array the component
+   hands to the visited-lines source as its data (subtask
+   1680, review round 3, finding 2: the loop lived inside the
+   component's useMemo, so no test could see the colors the
+   source actually receives; building the list here puts the
+   normal path under the same assertion as the focus paths —
+   see line-map-paint.test.ts). */
+export function paintedLineFeatures(
+  perServiceLegs: LineCoverage["perServiceLegs"],
+  geometries: LineGeometryMap,
+): PaintedLegFeature[] {
+  const features: PaintedLegFeature[] = [];
+  for (const [serviceId, painted] of perServiceLegs) {
+    for (const leg of painted.legs) {
+      const feature = paintedLegFeature(
+        serviceId,
+        leg,
+        painted.unknown,
+        geometries,
+      );
+      if (feature) features.push(feature);
+    }
+  }
+  return features;
+}
+
 export type FocusLegFeature = {
   type: "Feature";
   properties: { key: string; color: string };
