@@ -988,6 +988,22 @@ function sliceServicePath(
   return out;
 }
 
+/* The color a service's legs paint in when the service master
+   unifies them (ServiceMasterEntry.paintColorKey): the asset
+   color of the service's representative formal line, or null
+   when the service has no unification — the caller then falls
+   back to each leg's own formal-line color. A paintColorKey
+   that names no asset entry also yields null, so a master typo
+   degrades to the per-leg colors instead of painting nothing. */
+export function servicePaintColor(
+  serviceId: string,
+  geometries: LineGeometryMap,
+): string | null {
+  const key = serviceById(serviceId)?.paintColorKey;
+  if (!key) return null;
+  return geometries[key]?.color ?? null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Coverage: what the map paints, what the graphs count               */
 /* ------------------------------------------------------------------ */

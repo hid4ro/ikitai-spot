@@ -70,6 +70,7 @@ import {
   computeRiddenLineCoverage,
   coveredBlockIds,
   riddenLineIntervals,
+  servicePaintColor,
   wholeLineBounds,
   type LineCoverage,
   type LineGeometryMap,
@@ -3160,8 +3161,15 @@ function setUnriddenRemainderFocus(
   map: MapLibreLike,
   keys: readonly string[] | null,
   legs: readonly RemainderLeg[],
+  serviceId?: string | null,
 ) {
   const active = keys && keys.length > 0 ? [...keys] : null;
+  /* A paint-unified service (山手線, subtask 1680) keeps its
+     representative color on the remainder too, so the focused
+     loop reads as one line at both strengths. */
+  const unifiedColor = serviceId
+    ? servicePaintColor(serviceId, RIDDEN_LINE_GEOMETRIES)
+    : null;
   ensureUnriddenRemainderFocus(map);
   map.getSource(UNRIDDEN_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
@@ -3169,7 +3177,10 @@ function setUnriddenRemainderFocus(
       type: "Feature",
       properties: {
         key: leg.key,
-        color: RIDDEN_LINE_GEOMETRIES[leg.key]?.color ?? "#ea580c",
+        color:
+          unifiedColor ??
+          RIDDEN_LINE_GEOMETRIES[leg.key]?.color ??
+          "#ea580c",
       },
       geometry: { type: "LineString", coordinates: leg.coords },
     })),
@@ -3204,6 +3215,10 @@ function setFocusSection(
 ) {
   ensureLineFocusLayers(map);
   setNormalLineExclusion(map, serviceId);
+  /* A paint-unified service (山手線, subtask 1680) highlights
+     in its representative color throughout, not per formal
+     line — the highlight is the service's identity cue. */
+  const unifiedColor = servicePaintColor(serviceId, RIDDEN_LINE_GEOMETRIES);
   map.getSource(LINE_FOCUS_SOURCE_ID)?.setData({
     type: "FeatureCollection",
     features: legs.map((leg) => ({
@@ -3211,7 +3226,10 @@ function setFocusSection(
       properties: {
         key: leg.key,
         serviceId,
-        color: RIDDEN_LINE_GEOMETRIES[leg.key]?.color ?? "#ea580c",
+        color:
+          unifiedColor ??
+          RIDDEN_LINE_GEOMETRIES[leg.key]?.color ??
+          "#ea580c",
       },
       geometry: { type: "LineString", coordinates: leg.coords },
     })),
@@ -3577,7 +3595,17 @@ function VisitedMapSection({
       focusedLineIdRef.current,
     );
     if (keys !== null && legs !== null) {
-      setUnriddenRemainderFocus(map, keys, legs);
+      /* The selection's service, resolved the same way the
+         keys/legs helpers resolve it, so a paint-unified
+         service's remainder keeps its representative color
+         on this re-apply path too (subtask 1680). */
+      const focusedRow = riddenRowsRef.current.find(
+        (row) => row.id === focusedLineIdRef.current,
+      );
+      const focusService = focusedRow
+        ? usableRiddenService(focusedRow)
+        : undefined;
+      setUnriddenRemainderFocus(map, keys, legs, focusService?.id ?? null);
     }
   };
   const lineCoverageSettled =
@@ -3633,6 +3661,15 @@ function VisitedMapSection({
       };
     }[] = [];
     for (const [serviceId, painted] of lineCoverage.perServiceLegs) {
+      /* A paint-unified service (山手線, subtask 1680) paints
+         every leg in its representative color: the loop is one
+         named line to the reader even where its trains run on
+         the 東北線・東海道線 formal lines. The leg's key still
+         names its formal line for coverage and the ghost. */
+      const unifiedColor = servicePaintColor(
+        serviceId,
+        RIDDEN_LINE_GEOMETRIES,
+      );
       for (const leg of painted.legs) {
         const entry = RIDDEN_LINE_GEOMETRIES[leg.key];
         if (!entry) continue;
@@ -3641,7 +3678,7 @@ function VisitedMapSection({
           properties: {
             key: leg.key,
             serviceId,
-            color: entry.color,
+            color: unifiedColor ?? entry.color,
             unknown: painted.unknown,
           },
           geometry: { type: "LineString", coordinates: leg.coords },
@@ -6888,6 +6925,7 @@ function VisitedMapSection({
                 painted,
                 lineCoverage.perServiceUnriddenLegs.get(service.id),
               ),
+              service.id,
             );
           }
           if (bounds) {
@@ -6972,6 +7010,7 @@ function VisitedMapSection({
                 painted,
                 lineCoverage.perServiceUnriddenLegs.get(service.id),
               ),
+              service.id,
             );
           }
         } catch {
@@ -7069,6 +7108,7 @@ function VisitedMapSection({
               painted,
               lineCoverage.perServiceUnriddenLegs.get(service.id),
             ),
+            service.id,
           );
           /* Fit the whole line into the frame, with the row
              tap's framing (focusRiddenLine): same padding,
@@ -8342,11 +8382,18 @@ function RiddenLinesBlock({
             const paintedLegs = service
               ? lineCoverage.perServiceLegs.get(service.id)
               : undefined;
+            /* A paint-unified service (山手線, subtask 1680)
+               chips in its representative color too — the
+               first-leg fallback below would otherwise depend
+               on which section's clip happens to come first. */
             const color = key
               ? RIDDEN_LINE_GEOMETRIES[key]?.color
-              : paintedLegs && paintedLegs.legs.length > 0
-                ? RIDDEN_LINE_GEOMETRIES[paintedLegs.legs[0]!.key]?.color
-                : undefined;
+              : (service
+                  ? servicePaintColor(service.id, RIDDEN_LINE_GEOMETRIES)
+                  : null) ??
+                (paintedLegs && paintedLegs.legs.length > 0
+                  ? RIDDEN_LINE_GEOMETRIES[paintedLegs.legs[0]!.key]?.color
+                  : undefined);
             const usableService = usableRiddenService(line);
             const coverage = usableService
               ? lineCoverage.perService.get(usableService.id)
