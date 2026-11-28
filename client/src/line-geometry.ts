@@ -837,10 +837,18 @@ export function buildServicePath(
           !serviceIsLoop(service.id) &&
           masterChainFor(service, s.from.id, s.to.id, s.formalLineKey);
         if (chain) {
-          return chain.map((piece) => ({
+          /* The chain supplies the routing and the new
+             intermediate station, but the ride's own endpoints
+             stay the snapshot's recorded ones (subtask 1733):
+             the first piece starts at the saved `from` and the
+             last ends at the saved `to`, coordinates included —
+             a snapshot saved with different endpoint coordinates
+             must replay from those coordinates, not the current
+             master's. */
+          return chain.map((piece, index) => ({
             formalLineKey: piece.formalLineKey,
-            from: piece.from,
-            to: piece.to,
+            from: index === 0 ? s.from : piece.from,
+            to: index === chain.length - 1 ? s.to : piece.to,
             approximate: s.approximate,
             ...(piece.via?.length ? { via: piece.via } : {}),
           }));
@@ -1059,10 +1067,26 @@ function projectOnServicePath(
   let best: { arcKm: number; distanceM: number } | null = null;
   let accKm = 0;
   for (const leg of path.legs) {
+    /* The leg's segment lengths in coords order, and where each
+       segment starts along the TRAVERSAL. A reversed leg's
+       coords run against the traversal, so the whole leg is
+       mirrored: its last coords segment is traversed first
+       (subtask 1733 — subtask 1729 mirrored only the fraction
+       within one segment, so on a multi-segment reversed leg a
+       projection landed a leg's worth of arc out of place and
+       the clip cut the middle of the leg instead). */
+    const segLens: number[] = [];
+    let legKm = 0;
     for (let i = 0; i < leg.coords.length - 1; i++) {
+      const segKm = haversineKm(leg.coords[i]!, leg.coords[i + 1]!);
+      segLens.push(segKm);
+      legKm += segKm;
+    }
+    let cumKm = 0;
+    for (let i = 0; i < segLens.length; i++) {
       const a = leg.coords[i]!;
       const b = leg.coords[i + 1]!;
-      const segKm = haversineKm(a, b);
+      const segKm = segLens[i]!;
       const near = nearestOnSegment(coord, a, b);
       if (!best || near.distanceM < best.distanceM) {
         /* A reversed leg's coords run against the traversal, so
@@ -1071,10 +1095,15 @@ function projectOnServicePath(
            this, 柏 read at the start of its approach leg, 67 m
            short of the station). */
         const frac = leg.reversed ? 1 - near.t : near.t;
-        best = { arcKm: accKm + frac * segKm, distanceM: near.distanceM };
+        const segBaseKm = leg.reversed ? legKm - cumKm - segKm : cumKm;
+        best = {
+          arcKm: accKm + segBaseKm + frac * segKm,
+          distanceM: near.distanceM,
+        };
       }
-      accKm += segKm;
+      cumKm += segKm;
     }
+    accKm += legKm;
   }
   return best;
 }

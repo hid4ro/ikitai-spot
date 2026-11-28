@@ -2208,34 +2208,71 @@ export const Actions = {
          On a loop the same arc travelled the other way is a
          separate ledger entry (a named loop block test pins it:
          渋谷→新宿 outer and 新宿→渋谷 inner both save), so
-         loops keep the exact written-order match. The unique
-         index still guards simultaneous adds of the same written
-         order; a simultaneous reverse-order add can still slip
-         past it (the index keys the written order), so this check
-         is the guard for the sequential case. */
-      const findDuplicate = async () => {
+         loops keep the exact written-order match. Simultaneous
+         adds are the unique index's job: off a loop the section
+         is saved in canonical endpoint order (below), so the
+         index keys the ride in both written orders and the loser
+         of a simultaneous pair replays the duplicate path. */
+      const saveReversed =
+        !serviceIsLoop(service.id) && fromStationId > toStationId;
+      const saveFromStationId = saveReversed ? toStationId : fromStationId;
+      const saveToStationId = saveReversed ? fromStationId : toStationId;
+      const saveFromName = saveReversed ? toName : fromName;
+      const saveToName = saveReversed ? fromName : toName;
+      /* Finds the stored section that is the same ride as the
+         incoming one, together with whether it can be attributed
+         to this service. On a loop the written order is the
+         match and attribution is not consulted (the arc identity
+         already includes the side round the loop). Off a loop
+         the match is the same stretch either way round
+         (sectionsAreSameRide), and the attribution yardstick is
+         recordedSectionFitsService — the one the primary-section
+         check above and the drawing both use. */
+      const findSameRide = async () => {
         const existing = await db
           .select()
           .from(schema.riddenLineSections)
           .where(
             eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
           );
-        return existing.find((s) => {
+        for (const s of existing) {
           const stored = {
             fromStationId: s.fromStationId,
             toStationId: s.toStationId,
             direction: normalizeSectionDirection(s.direction),
           };
-          const incoming = { fromStationId, toStationId, direction };
           if (serviceIsLoop(service.id)) {
-            return (
-              stored.fromStationId === fromStationId &&
-              stored.toStationId === toStationId &&
+            if (
+              stored.fromStationId === saveFromStationId &&
+              stored.toStationId === saveToStationId &&
               stored.direction === direction
-            );
+            ) {
+              return { section: s, fits: true };
+            }
+            continue;
           }
-          return sectionsAreSameRide(service.id, stored, incoming);
-        });
+          const incoming = {
+            fromStationId: saveFromStationId,
+            toStationId: saveToStationId,
+            direction,
+          };
+          if (!sectionsAreSameRide(service.id, stored, incoming)) {
+            continue;
+          }
+          return {
+            section: s,
+            fits: recordedSectionFitsService(service.id, {
+              ...stored,
+              blockId: s.blockId,
+              recordedServiceId: s.recordedServiceId,
+            }),
+          };
+        }
+        return undefined;
+      };
+      const findDuplicate = async () => {
+        const match = await findSameRide();
+        return match?.fits ? match.section : undefined;
       };
       const markPartial = () => db
         .update(schema.riddenLines)
@@ -2277,9 +2314,33 @@ export const Actions = {
         }
         return { created: false, id: existing.id };
       };
-      const duplicate = await findDuplicate();
-      if (duplicate) {
-        return reuseSection(duplicate);
+      const match = await findSameRide();
+      if (match) {
+        if (!match.fits && match.section.blockId == null) {
+          /* The same stretch is already in the row, but recorded
+             under another service — 武蔵野線's 東松戸→西船橋 in
+             the しもうさ号 row (subtask 1733, review of 1732).
+             It does not fit this service, so the drawing ignores
+             it; treating it as this ride's duplicate would refuse
+             the add and leave this service's ridden distance at
+             zero, and a fresh insert cannot take its place (the
+             unique index keys the same canonical pair). The
+             rider is recording the stretch for this service now,
+             so adopt the entry — re-attribute it, then take the
+             usual duplicate path. A section carrying a block
+             keeps its provenance: a block pick is deliberate
+             data of its own service, so those still return the
+             existing entry unchanged. */
+          await db
+            .update(schema.riddenLineSections)
+            .set({ recordedServiceId: service.id })
+            .where(eq(schema.riddenLineSections.id, match.section.id));
+          return reuseSection({
+            ...match.section,
+            recordedServiceId: service.id,
+          });
+        }
+        return reuseSection(match.section);
       }
       let insertedId: number | null;
       try {
@@ -2287,10 +2348,10 @@ export const Actions = {
           db.insert(schema.riddenLineSections)
             .values({
               riddenLineId: args.riddenLineId,
-              fromStationId,
-              fromStationName: fromName,
-              toStationId,
-              toStationName: toName,
+              fromStationId: saveFromStationId,
+              fromStationName: saveFromName,
+              toStationId: saveToStationId,
+              toStationName: saveToName,
               direction,
               blockId,
               recordedServiceId: service.id,

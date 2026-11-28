@@ -435,6 +435,94 @@ describe("real asset: service totals against railway kilometres", () => {
     ).toBe(true);
   });
 
+  test("a clip ending inside a multi-segment reversed leg lands at the leg's far end (subtask 1733)", () => {
+    /* 武蔵野線's leg into 西船橋 runs the geometry backwards
+       over five vertices. A ride ending at the leg's far
+       (traversal-end) vertex projected only inside its own
+       segment: the clip stopped at 58.32 km — the first stored
+       segment's length past the leg start — instead of the
+       leg's end at 61.64 km from 府中本町. The projection now
+       flips the whole leg position, segment offsets included. */
+    const path = servicePath("jr-musashino");
+    const leg = path.legs[43]!;
+    expect(leg.reversed).toBe(true);
+    expect(leg.coords).toHaveLength(5);
+    expect(leg.lengthKm).toBeCloseTo(4.13, 1);
+    let arcStart = 0;
+    for (let i = 0; i < 43; i++) arcStart += path.legs[i]!.lengthKm;
+    expect(arcStart).toBeCloseTo(57.51, 1);
+    const endRef: StationRef = {
+      id: "999999",
+      name: "leg-end",
+      lng: leg.coords[0]![0],
+      lat: leg.coords[0]![1],
+    };
+    const clip = clipServicePath(path, S.府中本町, endRef)!;
+    expect(clip).not.toBeNull();
+    expect(clip.lengthKm).toBeCloseTo(61.64, 1);
+    /* The leg's traversal start projects the same from the
+       other side: start vertex to the path's last station is
+       the remainder of the path. */
+    const startRef: StationRef = {
+      id: "999998",
+      name: "leg-start",
+      lng: leg.coords[leg.coords.length - 1]![0],
+      lat: leg.coords[leg.coords.length - 1]![1],
+    };
+    const lastStation =
+      serviceById("jr-musashino")!.segments.at(-1)!.to;
+    const rest = clipServicePath(path, startRef, lastStation)!;
+    expect(rest.lengthKm).toBeCloseTo(14.27, 1);
+  });
+
+  test("a one-segment 東武野田線 snapshot keeps its saved endpoints through the 柏 fill (subtask 1733)", () => {
+    /* The chain fill stamped the master's own refs on the
+       first and last pieces too, discarding the endpoints the
+       snapshot saved: with 大宮's saved coords moved ~3.7 km
+       along the line (station id unchanged), the replay still
+       started from the master's 大宮 and totalled 62.03 km.
+       The fill now keeps the snapshot's from on the first
+       piece and its to on the last, so the one-segment replay
+       starts at the saved point and agrees with the
+       two-segment replay of the same ride. */
+    const current = serviceFullPathSnapshot("tobu-noda")!;
+    const key = current.segments[0]!.formalLineKey;
+    const movedOmiya: StationRef = {
+      ...S.大宮,
+      lng: 139.65577,
+      lat: 35.9249,
+    };
+    const oneSeg = parseFullPathSnapshot(
+      JSON.stringify({
+        ...current,
+        segments: [{ formalLineKey: key, from: movedOmiya, to: S.船橋 }],
+      }),
+    )!;
+    const twoSeg = parseFullPathSnapshot(
+      JSON.stringify({
+        ...current,
+        segments: [
+          { formalLineKey: key, from: movedOmiya, to: S.柏 },
+          { formalLineKey: key, from: S.柏, to: S.船橋 },
+        ],
+      }),
+    )!;
+    const service = serviceById("tobu-noda")!;
+    const onePath = buildServicePath(service, GEOMETRIES, oneSeg);
+    const twoPath = buildServicePath(service, GEOMETRIES, twoSeg);
+    expect(onePath.missing).toEqual([]);
+    /* The path starts by the saved point (its projection on
+       the graph), not back at the master's 大宮 ~5 km away. */
+    const start = onePath.legs[0]!.coords[0]!;
+    expect(
+      haversineKm(start, [movedOmiya.lng, movedOmiya.lat]),
+    ).toBeLessThan(2);
+    expect(haversineKm(start, [S.大宮.lng, S.大宮.lat])).toBeGreaterThan(3);
+    expect(onePath.totalKm).toBeCloseTo(57.74, 1);
+    expect(onePath.totalKm).toBeCloseTo(twoPath.totalKm, 2);
+    expect(onePath.arcKm).toBeCloseTo(twoPath.arcKm, 2);
+  });
+
   test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
     /* 営業キロ （府中本町起点）: 北府中 1.7 + 北府中〜西浦和
        26.1 + 大宮支線 西浦和〜与野 4.9 + 東北線 与野〜大宮

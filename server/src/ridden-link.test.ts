@@ -279,6 +279,87 @@ test("addRiddenSection returns the existing section for a reverse-order duplicat
     VALUES ('京王線', '2026-11-15', 'keio', 'partial', '003700', '003806', '2026-11-27', 0)`));
 });
 
+test("simultaneous reverse-order adds save one section (subtask 1733)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    // 新宿→調布 and 調布→新宿 sent at the same time: both pass
+    // the duplicate check before either saves, so the atomicity
+    // has to come from the save itself. Off a loop the section
+    // is stored in canonical endpoint order, so the unique index
+    // keys the ride in both written orders and exactly one of
+    // the pair is created; the loser replays the duplicate path
+    // and returns the winner's id.
+    const [a, b] = await Promise.all([
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "003700",
+        toStationId: "003966",
+      }),
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "003966",
+        toStationId: "003700",
+      }),
+    ]);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect(a.id).toBe(b.id);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+    expect(after?.sections?.[0]).toMatchObject({
+      fromStationId: "003700",
+      toStationId: "003966",
+    });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('京王線', '2026-11-15', 'keio', 'partial', '003700', '003806', '2026-11-27', 0)`));
+});
+
+test("a section recorded under another service is adopted, not treated as this service's duplicate (subtask 1733)", async () => {
+  await withLedger(async (client, ctx) => {
+    const { id } = await Actions.addRiddenLine.handler(ctx, {
+      ...aRide,
+      name: "しもうさ号",
+    });
+    if (id == null) throw new Error("Missing しもうさ号 row");
+    // A leftover entry in the row: the 東松戸→西船橋 stretch,
+    // recorded under 武蔵野線. It cannot be attributed to
+    // しもうさ号 (neither endpoint is a block boundary of the
+    // service, so its route is ambiguous), and the drawing
+    // ignores it — before the fix it still counted as the same
+    // ride by endpoints alone, so adding the stretch for
+    // しもうさ号 was refused and the service's ridden distance
+    // stayed at zero.
+    await client.execute(
+      `INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, from_station_name, to_station_id, to_station_name, recorded_service_id, created_at)
+       VALUES (${id}, '003187', '東松戸', '003547', '西船橋', 'jr-musashino', 0)`,
+    );
+    const before = computeRiddenLineCoverage(
+      (await Actions.listRiddenLines.handler(ctx, {})).lines,
+      GEOMETRIES,
+      597,
+    );
+    expect(before.perService.get("jr-shimousa")?.riddenKm ?? 0).toBe(0);
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: id,
+      fromStationId: "003547",
+      toStationId: "003187",
+    });
+    // The add takes effect by adopting the entry: the same
+    // single section, now recorded under しもうさ号, so the
+    // coverage counts the stretch.
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]?.sections).toHaveLength(1);
+    const section = lines[0]?.sections?.[0];
+    if (!section) throw new Error("Missing adopted section");
+    expect(added).toEqual({ created: false, id: section.id });
+    expect(section.recordedServiceId).toBe("jr-shimousa");
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    // The stretch measures 7.70 km on the service's own path
+    // (clipServicePath on jr-shimousa between the two stations).
+    expect(coverage.perService.get("jr-shimousa")?.riddenKm).toBeCloseTo(7.7, 1);
+  });
+});
+
 test("confirmation can relink to a different service", async () => {
   await withLedger(async (_, ctx) => {
     const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
