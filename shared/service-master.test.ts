@@ -22,8 +22,10 @@ import {
   isRiddenServiceLinkReviewable,
   legacyServiceByLedgerName,
   recordedSectionFitsService,
+  resolveLoopSectionDirection,
   resolveRiddenService,
   sectionEndpointsKnownToService,
+  sectionsAreSameRide,
   sectionRouteAmbiguous,
   serviceBoundaryStations,
   serviceById,
@@ -31,6 +33,7 @@ import {
   serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
   serviceOrderedStations,
+  serviceSegmentsAtVersion,
   serviceStationIds,
   stationRefById,
   validateSectionEndpoints,
@@ -509,6 +512,9 @@ describe("save-time validation (review round 2)", () => {
   test("isKnownMasterVersion accepts only versions the master knows", () => {
     expect(isKnownMasterVersion(SERVICE_MASTER_VERSION)).toBe(true);
     expect(isKnownMasterVersion(MIGRATED_MASTER_VERSION)).toBe(true);
+    // A superseded version stays known once its master is
+    // recorded (subtask 1611): 2026-11-26 held しもうさ号.
+    expect(isKnownMasterVersion("2026-11-26")).toBe(true);
     // The reviewer's reproduction values.
     expect(isKnownMasterVersion("bogus")).toBe(false);
     expect(isKnownMasterVersion("")).toBe(false);
@@ -550,11 +556,64 @@ describe("save-time validation (review round 2)", () => {
     expect(
       serviceExistsAtMasterVersion("keio-new-line", MIGRATED_MASTER_VERSION),
     ).toBe(false);
+    // The 2026-11-26 master held the nine migrated services
+    // plus むさしの号 and しもうさ号 — and not the two added
+    // on 2026-11-27 (subtask 1611).
+    expect(serviceExistsAtMasterVersion("keio", "2026-11-26")).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-musashino-omiya", "2026-11-26"),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("jr-shimousa", "2026-11-26"),
+    ).toBe(true);
+    expect(
+      serviceExistsAtMasterVersion("tobu-noda", "2026-11-26"),
+    ).toBe(false);
+    expect(
+      serviceExistsAtMasterVersion("keio-new-line", "2026-11-26"),
+    ).toBe(false);
     // Unknown versions and unknown services hold nothing.
     expect(serviceExistsAtMasterVersion("keio", "bogus")).toBe(false);
     expect(
       serviceExistsAtMasterVersion("no-such-service", SERVICE_MASTER_VERSION),
     ).toBe(false);
+  });
+
+  test("serviceSegmentsAtVersion keeps each version's route (subtask 1611)", () => {
+    // A version's route is the segments its master held: for
+    // しもうさ号 at 2026-11-26, the same three segments the
+    // current master carries (no route has changed between
+    // versions yet — the history records the override when one
+    // does).
+    const shimousaAt1126 = serviceSegmentsAtVersion(
+      "jr-shimousa",
+      "2026-11-26",
+    );
+    expect(shimousaAt1126).not.toBeNull();
+    expect(shimousaAt1126!.map((s) => s.formalLineKey)).toEqual(
+      serviceById("jr-shimousa")!.segments.map((s) => s.formalLineKey),
+    );
+    expect(
+      shimousaAt1126!.map((s) => [s.from.id, s.to.id]),
+    ).toEqual(
+      serviceById("jr-shimousa")!.segments.map((s) => [s.from.id, s.to.id]),
+    );
+    // A service the version never held has no route at it.
+    expect(serviceSegmentsAtVersion("tobu-noda", "2026-11-26")).toBeNull();
+    expect(
+      serviceSegmentsAtVersion("keio-new-line", "2026-11-26"),
+    ).toBeNull();
+    expect(serviceSegmentsAtVersion("keio", "bogus")).toBeNull();
+    expect(
+      serviceSegmentsAtVersion("no-such-service", SERVICE_MASTER_VERSION),
+    ).toBeNull();
+    // A snapshot cut at the old version names that version and
+    // carries its route; a service the version never held cuts
+    // no snapshot.
+    const snapshot = serviceFullPathSnapshot("jr-shimousa", "2026-11-26")!;
+    expect(snapshot.masterVersion).toBe("2026-11-26");
+    expect(snapshot.segments).toHaveLength(3);
+    expect(serviceFullPathSnapshot("tobu-noda", "2026-11-26")).toBeNull();
   });
 });
 
@@ -1036,6 +1095,103 @@ describe("stage 2 blocks (subtask 1421)", () => {
     ).toEqual(["003700", "003966", "003821", "003971", "003934"]);
   });
 
+  test("sectionsAreSameRide: the five restored sections duplicate their primary (subtask 1612)", () => {
+    // The four plain services: the same pair either way round is
+    // the same stretch, and the primary carries no direction to
+    // disagree with.
+    for (const [serviceId, from, to, other] of [
+      ["jr-chuo-rapid", "003606", "003766", "003634"],
+      ["jr-saikyo", "003700", "004135", "003390"],
+      ["rinkai", "004135", "004182", "003997"],
+      ["keio", "003821", "003971", "003934"],
+    ] as const) {
+      const primary = { fromStationId: from, toStationId: to, direction: null };
+      expect(sectionsAreSameRide(serviceId, primary, primary)).toBe(true);
+      expect(
+        sectionsAreSameRide(serviceId, primary, {
+          fromStationId: to,
+          toStationId: from,
+          direction: null,
+        }),
+      ).toBe(true);
+      // A different stretch on the same service is not the ride.
+      expect(
+        sectionsAreSameRide(serviceId, primary, {
+          fromStationId: from,
+          toStationId: other,
+          direction: null,
+        }),
+      ).toBe(false);
+    }
+    // The loop: a direction-less 大崎→目黒 takes the shorter way
+    // (outer, 1 step against 7), so it duplicates the outer
+    // addition but not the inner one.
+    expect(
+      resolveLoopSectionDirection("yamanote", "004135", "004072"),
+    ).toBe("outer");
+    const noDirection = {
+      fromStationId: "004135",
+      toStationId: "004072",
+      direction: null,
+    };
+    expect(
+      sectionsAreSameRide("yamanote", noDirection, {
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "outer",
+      }),
+    ).toBe(true);
+    expect(
+      sectionsAreSameRide("yamanote", noDirection, {
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "inner",
+      }),
+    ).toBe(false);
+    // The same arc travelled the other way round is the same
+    // ride; the complementary arc is not.
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "004072", direction: "outer" },
+        { fromStationId: "004072", toStationId: "004135", direction: "inner" },
+      ),
+    ).toBe(true);
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "004072", direction: "outer" },
+        { fromStationId: "004072", toStationId: "004135", direction: "outer" },
+      ),
+    ).toBe(false);
+    // 新宿→大崎 inner is the same arc as 大崎→新宿 outer.
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "003700", toStationId: "004135", direction: "inner" },
+        { fromStationId: "004135", toStationId: "003700", direction: "outer" },
+      ),
+    ).toBe(true);
+    // The tie breaks to outer: 品川→新宿 is 4 steps either way.
+    expect(
+      resolveLoopSectionDirection("yamanote", "004095", "003700"),
+    ).toBe("outer");
+    // Off a loop there is no direction to resolve; an endpoint
+    // the master does not list as an ordered station cannot be
+    // resolved on a loop either, so those compare as written.
+    expect(resolveLoopSectionDirection("keio", "003821", "003971")).toBeNull();
+    expect(
+      resolveLoopSectionDirection("yamanote", "004135", "999999"),
+    ).toBeNull();
+    expect(
+      sectionsAreSameRide(
+        "yamanote",
+        { fromStationId: "004135", toStationId: "999999", direction: null },
+        { fromStationId: "004135", toStationId: "999999", direction: "outer" },
+      ),
+    ).toBe(false);
+  });
+
   test("validateSectionEndpoints: the 京王新線 sections register (subtask 1574)", () => {
     // The four stations of the new service: any pair registers,
     // either way round (non-loop). The 2026-11-25 ride 新宿→幡ヶ谷
@@ -1076,6 +1232,25 @@ describe("stage 2 blocks (subtask 1421)", () => {
     expect(
       serviceOrderedStations("keio-new-line").map((s) => s.id),
     ).toEqual(["003700", "003764", "003791", "003806"]);
+  });
+
+  test("京王線 and 京王新線 pin their branches with via (subtask 1723)", () => {
+    /* The merged design (subtask 1613 as landed on main): only
+       the 新線 is pinned, through its two stations — the 本線
+       needs no pin, the graph's shortest path already takes its
+       strand. The snapshot carries the 新線 pin, so a stored
+       full ride replays the same branch. */
+    const keio = serviceById("keio")!;
+    expect(keio.segments[0]!.via).toBeUndefined();
+    const newLine = serviceById("keio-new-line")!;
+    expect(newLine.segments[0]!.via).toEqual([
+      { id: "003764", name: "初台", lng: 139.68827, lat: 35.68142 },
+      { id: "003791", name: "幡ヶ谷", lng: 139.67772, lat: 35.67676 },
+    ]);
+    expect(serviceFullPathSnapshot("keio")!.segments[0]!.via).toBeUndefined();
+    expect(
+      serviceFullPathSnapshot("keio-new-line")!.segments[0]!.via,
+    ).toEqual(newLine.segments[0]!.via);
   });
 
   test("validateSectionEndpoints: a single block may be ridden either way round a loop (review round 2, medium)", () => {

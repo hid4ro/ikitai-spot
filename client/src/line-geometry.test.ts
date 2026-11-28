@@ -28,6 +28,7 @@ import {
   paintedLegFeature,
   parseFullPathSnapshot,
   remainderLegFeature,
+  riddenLineIntervals,
   sectionBounds,
   servicePaintColor,
   serviceUnriddenLegs,
@@ -292,6 +293,61 @@ describe("real asset: service totals against railway kilometres", () => {
     expect(newLine.totalKm).toBeCloseTo(3.522, 2);
   });
 
+  test("an old 京王新線 snapshot without via still replays the 新線 branch (subtask 1723)", () => {
+    /* A full ride stored before via existed (subtask 1613) has no
+       via in its snapshot; replaying it took the graph's shortest
+       path and painted the 本線 branch. The branch is the
+       service's, so the replay fills the pin from the current
+       master — the snapshot still freezes the ridden range. The
+       snapshot arrives as stored JSON, so the test round-trips
+       it through the parser like a real row. */
+    const current = serviceFullPathSnapshot("keio-new-line")!;
+    const viaLess = {
+      ...current,
+      segments: current.segments.map(({ via, ...rest }) => rest),
+    };
+    const snapshot = parseFullPathSnapshot(JSON.stringify(viaLess))!;
+    const path = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      snapshot,
+    );
+    expect(path.missing).toEqual([]);
+    const coords = path.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.初台, S.幡ヶ谷]) {
+      expect(
+        coords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.05),
+      ).toBe(true);
+    }
+    expect(path.totalKm).toBeCloseTo(3.522, 2);
+    /* A snapshot that carries its own via replays the same path,
+       and a malformed (id-less) via falls back to the same fill. */
+    const withVia = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      current,
+    );
+    expect(withVia.legs.flatMap((leg) => leg.coords)).toEqual(coords);
+    const malformed = parseFullPathSnapshot(
+      JSON.stringify({
+        ...current,
+        segments: current.segments.map((s) => ({
+          ...s,
+          via: [
+            { lng: 139.68827, lat: 35.68142, name: "初台" },
+            { lng: 139.67772, lat: 35.67676, name: "幡ヶ谷" },
+          ],
+        })),
+      }),
+    )!;
+    const fromMalformed = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      malformed,
+    );
+    expect(fromMalformed.legs.flatMap((leg) => leg.coords)).toEqual(coords);
+  });
+
   test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
     /* 営業キロ （府中本町起点）: 北府中 1.7 + 北府中〜西浦和
        26.1 + 大宮支線 西浦和〜与野 4.9 + 東北線 与野〜大宮
@@ -326,13 +382,25 @@ describe("real asset: service totals against railway kilometres", () => {
   test("東武野田線 totals its timetable kilometres and clips 大宮→七光台 (subtask 1566)", () => {
     /* 営業キロ: 全線 大宮〜船橋 62.7 km、乗車区間
        大宮〜七光台 25.1 km（大宮起点：春日部 15.2 km、
-       七光台 25.1 km）。N02 形状ベースでも全長 61.76 km、
-       大宮→七光台 25.05 km と営業キロに近い。 */
+       七光台 25.1 km）。N02 形状ベースでも大宮→七光台
+       25.03 km と営業キロに近い。全線は柏で2分割した
+       (subtask 1611): the direct shortest path bypassed 柏
+       at a branch 390 m short of the station, so the path
+       now runs into 柏 and back out — the concatenated legs
+       are 62.42 km, and the distinct length (the spur counted
+       once) is 62.03 km. */
     const path = servicePath("tobu-noda");
     expect(path.missing).toEqual([]);
     expect(path.approximate).toBe(false);
     expect(path.totalKm).toBeGreaterThan(62.7 * 0.95);
     expect(path.totalKm).toBeLessThan(62.7 * 1.05);
+    expect(path.totalKm).toBeCloseTo(62.03, 1);
+    expect(path.arcKm).toBeCloseTo(62.42, 1);
+    /* The whole path runs through 柏 itself now, not past it. */
+    const pathCoords = path.legs.flatMap((leg) => leg.coords);
+    expect(
+      pathCoords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
+    ).toBe(true);
     const clip = clipServicePath(path, S.大宮, S.七光台)!;
     expect(clip).not.toBeNull();
     expect(clip.approximate).toBe(false);
@@ -347,6 +415,19 @@ describe("real asset: service totals against railway kilometres", () => {
     expect(
       coords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
     ).toBe(false);
+    /* The clips either side of 柏 both run through the station:
+       春日部→柏 ends there, 柏→船橋 starts there. */
+    for (const [from, to] of [
+      [S.春日部, S.柏],
+      [S.柏, S.船橋],
+    ] as const) {
+      const side = clipServicePath(path, from, to)!;
+      expect(side).not.toBeNull();
+      const sideCoords = side.legs.flatMap((leg) => leg.coords);
+      expect(
+        sideCoords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.5),
+      ).toBe(true);
+    }
   });
 
   test("しもうさ号 runs the branch down to 武蔵浦和 (subtask 1591)", () => {
@@ -686,6 +767,194 @@ describe("real asset: the subtask-1455 estimated sections", () => {
     expect(coverage.networkRiddenKm).toBeCloseTo(91.9, 0);
     expect(coverage.completeServiceIds).toEqual([]);
   });
+
+  test("a section duplicating the primary is one ride, not two (subtask 1612)", () => {
+    /* The five restored sections of subtask 1572 each duplicate
+       the row's migrated primary section, so every ride reached
+       the drawing twice — twice the legs (the repro measured
+       exactly 2x per service); the distance stayed right only
+       because the coverage merges ranges. The duplicate copy is
+       skipped: one interval, one set of legs, and the same
+       kilometres as the primary alone. The primary stays
+       canonical, so the Yamanote outer is kept (its
+       direction-less clip resolves to the same short arc). */
+    const cases = [
+      {
+        name: "JR中央線（快速）",
+        serviceId: "jr-chuo-rapid",
+        from: S.国分寺,
+        to: S.東京,
+        direction: null,
+      },
+      {
+        name: "JR埼京線",
+        serviceId: "jr-saikyo",
+        from: S.新宿,
+        to: S.大崎,
+        direction: null,
+      },
+      {
+        name: "りんかい線",
+        serviceId: "rinkai",
+        from: S.大崎,
+        to: S.品川シーサイド,
+        direction: null,
+      },
+      {
+        name: "京王線",
+        serviceId: "keio",
+        from: S.府中,
+        to: S.聖蹟桜ヶ丘,
+        direction: null,
+      },
+      {
+        name: "山手線",
+        serviceId: "yamanote",
+        from: S.大崎,
+        to: S.目黒,
+        direction: "outer" as const,
+      },
+    ];
+    const rowOf = (
+      entry: (typeof cases)[number],
+      withAdded: boolean,
+    ) => ({
+      name: entry.name,
+      serviceId: entry.serviceId,
+      serviceLinkSource: null,
+      recordedServiceId: entry.serviceId,
+      fromStationId: entry.from.id,
+      toStationId: entry.to.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections: withAdded
+        ? [
+            {
+              fromStationId: entry.from.id,
+              toStationId: entry.to.id,
+              direction: entry.direction,
+              blockId: null,
+              recordedServiceId: entry.serviceId,
+            },
+          ]
+        : [],
+    });
+    for (const entry of cases) {
+      const intervals = riddenLineIntervals(
+        rowOf(entry, true),
+        entry.serviceId,
+      );
+      expect(intervals).toHaveLength(1);
+      expect(intervals[0]).toMatchObject({
+        from: { id: entry.from.id },
+        to: { id: entry.to.id },
+      });
+    }
+    const duplicated = computeRiddenLineCoverage(
+      cases.map((entry) => rowOf(entry, true)),
+      GEOMETRIES,
+      597,
+    );
+    const primaryOnly = computeRiddenLineCoverage(
+      cases.map((entry) => rowOf(entry, false)),
+      GEOMETRIES,
+      597,
+    );
+    for (const entry of cases) {
+      expect(duplicated.perServiceLegs.get(entry.serviceId)!.legs).toEqual(
+        primaryOnly.perServiceLegs.get(entry.serviceId)!.legs,
+      );
+      expect(
+        duplicated.perService.get(entry.serviceId)!.riddenKm,
+      ).toBeCloseTo(
+        primaryOnly.perService.get(entry.serviceId)!.riddenKm,
+        9,
+      );
+    }
+    expect(duplicated.networkRiddenKm).toBeCloseTo(
+      primaryOnly.networkRiddenKm,
+      9,
+    );
+    expect(
+      [...duplicated.perKeyKm.entries()].sort(),
+    ).toEqual([...primaryOnly.perKeyKm.entries()].sort());
+  });
+
+  test("only the same stretch dedupes: other added sections still count (subtask 1612)", () => {
+    const yamanoteRow = (
+      sections: {
+        fromStationId: string;
+        toStationId: string;
+        direction: "inner" | "outer" | null;
+        blockId: string | null;
+        recordedServiceId: string;
+      }[],
+    ) => ({
+      name: "山手線",
+      serviceId: "yamanote",
+      serviceLinkSource: null,
+      recordedServiceId: "yamanote",
+      fromStationId: S.大崎.id,
+      toStationId: S.目黒.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections,
+    });
+    /* The long way round is a different ride from the primary's
+       short arc, and a bigger section containing the primary is
+       a different ride too — both still count as a second
+       interval. */
+    expect(
+      riddenLineIntervals(
+        yamanoteRow([
+          {
+            fromStationId: S.大崎.id,
+            toStationId: S.目黒.id,
+            direction: "inner",
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ]),
+        "yamanote",
+      ),
+    ).toHaveLength(2);
+    expect(
+      riddenLineIntervals(
+        yamanoteRow([
+          {
+            fromStationId: S.新宿.id,
+            toStationId: S.大崎.id,
+            direction: "inner",
+            blockId: null,
+            recordedServiceId: "yamanote",
+          },
+        ]),
+        "yamanote",
+      ),
+    ).toHaveLength(2);
+    /* The same stretch travelled the other way round is the
+       same ride on a plain service. */
+    const chuoRow = {
+      name: "JR中央線（快速）",
+      serviceId: "jr-chuo-rapid",
+      serviceLinkSource: null,
+      recordedServiceId: "jr-chuo-rapid",
+      fromStationId: S.国分寺.id,
+      toStationId: S.東京.id,
+      pathSnapshot: null as string | null,
+      rideState: "partial" as const,
+      sections: [
+        {
+          fromStationId: S.東京.id,
+          toStationId: S.国分寺.id,
+          direction: null,
+          blockId: null,
+          recordedServiceId: "jr-chuo-rapid",
+        },
+      ],
+    };
+    expect(riddenLineIntervals(chuoRow, "jr-chuo-rapid")).toHaveLength(1);
+  });
 });
 
 describe("servicePaintColor: paint-unified services (subtask 1680)", () => {
@@ -1000,6 +1269,24 @@ describe("coverage: dedup and per-service isolation", () => {
     expect(service.complete).toBe(true);
     expect(service.riddenKm).toBeCloseTo(service.totalKm, 1);
     expect(coverage.completeServiceIds).toContain("keio");
+  });
+
+  test("a full 東武野田線 ride counts the 柏 spur once, not twice (subtask 1611)", () => {
+    /* The path runs into 柏 and back out along the same spur,
+       so the concatenated legs are 62.42 km — but the spur is
+       one stretch of line, and the totals must count it once:
+       the distinct 62.03 km. The same goes for the per-key
+       total: the 野田線 key must not carry 62.42 km. */
+    const coverage = coverageFor(new Map(), ["tobu-noda"]);
+    const service = coverage.perService.get("tobu-noda")!;
+    expect(service.complete).toBe(true);
+    expect(service.totalKm).toBeCloseTo(62.03, 1);
+    expect(service.riddenKm).toBeCloseTo(62.03, 1);
+    expect(service.riddenKm).toBeLessThan(62.42 - 0.1);
+    expect(
+      coverage.perKeyKm.get("野田線|東武鉄道"),
+    ).toBeCloseTo(62.03, 1);
+    expect(coverage.completeServiceIds).toContain("tobu-noda");
   });
 
   test("sections covering a whole service complete it without a full ride", () => {
@@ -2205,19 +2492,46 @@ describe("ghostLineLegs: the 路線 tab's ghost, edge by edge (subtask 1456, rev
     expect(ghostBounds(coverage, KEIO_KEY)!.minLng).toBeLessThan(139.35);
   });
 
-  test("a full Keio New Line ride adds its own branch beyond a full Keio ride (subtask 1613)", () => {
-    /* Both services share the 京王線|京王電鉄 key and the
-       幡ヶ谷→笹塚 tail, but their 新宿〜幡ヶ谷 branches differ:
-       the key total is 37.65 + 3.52 − shared tail ≈ 40.53, and
-       the ghost shrinks to the shape's off-spine slivers
-       (0.15 km) — no double-counting, and the branch the
-       review asked for is no longer swallowed. */
-    const coverage = coverageFor(
-      new Map(),
-      new Set(["keio", "keio-new-line"]),
+  test("a full Keio ride and a full Keio New Line ride add up (subtask 1613)", () => {
+    /* The review's fix (Codex review of 1574): the two services
+       share the 京王線|京王電鉄 key but take different branches
+       — 本線 via the straight strand, 新線 via 初台・幡ヶ谷 —
+       so each full ride paints only its own branch, and riding
+       both adds the second branch (minus the edges they
+       genuinely share west of the merge). Before the fix both
+       services resolved to the same branch and the key total
+       stayed 37.65 either way. Both paths are in the map here
+       so the unridden service's perService entry can be read
+       too (a service with no intervals and no full row reads
+       riddenKm 0 / not complete in either version — the proof
+       of the fix is the key totals, not that entry). */
+    const paths = new Map(
+      ["keio", "keio-new-line"].map((id) => [id, servicePath(id)]),
     );
-    expect(coverage.perKeyKm.get(KEIO_KEY)).toBeCloseTo(40.53, 1);
-    expect(ghostKm(coverage, KEIO_KEY)).toBeCloseTo(0.15, 1);
+    const coverageForBoth = (full: string[]) =>
+      computeLineCoverage(new Map(), new Set(full), paths, GEOMETRIES, 597);
+    // 本線のみ: 37.65 km painted, the 新線 strand (2.93 km)
+    // stays ghost, and the 新線 service is not complete.
+    const keioOnly = coverageForBoth(["keio"]);
+    expect(keioOnly.perKeyKm.get(KEIO_KEY)).toBeCloseTo(37.65, 1);
+    expect(ghostKm(keioOnly, KEIO_KEY)).toBeCloseTo(2.93, 1);
+    expect(keioOnly.perService.get("keio")!.complete).toBe(true);
+    expect(keioOnly.perService.get("keio-new-line")!.complete).toBe(false);
+    // 新線のみ: 3.52 km painted, the 本線 strand stays ghost.
+    const newOnly = coverageForBoth(["keio-new-line"]);
+    expect(newOnly.perKeyKm.get(KEIO_KEY)).toBeCloseTo(3.52, 1);
+    expect(ghostKm(newOnly, KEIO_KEY)).toBeCloseTo(37.15, 1);
+    expect(newOnly.perService.get("keio-new-line")!.complete).toBe(true);
+    expect(newOnly.perService.get("keio")!.complete).toBe(false);
+    // 両方: each branch is added once, only the genuinely
+    // shared edges (west of the merge) are deduped: 37.65 +
+    // 3.52 − 0.65 shared ≈ 40.53, and the ghost shrinks to
+    // the endpoint slivers.
+    const both = coverageForBoth(["keio", "keio-new-line"]);
+    expect(both.perKeyKm.get(KEIO_KEY)).toBeCloseTo(40.53, 1);
+    expect(ghostKm(both, KEIO_KEY)).toBeCloseTo(0.15, 1);
+    expect(both.perService.get("keio")!.complete).toBe(true);
+    expect(both.perService.get("keio-new-line")!.complete).toBe(true);
   });
 
   test("a partial Keio ride keeps the rest of the line as ghost", () => {

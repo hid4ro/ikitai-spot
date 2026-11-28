@@ -15,6 +15,7 @@ import {
   isRiddenServiceLinkReviewable,
   recordedSectionFitsService,
   resolveRiddenService,
+  sectionsAreSameRide,
   serviceById,
   serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
@@ -102,9 +103,9 @@ type RideFields = {
      high).
    - full: the service and a master version that reproduces its
      range are required — and the version must be one the master
-     actually knows (the current version or the frozen migration
-     version); a blank or made-up version ("bogus") is rejected,
-     not stored. The supplied version is trimmed before both the
+     actually knows (the current version or a past version in
+     MASTER_VERSION_HISTORY); a blank or made-up version
+     ("bogus") is rejected, not stored. The supplied version is trimmed before both the
      check and the save, so a padded version (" 2026-11-24 ") is
      stored as the version it validated as, never with its spaces
      (review round 3, low) — and a whitespace-only version still
@@ -243,17 +244,16 @@ export function resolveRideFields(
       `resolveRideFields: full ride for "${name}" names master version ${masterVersion}, which did not contain "${service.id}"`,
     );
   }
-  /* The snapshot is cut from the current master, so it is stored
-     only when the ride was recorded at the current version. A
-     full ride recorded at the frozen migration version keeps
-     null: its range is the current master's range for that
-     service in practice, and the client falls back to the
-     current master when no snapshot is stored — a snapshot cut
-     from the wrong version would be worse than none. */
-  const snapshot =
-    masterVersion === SERVICE_MASTER_VERSION
-      ? serviceFullPathSnapshot(service.id)
-      : null;
+  /* The snapshot is cut from the master at the ride's own
+     version (serviceFullPathSnapshot, which reads the segments
+     that version held): a full ride recorded at an older master
+     version keeps the range that version contained, and the
+     client paints it from the snapshot instead of falling back
+     to the current master — which may have extended the service
+     since (subtask 1611, review of 1566: a snapshot cut from
+     the wrong version would be worse than none, so the version
+     the snapshot is cut at is the version the ride names). */
+  const snapshot = serviceFullPathSnapshot(service.id, masterVersion);
   return {
     ...link,
     recordedServiceId: service.id,
@@ -2075,7 +2075,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID if the existing section has none.",
+      "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID if the existing section has none. A section that duplicates the row's primary section is refused instead (subtask 1612): the same ride is already recorded, and adding it again would send it to the drawing twice.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -2150,6 +2150,42 @@ export const Actions = {
             `addRiddenSection: block "${blockId}" runs ${block.direction}, not ${direction}`,
           );
         }
+      }
+      /* A section the row already carries as its primary section
+         is the same ride, not a new one (subtask 1612): the five
+         restored sections of subtask 1572 were added exactly
+         this way, so each ride reached the drawing twice. Refuse
+         it here — the primary stays the one entry, and the
+         caller learns the ride is already recorded — instead of
+         silently creating the duplicate (an added-added duplicate
+         below stays idempotent, since it already has a section
+         to return). The check mirrors what the drawing keeps:
+         only a primary that actually fits this service counts,
+         so a relinked row can still gain the section as its own
+         entry. */
+      if (
+        normalizeRideState(line.rideState) === "partial" &&
+        line.fromStationId &&
+        line.toStationId &&
+        recordedSectionFitsService(service.id, {
+          fromStationId: line.fromStationId,
+          toStationId: line.toStationId,
+          direction: null,
+          recordedServiceId: line.recordedServiceId,
+        }) &&
+        sectionsAreSameRide(
+          service.id,
+          {
+            fromStationId: line.fromStationId,
+            toStationId: line.toStationId,
+            direction: null,
+          },
+          { fromStationId, toStationId, direction },
+        )
+      ) {
+        throw new Error(
+          `addRiddenSection: "${line.name}" already covers ${fromStationId}→${toStationId} as its primary section — the same ride is already recorded`,
+        );
       }
       // Station names come from the master when the caller omits
       // them (the block list always sends them; a hand-entered

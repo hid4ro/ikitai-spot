@@ -42,6 +42,8 @@ import {
   SERVICE_MASTER,
   blocksForService,
   recordedSectionFitsService,
+  resolveLoopSectionDirection,
+  sectionsAreSameRide,
   serviceById,
   serviceIsLoop,
   serviceOrderedStations,
@@ -664,7 +666,19 @@ export const APPROXIMATE_PROJECTION_M = 300;
 export type ServicePath = {
   serviceId: string;
   legs: PathLeg[];
+  /* The distinct length of the path: the union of its legs'
+     edge spans, so an edge the path traverses twice counts
+     once — 東武野田線 runs into 柏 and back out along the same
+     spur (subtask 1611), and that spur is one stretch of line,
+     not two. This is the length the map paints, the length a
+     ride is measured against, and the length the railway
+     kilometres are compared with. */
   totalKm: number;
+  /* The concatenated length of the legs in running order — the
+     frame the arc positions (projectOnServicePath,
+     sliceServicePath) run in. Longer than totalKm exactly when
+     the path re-traverses an edge. */
+  arcKm: number;
   approximate: boolean;
   /* Segments whose shape is missing or unjoinable (formal-line
      key + why), so the total is a lower bound. */
@@ -675,7 +689,14 @@ export type ServicePath = {
 /* A service's whole path: its segments' shortest paths, in
    running order. `snapshot` (a full ride's stored path) overrides
    the current master, so a past full ride reproduces the range it
-   was recorded at. */
+   was recorded at. totalKm is the DISTINCT length of the legs'
+   edge spans (EdgeCoverage union), not their sum: a service
+   whose segments re-traverse an edge — 東武野田線's spur into
+   柏, entered and left again (subtask 1611) — would otherwise
+   count that edge twice, and sections tiling the service could
+   never complete it (their union is the distinct length). The
+   concatenated sum is kept as arcKm, the frame the arc
+   positions run in. */
 /* A via list cut from a stored snapshot is only trusted when
    every entry is a well-formed station ref; a malformed one is
    dropped (the plain shortest route stands in) rather than
@@ -704,14 +725,33 @@ export function buildServicePath(
   const missing: string[] = [];
   let approximate = false;
   let maxProjM = 0;
+  /* A snapshot's segments are replayed as recorded — except for
+     the branch pin (subtask 1723): a snapshot cut before via
+     existed, or with a malformed via, carries no usable pin, so
+     a 京王新線 full ride replayed the graph's shortest path and
+     painted the 本線 branch. The branch is the service's, not
+     the snapshot's, so the pin is filled from the current master
+     segment for the same stretch. The snapshot still freezes the
+     ridden range (from/to); only the branch routing comes from
+     the master. */
   const segments = snapshot
-    ? snapshot.segments.map((s) => ({
-        formalLineKey: s.formalLineKey,
-        from: s.from,
-        to: s.to,
-        approximate: s.approximate,
-        ...(isStationRefList(s.via) ? { via: s.via } : {}),
-      }))
+    ? snapshot.segments.map((s) => {
+        const via = isStationRefList(s.via)
+          ? s.via
+          : service.segments.find(
+              (m) =>
+                m.formalLineKey === s.formalLineKey &&
+                m.from.id === s.from.id &&
+                m.to.id === s.to.id,
+            )?.via;
+        return {
+          formalLineKey: s.formalLineKey,
+          from: s.from,
+          to: s.to,
+          approximate: s.approximate,
+          ...(via ? { via } : {}),
+        };
+      })
     : service.segments;
   for (const segment of segments) {
     if (segment.approximate) approximate = true;
@@ -755,10 +795,17 @@ export function buildServicePath(
     maxProjM = Math.max(maxProjM, sectionMaxProjM);
     legs.push(...sectionLegs);
   }
+  const arcKm = legs.reduce((sum, leg) => sum + leg.lengthKm, 0);
+  /* Distinct length: the union of the legs' edge spans, so a
+     re-traversed edge counts once (EdgeCoverage is defined
+     below; it is only used here at call time). */
+  const distinct = new EdgeCoverage();
+  distinct.addLegs(legs);
   return {
     serviceId: service.id,
     legs,
-    totalKm: legs.reduce((sum, leg) => sum + leg.lengthKm, 0),
+    totalKm: distinct.totalKilometres(geometries),
+    arcKm,
     approximate,
     missing,
     maxProjM,
@@ -811,25 +858,18 @@ export function clipServicePath(
      path) flips to the long way round: 大崎→田端 drew via
      渋谷・新宿 while the picker marked the 東京 side, and
      品川→新宿 drew via 東京 while the picker marked b1・b2.
-     Endpoints the master does not list keep the old behaviour
-     (a migrated section like 大崎→目黒, whose far end is no
-     ordered station). */
+     Endpoints the master does not list as ordered stations
+     keep the old behaviour (the resolver returns null for
+     them). The rule lives in the shared master
+     (resolveLoopSectionDirection) so the same-ride check
+     (subtask 1612) resolves the same side. */
   let resolvedDirection = direction ?? null;
   if (isLoop && !resolvedDirection) {
-    const ordered = serviceOrderedStations(path.serviceId);
-    const n = ordered.length - 1;
-    const indexOf = (station: StationRef): number => {
-      const idx = ordered.findIndex((s) => s.id === station.id);
-      if (idx < 0) return -1;
-      return idx === ordered.length - 1 ? 0 : idx;
-    };
-    const fromIdx = indexOf(from);
-    const toIdx = indexOf(to);
-    if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx && n > 0) {
-      const forward = (((toIdx - fromIdx) % n) + n) % n;
-      const backward = (((fromIdx - toIdx) % n) + n) % n;
-      resolvedDirection = forward <= backward ? "outer" : "inner";
-    }
+    resolvedDirection = resolveLoopSectionDirection(
+      path.serviceId,
+      from.id,
+      to.id,
+    );
   }
   /* Arc positions of both stations on the oriented path. */
   const oriented =
@@ -852,14 +892,14 @@ export function clipServicePath(
   let fromKm = fromArc.arcKm;
   let toKm = toArc.arcKm;
   if (fromKm < END_SNAP_KM) fromKm = 0;
-  if (fromKm > oriented.totalKm - END_SNAP_KM) fromKm = oriented.totalKm;
+  if (fromKm > oriented.arcKm - END_SNAP_KM) fromKm = oriented.arcKm;
   if (toKm < END_SNAP_KM) toKm = 0;
-  if (toKm > oriented.totalKm - END_SNAP_KM) toKm = oriented.totalKm;
+  if (toKm > oriented.arcKm - END_SNAP_KM) toKm = oriented.arcKm;
   let startKm = fromKm;
   let endKm = toKm;
   if (isLoop && resolvedDirection) {
     /* Running order on the oriented path; wrap past the seam. */
-    if (endKm <= startKm) endKm += oriented.totalKm;
+    if (endKm <= startKm) endKm += oriented.arcKm;
   } else if (endKm < startKm) {
     /* A section is undirected off a loop: take it in running
        order. The same branch covers a loop section whose
@@ -938,7 +978,10 @@ function sliceServicePath(
   startKm: number,
   endKm: number,
 ): PathLeg[] {
-  const total = path.totalKm;
+  /* Arc positions run in the concatenated-leg frame (arcKm),
+     not the distinct total: on a path that re-traverses an
+     edge, the same edge span sits at two arc positions. */
+  const total = path.arcKm;
   if (total <= 0) return [];
   /* Unwrap the range into [0, total) pieces. */
   const ranges: [number, number][] = [];
@@ -1325,18 +1368,36 @@ type RecordedRiddenLine = RiddenServiceLink & {
 
 /* The intervals attributable to this link, using the same route
    evidence as link confirmation. Both the map and the block picker
-   use these intervals. */
+   use these intervals. One entry per ride (subtask 1612): an
+   added section that duplicates the row's primary section — the
+   five restored sections of subtask 1572 are all such duplicates —
+   used to reach the drawing a second time, painting every leg
+   twice (the distance stayed right only because the coverage
+   merges ranges). The primary is the ride record itself, so it
+   stays canonical and the duplicate copy is skipped; the same
+   holds for two added sections covering one stretch. */
 export function riddenLineIntervals(
   row: RecordedRiddenLine,
   serviceId: string,
 ): RideInterval[] {
   const intervals: RideInterval[] = [];
+  const kept: RecordedSection[] = [];
   const addInterval = (section: RecordedSection) => {
     if (!recordedSectionFitsService(serviceId, section)) return;
+    if (
+      kept.some((existing) =>
+        sectionsAreSameRide(serviceId, existing, section),
+      )
+    ) {
+      return;
+    }
     const from = stationRefById(section.fromStationId);
     const to = stationRefById(section.toStationId);
     const { direction } = section;
-    if (from && to) intervals.push({ serviceId, from, to, direction });
+    if (from && to) {
+      kept.push(section);
+      intervals.push({ serviceId, from, to, direction });
+    }
   };
   if (row.rideState === "partial" && row.fromStationId && row.toStationId) {
     addInterval({

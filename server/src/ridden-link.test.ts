@@ -169,6 +169,83 @@ test("confirming a quarantined link records it explicit and lifts the quarantine
     VALUES ('中央線（各駅停車）', '2026-11-23', 'jr-chuo-rapid', 'partial', '003700', '003634', 'historical-master', 0)`));
 });
 
+test("addRiddenSection refuses a section that duplicates the row's primary section (subtask 1612)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      recordedServiceId: "jr-chuo-rapid",
+      rideState: "partial",
+      fromStationId: "003606",
+      toStationId: "003766",
+    });
+    // Exactly the primary, and the same stretch travelled the
+    // other way round: the same ride, already recorded. (The
+    // five restored sections of subtask 1572 were added exactly
+    // this way, so each ride reached the drawing twice.)
+    for (const [fromStationId, toStationId] of [
+      ["003606", "003766"],
+      ["003766", "003606"],
+    ] as const) {
+      await expect(
+        Actions.addRiddenSection.handler(ctx, {
+          riddenLineId: before.id,
+          fromStationId,
+          toStationId,
+        }),
+      ).rejects.toThrow(/already covers .* as its primary section/);
+    }
+    // A different section on the same row still registers.
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003766",
+      toStationId: "003700",
+      blockId: "jr-chuo-rapid/b1",
+    });
+    expect(added.created).toBe(true);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('JR中央線（快速）', '2026-11-15', 'jr-chuo-rapid', 'partial', '003606', '003766', '2026-11-24', 0)`));
+});
+
+test("addRiddenSection refuses the outer duplicate of a loop primary but keeps the inner way (subtask 1612)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "yamanote",
+      recordedServiceId: "yamanote",
+      rideState: "partial",
+      fromStationId: "004135",
+      toStationId: "004072",
+    });
+    // The primary carries no direction, and its side is the
+    // shorter way (outer) — so the outer addition is the same
+    // ride, while the inner way round is a different ride and
+    // still registers.
+    await expect(
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "outer",
+      }),
+    ).rejects.toThrow(/already covers .* as its primary section/);
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "004135",
+      toStationId: "004072",
+      direction: "inner",
+    });
+    expect(added.created).toBe(true);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('山手線', '2026-11-24', 'yamanote', 'partial', '004135', '004072', '2026-11-24', 0)`));
+});
+
 test("confirmation can relink to a different service", async () => {
   await withLedger(async (_, ctx) => {
     const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
