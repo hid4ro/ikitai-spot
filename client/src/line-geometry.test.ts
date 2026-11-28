@@ -348,6 +348,93 @@ describe("real asset: service totals against railway kilometres", () => {
     expect(fromMalformed.legs.flatMap((leg) => leg.coords)).toEqual(coords);
   });
 
+  test("a 京王新線 snapshot with an empty via still replays the 新線 branch (subtask 1729)", () => {
+    /* An empty via array passes every(), so it looks well-formed —
+       but it pins nothing, and replaying it took the 本線 branch
+       instead of the 新線 one. The replay treats an empty via
+       like a missing one and fills the pin from the master. The
+       two branches are almost the same length, so the test tells
+       them apart by the stations, not the total. */
+    const current = serviceFullPathSnapshot("keio-new-line")!;
+    const snapshot = parseFullPathSnapshot(
+      JSON.stringify({
+        ...current,
+        segments: current.segments.map((s) => ({ ...s, via: [] })),
+      }),
+    )!;
+    const path = buildServicePath(
+      serviceById("keio-new-line")!,
+      GEOMETRIES,
+      snapshot,
+    );
+    expect(path.missing).toEqual([]);
+    expect(path.totalKm).toBeCloseTo(3.522, 2);
+    const coords = path.legs.flatMap((leg) => leg.coords);
+    for (const via of [S.初台, S.幡ヶ谷]) {
+      expect(
+        coords.some((p) => haversineKm(p, [via.lng, via.lat]) < 0.05),
+      ).toBe(true);
+    }
+  });
+
+  test("a clip ending at 柏 covers the whole approach leg (subtask 1729)", () => {
+    /* 柏 sits mid-edge (T=0.505 of a 136 m edge), and the route
+       into it enters from the edge's far end — the last leg's
+       coords start at the station while the ride only reaches it
+       at the leg's end. Before the fix the clip stopped at the
+       leg's start, 67 m short, and left a zero-length stub; the
+       67 m approach stayed unridden. */
+    const path = servicePath("tobu-noda");
+    const clip = clipServicePath(path, S.大宮, S.柏)!;
+    expect(clip).not.toBeNull();
+    expect(clip.approximate).toBe(false);
+    expect(clip.lengthKm).toBeCloseTo(42.73, 1);
+    /* The last leg is the whole 67 m approach span, not a stub. */
+    const last = clip.legs[clip.legs.length - 1]!;
+    expect(last.edge).toBe("edge:43");
+    expect(last.lengthKm).toBeCloseTo(0.067, 2);
+    expect(last.fromT).toBeCloseTo(0.505, 2);
+    expect(last.toT).toBeCloseTo(1, 2);
+    /* And the other side starts at the station, 19.70 km on. */
+    const other = clipServicePath(path, S.柏, S.船橋)!;
+    expect(other.lengthKm).toBeCloseTo(19.7, 1);
+  });
+
+  test("an old 東武野田線 snapshot with one 大宮→船橋 segment still runs through 柏 (subtask 1729)", () => {
+    /* The snapshot bd6bb43 cut has a single 大宮→船橋 segment —
+       the master split the stretch at 柏 after it was cut, so the
+       replay's endpoint match found nothing and the shortest path
+       bypassed the station, calling 61.64 km a full ride. The
+       replay expands the old segment onto the current master's
+       chain, keeping the recorded endpoints. */
+    const current = serviceFullPathSnapshot("tobu-noda")!;
+    const snapshot = parseFullPathSnapshot(
+      JSON.stringify({
+        ...current,
+        segments: [
+          {
+            formalLineKey: "野田線|東武鉄道",
+            from: S.大宮,
+            to: S.船橋,
+          },
+        ],
+      }),
+    )!;
+    const path = buildServicePath(
+      serviceById("tobu-noda")!,
+      GEOMETRIES,
+      snapshot,
+    );
+    expect(path.missing).toEqual([]);
+    expect(path.approximate).toBe(false);
+    expect(path.totalKm).toBeCloseTo(62.03, 1);
+    expect(path.arcKm).toBeCloseTo(62.42, 1);
+    const coords = path.legs.flatMap((leg) => leg.coords);
+    expect(
+      coords.some((p) => haversineKm(p, [S.柏.lng, S.柏.lat]) < 0.05),
+    ).toBe(true);
+  });
+
   test("むさしの号 totals its timetable kilometres and clips 北府中→大宮 (subtask 1590)", () => {
     /* 営業キロ （府中本町起点）: 北府中 1.7 + 北府中〜西浦和
        26.1 + 大宮支線 西浦和〜与野 4.9 + 東北線 与野〜大宮
@@ -603,11 +690,18 @@ describe("real asset: the migrated sections", () => {
         .flatMap((leg) => leg.coords)
         .some((p) => haversineKm(p, [S.渋谷.lng, S.渋谷.lat]) < 0.5),
     ).toBe(true);
-    /* 品川→池袋 is unchanged by the fix: the step count
-       already tips it to the 東京 side (3 steps against 4),
-       and the clip stays on that side (~18.9 km). */
+    /* 品川→池袋 stays on the 東京 side (the step count tips
+       it there, 3 steps against 4), and the clip is 19.03 km,
+       not 18.93: 池袋 sits near the traversal start of a reversed
+       leg (edge:5, leg32), and the old arc math placed it at the
+       leg's far end, 0.097 km too far along the path. The
+       corrected arc (subtask 1729) moves 池袋 to its true
+       traversal position; the 東京→池袋 timetable check (about
+       12.0 km) is within shape tolerance of both values, so the
+       geometry — the station is 18 m from the leg's traversal
+       start, ~100 m from its end — is the deciding evidence. */
     const shinagawaIkebukuro = clipServicePath(path, S.品川, S.池袋)!;
-    expect(shinagawaIkebukuro.lengthKm).toBeCloseTo(18.93, 1);
+    expect(shinagawaIkebukuro.lengthKm).toBeCloseTo(19.03, 1);
   });
 });
 

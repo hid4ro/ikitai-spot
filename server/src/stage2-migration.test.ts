@@ -131,8 +131,16 @@ describe("migration 0015 (recorded service)", () => {
     const restoredRides = [
       ["JR中央線（快速）", "2026-11-15", "jr-chuo-rapid", 30.21],
       ["JR総武快速線", "2026-11-15", "jr-sobu-rapid", 38.98],
-      ["JR総武本線", "2026-11-16", "jr-sobu-local", 15.66],
-      ["京王線", "2026-11-22", "keio", 4.40],
+      /* JR総武本線 is 15.58, not 15.66: one endpoint of the
+         佐倉→千葉 ride sits on a reversed leg, and the corrected
+         arc math (subtask 1729) moves it to its true traversal
+         position, 0.08 km earlier along the path. */
+      ["JR総武本線", "2026-11-16", "jr-sobu-local", 15.58],
+      /* 京王線 is 4.42, not 4.40: 聖蹟桜ヶ丘 sits on a reversed
+         leg (edge:60, leg51), 0.38 m from the track, and the
+         corrected arc math (subtask 1729) moves it 0.016 km to
+         its true traversal position. */
+      ["京王線", "2026-11-22", "keio", 4.42],
       ["JR埼京線", "2026-11-24", "jr-saikyo", 8.58],
       ["りんかい線", "2026-11-24", "rinkai", 3.31],
       ["山手線", "2026-11-24", "yamanote", 1.85],

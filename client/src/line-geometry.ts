@@ -52,6 +52,7 @@ import {
   type FullPathSnapshot,
   type RiddenServiceLink,
   type ServiceMasterEntry,
+  type ServiceSegment,
   type StationRef,
 } from "../../shared/service-master";
 import type { GeoJsonLineGeometry } from "./geojson";
@@ -492,6 +493,19 @@ export type PathLeg = {
   toT: number;
   coords: LngLat[];
   lengthKm: number;
+  /* True when the path traverses this leg against the edge's own
+     order: the coords stay in the edge's canonical order
+     (coords[0] is at fromT), but the path runs from coords[-1]
+     to coords[0]. fromT/toT stay in the edge frame (ascending),
+     so coverage unions and the drawing are unaffected — only the
+     arc math (projectOnServicePath, sliceServicePath) reads this
+     flag, to place a station at the right end of the leg. The
+     case that forced it (subtask 1729, review of 1726): 東武野田線
+     into 柏 — the station sits mid-edge (T=0.505), the route
+     enters from the far end, and the last leg's coords start at
+     the station while the ride only reaches it at the leg's end,
+     so 大宮→柏 came out 67 m short. */
+  reversed?: boolean;
 };
 
 /* The shortest path between two station points on one formal
@@ -517,6 +531,10 @@ export function graphSectionLegs(
       edge,
       Math.min(from.t, to.t),
       Math.max(from.t, to.t),
+      /* Traversal runs from the `from` projection to the `to`
+         one; when it runs against the edge's order the leg is
+         marked reversed (subtask 1729). */
+      from.t > to.t,
     );
     return {
       legs,
@@ -552,23 +570,34 @@ export function graphSectionLegs(
       const legs: PathLeg[] = [];
       /* The partial first edge, from the projection to the entry
          node (or the whole edge when the entry node is its far
-         end — the slice handles both directions). */
+         end — the slice handles both directions). Entering via
+         the edge's a-end runs the partial against the edge's
+         order, so the leg is marked reversed. */
       const first = sliceEdge(
         graph.key,
         edgeA,
         entry.node === edgeA.a ? from.t : from.t,
         entry.node === edgeA.a ? 0 : 1,
+        entry.node === edgeA.a,
       );
       legs.push(...first);
-      for (const edgeId of path.edges) {
-        const edge = graph.edges[edgeId]!;
-        legs.push(...sliceEdge(graph.key, edge, 0, 1));
+      for (let i = 0; i < path.edges.length; i++) {
+        const edge = graph.edges[path.edges[i]!]!;
+        /* The hop runs nodes[i] → nodes[i+1]: from the edge's
+           b-end it runs against the edge's order. */
+        legs.push(
+          ...sliceEdge(graph.key, edge, 0, 1, path.nodes[i] === edge.b),
+        );
       }
       const last = sliceEdge(
         graph.key,
         edgeB,
         exit.node === edgeB.a ? 0 : to.t,
         exit.node === edgeB.a ? to.t : 1,
+        /* Leaving via the edge's b-end runs the partial from
+           the far end back to the projection — against the
+           edge's order. */
+        exit.node === edgeB.b,
       );
       legs.push(...last);
       best = { legs, lengthKm: totalKm };
@@ -586,6 +615,7 @@ function sliceEdge(
   edge: GraphEdge,
   fromT: number,
   toT: number,
+  reversed = false,
 ): PathLeg[] {
   const lo = Math.min(fromT, toT);
   const hi = Math.max(fromT, toT);
@@ -600,6 +630,7 @@ function sliceEdge(
       toT: hi,
       coords,
       lengthKm: polylineLengthKm(coords),
+      ...(reversed ? { reversed: true as const } : {}),
     },
   ];
 }
@@ -716,6 +747,34 @@ function isStationRefList(value: unknown): value is StationRef[] {
   );
 }
 
+/* The current master's segments chaining one formal line from
+   `fromId` to `toId`, end to end — the route a snapshot segment
+   spans when the master split its stretch after the snapshot was
+   cut. Null when the stretch is a single master segment already
+   (the caller handles the exact match), when the chain breaks,
+   forks, or loops back on itself. */
+function masterChainFor(
+  service: ServiceMasterEntry,
+  fromId: string,
+  toId: string,
+  formalLineKey: string,
+): readonly ServiceSegment[] | null {
+  const chain: ServiceSegment[] = [];
+  const seen = new Set<string>();
+  let at = fromId;
+  while (at !== toId) {
+    if (seen.has(at)) return null;
+    seen.add(at);
+    const next = service.segments.filter(
+      (m) => m.formalLineKey === formalLineKey && m.from.id === at,
+    );
+    if (next.length !== 1) return null;
+    chain.push(next[0]!);
+    at = next[0]!.to.id;
+  }
+  return chain.length >= 2 ? chain : null;
+}
+
 export function buildServicePath(
   service: ServiceMasterEntry,
   geometries: LineGeometryMap,
@@ -726,31 +785,74 @@ export function buildServicePath(
   let approximate = false;
   let maxProjM = 0;
   /* A snapshot's segments are replayed as recorded — except for
-     the branch pin (subtask 1723): a snapshot cut before via
-     existed, or with a malformed via, carries no usable pin, so
-     a 京王新線 full ride replayed the graph's shortest path and
-     painted the 本線 branch. The branch is the service's, not
-     the snapshot's, so the pin is filled from the current master
-     segment for the same stretch. The snapshot still freezes the
-     ridden range (from/to); only the branch routing comes from
-     the master. */
+     the branch pin (subtask 1723) and the split stretch (subtask
+     1729): a snapshot cut before via existed, with a malformed
+     via, or with an EMPTY via (an empty array passes every(), so
+     it pins nothing and a 京王新線 full ride replayed the 本線
+     branch) carries no usable pin, so the pin is filled from the
+     current master segment for the same stretch; and a snapshot
+     segment the master has since split (東武野田線 was one
+     大宮→船橋 segment when bd6bb43 cut it, two at 柏 now) is
+     replayed as the current master's chain for the same stretch,
+     so the old ride keeps its recorded endpoints and still runs
+     through the new intermediate station. The snapshot still
+     freezes the ridden range (from/to); only the branch routing
+     comes from the master. */
   const segments = snapshot
-    ? snapshot.segments.map((s) => {
-        const via = isStationRefList(s.via)
-          ? s.via
-          : service.segments.find(
-              (m) =>
-                m.formalLineKey === s.formalLineKey &&
-                m.from.id === s.from.id &&
-                m.to.id === s.to.id,
-            )?.via;
-        return {
-          formalLineKey: s.formalLineKey,
-          from: s.from,
-          to: s.to,
-          approximate: s.approximate,
-          ...(via ? { via } : {}),
-        };
+    ? snapshot.segments.flatMap((s) => {
+        if (isStationRefList(s.via) && s.via.length > 0) {
+          return [
+            {
+              formalLineKey: s.formalLineKey,
+              from: s.from,
+              to: s.to,
+              approximate: s.approximate,
+              via: s.via,
+            },
+          ];
+        }
+        const exact = service.segments.find(
+          (m) =>
+            m.formalLineKey === s.formalLineKey &&
+            m.from.id === s.from.id &&
+            m.to.id === s.to.id,
+        );
+        if (exact) {
+          return [
+            {
+              formalLineKey: s.formalLineKey,
+              from: s.from,
+              to: s.to,
+              approximate: s.approximate,
+              ...(exact.via?.length ? { via: exact.via } : {}),
+            },
+          ];
+        }
+        /* No exact master segment: try the chain. A loop is left
+           alone — its side is the segment's direction, and a
+           split chain cannot inherit it safely. An ambiguous or
+           broken chain falls back to the snapshot segment as
+           recorded. */
+        const chain =
+          !serviceIsLoop(service.id) &&
+          masterChainFor(service, s.from.id, s.to.id, s.formalLineKey);
+        if (chain) {
+          return chain.map((piece) => ({
+            formalLineKey: piece.formalLineKey,
+            from: piece.from,
+            to: piece.to,
+            approximate: s.approximate,
+            ...(piece.via?.length ? { via: piece.via } : {}),
+          }));
+        }
+        return [
+          {
+            formalLineKey: s.formalLineKey,
+            from: s.from,
+            to: s.to,
+            approximate: s.approximate,
+          },
+        ];
       })
     : service.segments;
   for (const segment of segments) {
@@ -963,7 +1065,13 @@ function projectOnServicePath(
       const segKm = haversineKm(a, b);
       const near = nearestOnSegment(coord, a, b);
       if (!best || near.distanceM < best.distanceM) {
-        best = { arcKm: accKm + near.t * segKm, distanceM: near.distanceM };
+        /* A reversed leg's coords run against the traversal, so
+           a point at fraction t along the coords sits at
+           fraction 1 - t along the ride (subtask 1729: without
+           this, 柏 read at the start of its approach leg, 67 m
+           short of the station). */
+        const frac = leg.reversed ? 1 - near.t : near.t;
+        best = { arcKm: accKm + frac * segKm, distanceM: near.distanceM };
       }
       accKm += segKm;
     }
@@ -1000,23 +1108,32 @@ function sliceServicePath(
       const legEnd = accKm + leg.lengthKm;
       accKm = legEnd;
       if (legEnd <= rs || legStart >= re) continue;
-      const fromT =
+      /* Fractions along the traversal (0 at the leg's start in
+         running order). A reversed leg's coords run against it,
+         so its edge-T falls as the traversal advances and its
+         coords slice is taken from the far end (subtask 1729).
+         The sliced leg keeps the edge frame and the flag, so
+         coverage unions still merge on [fromT, toT]. */
+      const gLo =
         leg.lengthKm === 0
           ? 0
-          : leg.fromT +
-            ((Math.max(rs, legStart) - legStart) / leg.lengthKm) *
-              (leg.toT - leg.fromT);
-      const toT =
+          : (Math.max(rs, legStart) - legStart) / leg.lengthKm;
+      const gHi =
         leg.lengthKm === 0
           ? 1
-          : leg.fromT +
-            ((Math.min(re, legEnd) - legStart) / leg.lengthKm) *
-              (leg.toT - leg.fromT);
+          : (Math.min(re, legEnd) - legStart) / leg.lengthKm;
+      const span = leg.toT - leg.fromT;
+      const fromT = leg.reversed
+        ? leg.fromT + (1 - gHi) * span
+        : leg.fromT + gLo * span;
+      const toT = leg.reversed
+        ? leg.fromT + (1 - gLo) * span
+        : leg.fromT + gHi * span;
       const coords = slicePolyline(
         leg.coords,
         leg.lengthKm,
-        (fromT - leg.fromT) / (leg.toT - leg.fromT || 1),
-        (toT - leg.fromT) / (leg.toT - leg.fromT || 1),
+        leg.reversed ? 1 - gHi : gLo,
+        leg.reversed ? 1 - gLo : gHi,
       );
       if (coords.length < 2) continue;
       out.push({

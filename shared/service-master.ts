@@ -1772,7 +1772,10 @@ export function serviceFullPathSnapshot(
       to: segment.to,
       ...(segment.direction ? { direction: segment.direction } : {}),
       ...(segment.approximate ? { approximate: true } : {}),
-      ...(segment.via ? { via: segment.via } : {}),
+      /* An empty via list is not a pin: it would pass every() on
+         replay and leave the branch unpinned (subtask 1729), so
+         only a non-empty list is written. */
+      ...(segment.via?.length ? { via: segment.via } : {}),
     })),
   };
 }

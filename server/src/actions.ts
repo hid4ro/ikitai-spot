@@ -19,6 +19,7 @@ import {
   serviceById,
   serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
+  serviceIsLoop,
   sectionEndpointsKnownToService,
   SERVICE_MASTER_VERSION,
   SERVICE_MATCH_VERSION,
@@ -2198,7 +2199,20 @@ export const Actions = {
         args.toStationName?.trim() ||
         stationRefById(toStationId)?.name ||
         null;
-      // The unique index also covers simultaneous adds that both miss this check.
+      /* The duplicate check is the same ride, not the same
+         written order (subtask 1729, review of 1726): off a loop
+         a section is undirected, so 調布→新宿 after 新宿→調布
+         is the same ride and returns the existing section instead
+         of saving a second row — the drawing already merges the
+         two (sectionsAreSameRide), so only the ledger doubled.
+         On a loop the same arc travelled the other way is a
+         separate ledger entry (a named loop block test pins it:
+         渋谷→新宿 outer and 新宿→渋谷 inner both save), so
+         loops keep the exact written-order match. The unique
+         index still guards simultaneous adds of the same written
+         order; a simultaneous reverse-order add can still slip
+         past it (the index keys the written order), so this check
+         is the guard for the sequential case. */
       const findDuplicate = async () => {
         const existing = await db
           .select()
@@ -2206,12 +2220,22 @@ export const Actions = {
           .where(
             eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
           );
-        return existing.find(
-          (s) =>
-            s.fromStationId === fromStationId &&
-            s.toStationId === toStationId &&
-            (s.direction ?? null) === direction,
-        );
+        return existing.find((s) => {
+          const stored = {
+            fromStationId: s.fromStationId,
+            toStationId: s.toStationId,
+            direction: normalizeSectionDirection(s.direction),
+          };
+          const incoming = { fromStationId, toStationId, direction };
+          if (serviceIsLoop(service.id)) {
+            return (
+              stored.fromStationId === fromStationId &&
+              stored.toStationId === toStationId &&
+              stored.direction === direction
+            );
+          }
+          return sectionsAreSameRide(service.id, stored, incoming);
+        });
       };
       const markPartial = () => db
         .update(schema.riddenLines)

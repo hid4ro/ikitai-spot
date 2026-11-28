@@ -246,6 +246,39 @@ test("addRiddenSection refuses the outer duplicate of a loop primary but keeps t
     VALUES ('山手線', '2026-11-24', 'yamanote', 'partial', '004135', '004072', '2026-11-24', 0)`));
 });
 
+test("addRiddenSection returns the existing section for a reverse-order duplicate (subtask 1729)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "keio",
+      recordedServiceId: "keio",
+      rideState: "partial",
+      fromStationId: "003700",
+      toStationId: "003806",
+    });
+    // 新宿→調布, then the same stretch travelled the other way:
+    // a section is undirected off a loop, so the second add is
+    // the same ride — it returns the existing section instead of
+    // saving a second row (the map already merged the two).
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003700",
+      toStationId: "003966",
+    });
+    expect(added.created).toBe(true);
+    const again = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003966",
+      toStationId: "003700",
+    });
+    expect(again).toEqual({ created: false, id: added.id });
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('京王線', '2026-11-15', 'keio', 'partial', '003700', '003806', '2026-11-27', 0)`));
+});
+
 test("confirmation can relink to a different service", async () => {
   await withLedger(async (_, ctx) => {
     const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
