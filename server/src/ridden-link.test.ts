@@ -17,7 +17,7 @@ type ActionContext = Parameters<typeof Actions.addRiddenLine.handler>[0];
 type TestDatabase = ReturnType<typeof createClient>;
 
 async function withLedger(
-  verify: (client: TestDatabase, ctx: ActionContext) => Promise<void>,
+  verify: (client: TestDatabase, ctx: ActionContext, invalidations: () => number) => Promise<void>,
   seedBeforeStage2?: (client: TestDatabase) => Promise<unknown>,
   seedBeforeRecordedService?: (client: TestDatabase) => Promise<unknown>,
 ) {
@@ -33,8 +33,9 @@ async function withLedger(
       await client.executeMultiple(await Bun.file(new URL(file, directory)).text());
     }
     const db = drizzle(client, { schema });
-    const ctx = { db: () => db, invalidateQueries() {} } as unknown as ActionContext;
-    await verify(client, ctx);
+    let invalidations = 0;
+    const ctx = { db: () => db, invalidateQueries() { invalidations++; } } as unknown as ActionContext;
+    await verify(client, ctx, () => invalidations);
   } finally {
     client.close();
   }
@@ -167,6 +168,327 @@ test("confirming a quarantined link records it explicit and lifts the quarantine
     expect(added.created).toBe(true);
   }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
     VALUES ('中央線（各駅停車）', '2026-11-23', 'jr-chuo-rapid', 'partial', '003700', '003634', 'historical-master', 0)`));
+});
+
+test("addRiddenSection refuses a section that duplicates the row's primary section (subtask 1612)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "jr-chuo-rapid",
+      recordedServiceId: "jr-chuo-rapid",
+      rideState: "partial",
+      fromStationId: "003606",
+      toStationId: "003766",
+    });
+    // Exactly the primary, and the same stretch travelled the
+    // other way round: the same ride, already recorded. (The
+    // five restored sections of subtask 1572 were added exactly
+    // this way, so each ride reached the drawing twice.)
+    for (const [fromStationId, toStationId] of [
+      ["003606", "003766"],
+      ["003766", "003606"],
+    ] as const) {
+      await expect(
+        Actions.addRiddenSection.handler(ctx, {
+          riddenLineId: before.id,
+          fromStationId,
+          toStationId,
+        }),
+      ).rejects.toThrow(/already covers .* as its primary section/);
+    }
+    // A different section on the same row still registers.
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003766",
+      toStationId: "003700",
+      blockId: "jr-chuo-rapid/b1",
+    });
+    expect(added.created).toBe(true);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('JR中央線（快速）', '2026-11-15', 'jr-chuo-rapid', 'partial', '003606', '003766', '2026-11-24', 0)`));
+});
+
+test("addRiddenSection refuses the outer duplicate of a loop primary but keeps the inner way (subtask 1612)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "yamanote",
+      recordedServiceId: "yamanote",
+      rideState: "partial",
+      fromStationId: "004135",
+      toStationId: "004072",
+    });
+    // The primary carries no direction, and its side is the
+    // shorter way (outer) — so the outer addition is the same
+    // ride, while the inner way round is a different ride and
+    // still registers.
+    await expect(
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "004135",
+        toStationId: "004072",
+        direction: "outer",
+      }),
+    ).rejects.toThrow(/already covers .* as its primary section/);
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "004135",
+      toStationId: "004072",
+      direction: "inner",
+    });
+    expect(added.created).toBe(true);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('山手線', '2026-11-24', 'yamanote', 'partial', '004135', '004072', '2026-11-24', 0)`));
+});
+
+test("addRiddenSection returns the existing section for a reverse-order duplicate (subtask 1729)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    expect(before).toMatchObject({
+      serviceId: "keio",
+      recordedServiceId: "keio",
+      rideState: "partial",
+      fromStationId: "003700",
+      toStationId: "003806",
+    });
+    // 新宿→調布, then the same stretch travelled the other way:
+    // a section is undirected off a loop, so the second add is
+    // the same ride — it returns the existing section instead of
+    // saving a second row (the map already merged the two).
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003700",
+      toStationId: "003966",
+    });
+    expect(added.created).toBe(true);
+    const again = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: before.id,
+      fromStationId: "003966",
+      toStationId: "003700",
+    });
+    expect(again).toEqual({ created: false, id: added.id });
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('京王線', '2026-11-15', 'keio', 'partial', '003700', '003806', '2026-11-27', 0)`));
+});
+
+test("simultaneous reverse-order adds save one section (subtask 1733)", async () => {
+  await withLedger(async (_, ctx) => {
+    const [before] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    if (!before) throw new Error("Missing seeded ledger row");
+    // 新宿→調布 and 調布→新宿 sent at the same time: both pass
+    // the duplicate check before either saves, so the atomicity
+    // has to come from the save itself. Off a loop the section
+    // is stored in canonical endpoint order, so the unique index
+    // keys the ride in both written orders and exactly one of
+    // the pair is created; the loser replays the duplicate path
+    // and returns the winner's id.
+    const [a, b] = await Promise.all([
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "003700",
+        toStationId: "003966",
+      }),
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: before.id,
+        fromStationId: "003966",
+        toStationId: "003700",
+      }),
+    ]);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect(a.id).toBe(b.id);
+    const [after] = (await Actions.listRiddenLines.handler(ctx, {})).lines;
+    expect(after?.sections).toHaveLength(1);
+    expect(after?.sections?.[0]).toMatchObject({
+      fromStationId: "003700",
+      toStationId: "003966",
+    });
+  }, (client) => client.execute(`INSERT INTO ridden_lines (name, first_ridden_on, service_id, ride_state, from_station_id, to_station_id, master_version, created_at)
+    VALUES ('京王線', '2026-11-15', 'keio', 'partial', '003700', '003806', '2026-11-27', 0)`));
+});
+
+const shimousaSection = { fromStationId: "003547", toStationId: "003187" };
+
+async function seedMusashinoSectionInShimousaLedger(client: TestDatabase, ctx: ActionContext) {
+  const { id } = await Actions.addRiddenLine.handler(ctx, { ...aRide, name: "しもうさ号" });
+  if (id == null) throw new Error("Missing しもうさ号 row");
+  await client.execute({
+    sql: `INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, from_station_name,
+          to_station_id, to_station_name, recorded_service_id, created_at)
+          VALUES (?, '003187', '東松戸', '003547', '西船橋', 'jr-musashino', 0)`,
+    args: [id],
+  });
+  return id;
+}
+
+test("attributing an existing section counts the ride and keeps its recording service (review follow-up)", async () => {
+  await withLedger(async (client, ctx) => {
+    const id = await seedMusashinoSectionInShimousaLedger(client, ctx);
+    await client.execute({ sql: "UPDATE ridden_lines SET ride_state = 'partial' WHERE id = ?", args: [id] });
+    const before = computeRiddenLineCoverage(
+      (await Actions.listRiddenLines.handler(ctx, {})).lines, GEOMETRIES, 597,
+    );
+    expect(before.perService.get("jr-shimousa")?.riddenKm ?? 0).toBe(0);
+
+    const added = await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: id, ...shimousaSection,
+    });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]?.sections).toEqual([expect.objectContaining({
+      id: added.id, recordedServiceId: "jr-musashino", attributedServiceId: "jr-shimousa",
+    })]);
+    expect(added.created).toBe(false);
+    const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+    expect(coverage.perService.get("jr-shimousa")?.riddenKm).toBeCloseTo(7.696, 3);
+  });
+});
+
+test("service-link confirmation accepts both the recording service and later attribution (review follow-up)", async () => {
+  await withLedger(async (client, ctx) => {
+    const id = await seedMusashinoSectionInShimousaLedger(client, ctx);
+    await Actions.addRiddenSection.handler(ctx, { riddenLineId: id, ...shimousaSection });
+
+    for (const serviceId of ["jr-musashino", "jr-shimousa"]) {
+      // Start from a previously reviewed unlink so the row can be confirmed.
+      await client.execute({
+        sql: "UPDATE ridden_lines SET service_id = NULL, service_link_source = 'explicit' WHERE id = ?",
+        args: [id],
+      });
+      expect(await Actions.confirmRiddenServiceLink.handler(ctx, { id, serviceId }))
+        .toEqual({ ok: true, serviceId });
+      const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+      const coverage = computeRiddenLineCoverage(lines, GEOMETRIES, 597);
+      expect(coverage.perService.get(serviceId)?.riddenKm).toBeCloseTo(7.696, 3);
+    }
+  });
+});
+
+test("simultaneous non-loop adds with different directions save one undirected section (review follow-up)", async () => {
+  await withLedger(async (_, ctx) => {
+    const { id } = await Actions.addRiddenLine.handler(ctx, { ...aRide, name: "京王線" });
+    if (id == null) throw new Error("Missing 京王線 row");
+    const [a, b] = await Promise.all([
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: id, fromStationId: "003700", toStationId: "003966",
+      }),
+      Actions.addRiddenSection.handler(ctx, {
+        riddenLineId: id, fromStationId: "003966", toStationId: "003700", direction: "outer",
+      }),
+    ]);
+    expect([a.created, b.created].sort()).toEqual([false, true]);
+    expect(a.id).toBe(b.id);
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]?.sections).toEqual([expect.objectContaining({
+      fromStationId: "003700", toStationId: "003966", direction: null,
+    })]);
+  });
+});
+
+test("a fitting legacy duplicate takes precedence over an earlier foreign row (review follow-up)", async () => {
+  await withLedger(async (client, ctx) => {
+    const id = await seedMusashinoSectionInShimousaLedger(client, ctx);
+    const fitting = await client.execute({
+      sql: `INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id,
+            direction, recorded_service_id, created_at)
+            VALUES (?, '003547', '003187', 'outer', 'jr-shimousa', 0) RETURNING id`,
+      args: [id],
+    });
+    const fittingId = fitting.rows[0]?.id;
+    if (typeof fittingId !== "number") throw new Error("Missing fitting section");
+    expect(await Actions.addRiddenSection.handler(ctx, { riddenLineId: id, ...shimousaSection }))
+      .toEqual({ created: false, id: fittingId });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]?.sections).toEqual([
+      expect.objectContaining({ recordedServiceId: "jr-musashino", attributedServiceId: null }),
+      expect.objectContaining({ recordedServiceId: "jr-shimousa", attributedServiceId: null }),
+    ]);
+  });
+});
+
+test("an incompatible named block rejects the add and keeps its provenance (review follow-up)", async () => {
+  await withLedger(async (client, ctx, invalidations) => {
+    const { id } = await Actions.addRiddenLine.handler(ctx, { ...aRide, name: "しもうさ号" });
+    if (id == null) throw new Error("Missing しもうさ号 row");
+    await client.execute({
+      sql: `INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id,
+            block_id, recorded_service_id, created_at)
+            VALUES (?, '003004', '003547', 'jr-musashino/b2', 'jr-musashino', 0)`,
+      args: [id],
+    });
+    const before = await Actions.listRiddenLines.handler(ctx, {});
+    const beforeInvalidations = invalidations();
+    await expect(Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: id, fromStationId: "003004", toStationId: "003547",
+    })).rejects.toThrow(/block jr-musashino\/b2 does not fit しもうさ号/);
+    expect(await Actions.listRiddenLines.handler(ctx, {})).toEqual(before);
+    expect(invalidations()).toBe(beforeInvalidations);
+  });
+});
+
+test("attaching the current service's named block preserves the earlier recording route (review follow-up)", async () => {
+  await withLedger(async (client, ctx) => {
+    const { id } = await Actions.addRiddenLine.handler(ctx, { ...aRide, name: "しもうさ号" });
+    if (id == null) throw new Error("Missing しもうさ号 row");
+    await client.execute({
+      sql: `INSERT INTO ridden_line_sections (ridden_line_id, from_station_id, to_station_id,
+            recorded_service_id, created_at)
+            VALUES (?, '003004', '003547', 'jr-musashino', 0)`,
+      args: [id],
+    });
+    await Actions.addRiddenSection.handler(ctx, {
+      riddenLineId: id, fromStationId: "003004", toStationId: "003547", blockId: "jr-shimousa/b3",
+    });
+    const { lines } = await Actions.listRiddenLines.handler(ctx, {});
+    expect(lines[0]?.sections).toEqual([expect.objectContaining({
+      blockId: "jr-shimousa/b3", recordedServiceId: "jr-musashino", attributedServiceId: "jr-shimousa",
+    })]);
+
+    await client.execute({
+      sql: "UPDATE ridden_lines SET service_id = NULL, service_link_source = 'explicit' WHERE id = ?",
+      args: [id],
+    });
+    expect(await Actions.confirmRiddenServiceLink.handler(ctx, { id, serviceId: "jr-musashino" }))
+      .toEqual({ ok: true, serviceId: "jr-musashino" });
+  });
+});
+
+test("attributing a section on an already-partial row notifies subscribers once (review follow-up)", async () => {
+  await withLedger(async (client, ctx, invalidations) => {
+    const id = await seedMusashinoSectionInShimousaLedger(client, ctx);
+    await client.execute({ sql: "UPDATE ridden_lines SET ride_state = 'partial' WHERE id = ?", args: [id] });
+    const beforeInvalidations = invalidations();
+    const args = { riddenLineId: id, ...shimousaSection };
+    const added = await Actions.addRiddenSection.handler(ctx, args);
+    expect(invalidations() - beforeInvalidations).toBe(1);
+    expect(await Actions.addRiddenSection.handler(ctx, args)).toEqual(added);
+    expect(invalidations() - beforeInvalidations).toBe(1);
+  });
+});
+
+test("a failed ride-state repair rolls back a section attribution (review follow-up)", async () => {
+  await withLedger(async (client, ctx, invalidations) => {
+    const id = await seedMusashinoSectionInShimousaLedger(client, ctx);
+    const before = await Actions.listRiddenLines.handler(ctx, {});
+    const beforeInvalidations = invalidations();
+    await client.execute(`
+      CREATE TRIGGER reject_attribution_state BEFORE UPDATE OF ride_state ON ridden_lines
+      BEGIN
+        SELECT RAISE(ABORT, 'ride state update failed');
+      END
+    `);
+    await expect(Actions.addRiddenSection.handler(ctx, { riddenLineId: id, ...shimousaSection }))
+      .rejects.toThrow(/ride state update failed/);
+    expect(await Actions.listRiddenLines.handler(ctx, {})).toEqual(before);
+    expect(invalidations()).toBe(beforeInvalidations);
+  });
 });
 
 test("confirmation can relink to a different service", async () => {

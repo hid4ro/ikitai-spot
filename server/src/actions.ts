@@ -15,9 +15,11 @@ import {
   isRiddenServiceLinkReviewable,
   recordedSectionFitsService,
   resolveRiddenService,
+  sectionsAreSameRide,
   serviceById,
   serviceExistsAtMasterVersion,
   serviceFullPathSnapshot,
+  serviceIsLoop,
   sectionEndpointsKnownToService,
   SERVICE_MASTER_VERSION,
   SERVICE_MATCH_VERSION,
@@ -48,6 +50,7 @@ const riddenSectionSchema = z.object({
   direction: z.enum(["inner", "outer"]).nullable(),
   blockId: z.string().nullable(),
   recordedServiceId: z.string().nullable(),
+  attributedServiceId: z.string().nullable(),
 });
 
 /* The ridden-lines ride fields (stage 1, subtask 1420): which
@@ -102,9 +105,9 @@ type RideFields = {
      high).
    - full: the service and a master version that reproduces its
      range are required — and the version must be one the master
-     actually knows (the current version or the frozen migration
-     version); a blank or made-up version ("bogus") is rejected,
-     not stored. The supplied version is trimmed before both the
+     actually knows (the current version or a past version in
+     MASTER_VERSION_HISTORY); a blank or made-up version
+     ("bogus") is rejected, not stored. The supplied version is trimmed before both the
      check and the save, so a padded version (" 2026-11-24 ") is
      stored as the version it validated as, never with its spaces
      (review round 3, low) — and a whitespace-only version still
@@ -243,17 +246,16 @@ export function resolveRideFields(
       `resolveRideFields: full ride for "${name}" names master version ${masterVersion}, which did not contain "${service.id}"`,
     );
   }
-  /* The snapshot is cut from the current master, so it is stored
-     only when the ride was recorded at the current version. A
-     full ride recorded at the frozen migration version keeps
-     null: its range is the current master's range for that
-     service in practice, and the client falls back to the
-     current master when no snapshot is stored — a snapshot cut
-     from the wrong version would be worse than none. */
-  const snapshot =
-    masterVersion === SERVICE_MASTER_VERSION
-      ? serviceFullPathSnapshot(service.id)
-      : null;
+  /* The snapshot is cut from the master at the ride's own
+     version (serviceFullPathSnapshot, which reads the segments
+     that version held): a full ride recorded at an older master
+     version keeps the range that version contained, and the
+     client paints it from the snapshot instead of falling back
+     to the current master — which may have extended the service
+     since (subtask 1611, review of 1566: a snapshot cut from
+     the wrong version would be worse than none, so the version
+     the snapshot is cut at is the version the ride names). */
+  const snapshot = serviceFullPathSnapshot(service.id, masterVersion);
   return {
     ...link,
     recordedServiceId: service.id,
@@ -318,6 +320,7 @@ export function riddenLinkFitProblem(
     direction: string | null;
     blockId: string | null;
     recordedServiceId: string | null;
+    attributedServiceId?: string | null;
   }[],
   targetServiceId: string | null,
 ): string | null {
@@ -1771,6 +1774,7 @@ export const Actions = {
             direction: normalizeSectionDirection(s.direction),
             blockId: s.blockId,
             recordedServiceId: s.recordedServiceId,
+            attributedServiceId: s.attributedServiceId,
           })),
         })),
         total: rows.length,
@@ -1927,6 +1931,7 @@ export const Actions = {
           direction: schema.riddenLineSections.direction,
           blockId: schema.riddenLineSections.blockId,
           recordedServiceId: schema.riddenLineSections.recordedServiceId,
+          attributedServiceId: schema.riddenLineSections.attributedServiceId,
         })
         .from(schema.riddenLineSections)
         .where(eq(schema.riddenLineSections.riddenLineId, args.id));
@@ -2075,7 +2080,7 @@ export const Actions = {
 
   addRiddenSection: defineAction({
     description:
-      "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID if the existing section has none.",
+      "Adds one section to a ridden-lines ledger row, either by picking a block or by entering two stations the service is known to serve. Boundary and listed mid-block stations are accepted. Non-loop sections may run either way and are saved without direction. Loop sections require a direction, and a named loop block must match both the ordered endpoints and the direction in the master. Saving a section changes an unknown ride to partial in the same batch. Full rides cannot gain sections. A duplicate returns the existing section, repairs an inconsistent unknown ride state, and can attach a validated block ID. A blockless section may gain an explicit service attribution while keeping its original recording service. An incompatible named block prevents the add and is reported to the caller. A section that duplicates the row's primary section is refused instead (subtask 1612): the same ride is already recorded, and adding it again would send it to the drawing twice.",
     request: z.object({
       riddenLineId: z.number().int().positive(),
       fromStationId: z.string().max(20),
@@ -2116,7 +2121,8 @@ export const Actions = {
       }
       const fromStationId = args.fromStationId.trim();
       const toStationId = args.toStationId.trim();
-      const direction = args.direction ?? null;
+      const loop = serviceIsLoop(service.id);
+      const direction = loop ? args.direction ?? null : null;
       const problem = validateSectionEndpoints(
         service.id,
         fromStationId,
@@ -2151,6 +2157,42 @@ export const Actions = {
           );
         }
       }
+      /* A section the row already carries as its primary section
+         is the same ride, not a new one (subtask 1612): the five
+         restored sections of subtask 1572 were added exactly
+         this way, so each ride reached the drawing twice. Refuse
+         it here — the primary stays the one entry, and the
+         caller learns the ride is already recorded — instead of
+         silently creating the duplicate (an added-added duplicate
+         below stays idempotent, since it already has a section
+         to return). The check mirrors what the drawing keeps:
+         only a primary that actually fits this service counts,
+         so a relinked row can still gain the section as its own
+         entry. */
+      if (
+        normalizeRideState(line.rideState) === "partial" &&
+        line.fromStationId &&
+        line.toStationId &&
+        recordedSectionFitsService(service.id, {
+          fromStationId: line.fromStationId,
+          toStationId: line.toStationId,
+          direction: null,
+          recordedServiceId: line.recordedServiceId,
+        }) &&
+        sectionsAreSameRide(
+          service.id,
+          {
+            fromStationId: line.fromStationId,
+            toStationId: line.toStationId,
+            direction: null,
+          },
+          { fromStationId, toStationId, direction },
+        )
+      ) {
+        throw new Error(
+          `addRiddenSection: "${line.name}" already covers ${fromStationId}→${toStationId} as its primary section — the same ride is already recorded`,
+        );
+      }
       // Station names come from the master when the caller omits
       // them (the block list always sends them; a hand-entered
       // section may not).
@@ -2162,21 +2204,69 @@ export const Actions = {
         args.toStationName?.trim() ||
         stationRefById(toStationId)?.name ||
         null;
-      // The unique index also covers simultaneous adds that both miss this check.
-      const findDuplicate = async () => {
+      /* The duplicate check is the same ride, not the same
+         written order (subtask 1729, review of 1726): off a loop
+         a section is undirected, so 調布→新宿 after 新宿→調布
+         is the same ride and returns the existing section instead
+         of saving a second row — the drawing already merges the
+         two (sectionsAreSameRide), so only the ledger doubled.
+         On a loop the same arc travelled the other way is a
+         separate ledger entry (a named loop block test pins it:
+         渋谷→新宿 outer and 新宿→渋谷 inner both save), so
+         loops keep the exact written-order match. Simultaneous
+         adds are the unique index's job: off a loop the section
+         is saved in canonical endpoint order (below), so the
+         index keys the ride in both written orders and the loser
+         of a simultaneous pair replays the duplicate path. */
+      const saveReversed = !loop && fromStationId > toStationId;
+      const saveFromStationId = saveReversed ? toStationId : fromStationId;
+      const saveToStationId = saveReversed ? fromStationId : toStationId;
+      const saveFromName = saveReversed ? toName : fromName;
+      const saveToName = saveReversed ? fromName : toName;
+      const incoming = { fromStationId, toStationId, direction };
+      const findSameRide = async () => {
         const existing = await db
           .select()
           .from(schema.riddenLineSections)
-          .where(
-            eq(schema.riddenLineSections.riddenLineId, args.riddenLineId),
-          );
-        return existing.find(
-          (s) =>
-            s.fromStationId === fromStationId &&
-            s.toStationId === toStationId &&
-            (s.direction ?? null) === direction,
-        );
+          .where(eq(schema.riddenLineSections.riddenLineId, args.riddenLineId))
+          .orderBy(asc(schema.riddenLineSections.id));
+        let fitting: (typeof existing)[number] | undefined;
+        let available: (typeof existing)[number] | undefined;
+        let conflict: (typeof existing)[number] | undefined;
+        for (const section of existing) {
+          const stored = {
+            ...section,
+            direction: normalizeSectionDirection(section.direction),
+          };
+          const sameRide = loop
+            ? stored.fromStationId === fromStationId &&
+              stored.toStationId === toStationId && stored.direction === direction
+            : sectionsAreSameRide(service.id, stored, incoming);
+          if (!sameRide) continue;
+          if (recordedSectionFitsService(service.id, stored)) {
+            if (blockId == null || section.blockId === blockId) {
+              return { section, fits: true };
+            }
+            fitting ??= section;
+            continue;
+          }
+          // A legacy row can carry both orders. Prefer a candidate
+          // that can accept the attribution over one that would refuse it.
+          if (section.blockId == null && section.attributedServiceId == null) {
+            available ??= section;
+          } else {
+            conflict ??= section;
+          }
+        }
+        if (fitting) return { section: fitting, fits: true };
+        const fallback = available ?? conflict;
+        return fallback && { section: fallback, fits: false };
       };
+      const currentLink = and(
+        eq(schema.riddenLines.id, args.riddenLineId),
+        eq(schema.riddenLines.serviceId, service.id),
+        sql`${schema.riddenLines.serviceLinkSource} IS ${line.serviceLinkSource}`,
+      );
       const markPartial = () => db
         .update(schema.riddenLines)
         .set({ rideState: "partial" })
@@ -2190,47 +2280,76 @@ export const Actions = {
         .returning({ id: schema.riddenLines.id });
 
       const reuseSection = async (
-        existing: typeof schema.riddenLineSections.$inferSelect,
+        match: NonNullable<Awaited<ReturnType<typeof findSameRide>>>,
       ) => {
-        // Keep a later block pick on the existing hand entry when its route fits.
-        if (blockId && !existing.blockId) {
-          if (!recordedSectionFitsService(service.id, {
-            ...existing,
-            direction: normalizeSectionDirection(existing.direction),
-          })) {
-            throw new Error(
-              `addRiddenSection: the existing section's recorded route cannot be attributed to ${service.displayName}`,
-            );
-          }
-          await db.batch([
+        const { section, fits } = match;
+        if (!fits && section.blockId != null) {
+          throw new Error(
+            `addRiddenSection: the existing section's block ${section.blockId} does not fit ${service.displayName}`,
+          );
+        }
+        if (!fits && section.attributedServiceId != null) {
+          throw new Error(
+            `addRiddenSection: the existing section already has an attribution to ${section.attributedServiceId} and cannot be attributed to ${service.displayName}`,
+          );
+        }
+
+        const attachBlock = blockId != null && section.blockId == null;
+        if (!fits || attachBlock) {
+          // A named pick supplies route evidence for the current service.
+          // Preserve any different recording service when attaching it.
+          const attributedServiceId = !fits ||
+            (attachBlock && section.recordedServiceId != null &&
+              section.recordedServiceId !== service.id)
+            ? section.attributedServiceId ?? service.id
+            : section.attributedServiceId;
+          const [changed, repaired] = await db.batch([
             db.update(schema.riddenLineSections)
-              .set({ blockId })
+              .set({
+                attributedServiceId,
+                ...(attachBlock ? { blockId } : {}),
+              })
               .where(and(
-                eq(schema.riddenLineSections.id, existing.id),
+                eq(schema.riddenLineSections.id, section.id),
                 isNull(schema.riddenLineSections.blockId),
-              )),
+                or(
+                  sql`${schema.riddenLineSections.attributedServiceId} IS ${section.attributedServiceId}`,
+                  attachBlock
+                    ? sql`${schema.riddenLineSections.attributedServiceId} IS ${attributedServiceId}`
+                    : undefined,
+                ),
+                exists(db.select({ id: schema.riddenLines.id })
+                  .from(schema.riddenLines)
+                  .where(and(currentLink, notInArray(schema.riddenLines.rideState, ["full"])))),
+              ))
+              .returning({ id: schema.riddenLineSections.id }),
             markPartial(),
           ]);
-          ctx.invalidateQueries();
+          if (changed.length > 0 || repaired.length > 0) ctx.invalidateQueries();
+          if (changed.length === 0) {
+            const current = await findSameRide();
+            if (!current?.fits || (attachBlock && current.section.blockId !== blockId)) {
+              throw new Error("addRiddenSection: the ledger changed during the add. Reload and try again.");
+            }
+            return { created: false, id: current.section.id };
+          }
         } else if ((await markPartial()).length > 0) {
           ctx.invalidateQueries();
         }
-        return { created: false, id: existing.id };
+        return { created: false, id: section.id };
       };
-      const duplicate = await findDuplicate();
-      if (duplicate) {
-        return reuseSection(duplicate);
-      }
+      const match = await findSameRide();
+      if (match) return reuseSection(match);
       let insertedId: number | null;
       try {
         const [inserted] = await db.batch([
           db.insert(schema.riddenLineSections)
             .values({
               riddenLineId: args.riddenLineId,
-              fromStationId,
-              fromStationName: fromName,
-              toStationId,
-              toStationName: toName,
+              fromStationId: saveFromStationId,
+              fromStationName: saveFromName,
+              toStationId: saveToStationId,
+              toStationName: saveToName,
               direction,
               blockId,
               recordedServiceId: service.id,
@@ -2241,7 +2360,7 @@ export const Actions = {
         insertedId = inserted[0]?.id ?? null;
       } catch (error) {
         if (isUniqueConstraintError(error)) {
-          const winner = await findDuplicate();
+          const winner = await findSameRide();
           if (winner) {
             return reuseSection(winner);
           }
