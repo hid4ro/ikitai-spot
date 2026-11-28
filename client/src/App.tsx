@@ -7940,7 +7940,11 @@ function RiddenLinesBlock({
       }
       invalidateLines();
     },
-    onError: () => setBlockPickerError("区間の追加に失敗しました"),
+    onError: (error) => setBlockPickerError(
+      error.message.includes("addRiddenSection: the existing section's block ")
+        ? "同じ区間が別系統のブロックとして記録されているため、追加できません。"
+        : "区間の追加に失敗しました",
+    ),
   });
   const deleteSectionMutation = useMutation({
     mutationFn: async (id: number) => await api.deleteRiddenSection({ id }),

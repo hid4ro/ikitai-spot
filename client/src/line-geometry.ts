@@ -1501,6 +1501,7 @@ type RecordedSection = {
   direction: "inner" | "outer" | null;
   blockId?: string | null;
   recordedServiceId?: string | null;
+  attributedServiceId?: string | null;
 };
 
 type RecordedRiddenLine = RiddenServiceLink & {

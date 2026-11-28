@@ -139,6 +139,8 @@ export const riddenLineSections = sqliteTable(
     blockId: text("block_id"),
     // A section can be recorded under a different link from the primary ride.
     recordedServiceId: text("recorded_service_id"),
+    // A later explicit add can also confirm coverage for another service.
+    attributedServiceId: text("attributed_service_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
       .$defaultFn(() => new Date()),

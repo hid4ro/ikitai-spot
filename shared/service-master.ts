@@ -1364,8 +1364,9 @@ export function sectionRouteAmbiguous(
   return false;
 }
 
-/* A named block is evidence for its own section. Otherwise use the
-   recording-time link, with route inference for older or corrected links. */
+/* An explicit attribution made by a later add is evidence alongside
+   the recording-time service. Otherwise a named block supplies the route
+   evidence, with route inference for older or corrected blockless links. */
 export function recordedSectionFitsService(
   serviceId: string,
   section: {
@@ -1374,14 +1375,19 @@ export function recordedSectionFitsService(
     direction?: ServiceBlock["direction"] | null;
     blockId?: string | null;
     recordedServiceId?: string | null;
+    attributedServiceId?: string | null;
   },
 ): boolean {
-  const { fromStationId, toStationId, direction, blockId, recordedServiceId } = section;
+  const { fromStationId, toStationId, direction, blockId, recordedServiceId, attributedServiceId } = section;
   if (
     fromStationId === toStationId ||
     !sectionEndpointsKnownToService(serviceId, fromStationId, toStationId)
   ) {
     return false;
+  }
+  if (attributedServiceId != null &&
+      (attributedServiceId === serviceId || recordedServiceId === serviceId)) {
+    return true;
   }
   if (blockId != null) {
     const block = blockById(serviceId, blockId);
